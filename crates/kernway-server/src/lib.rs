@@ -6,5 +6,5 @@ pub mod router;
 pub mod app;
 pub mod middleware;
 
-pub use app::{AppBuilder, KernwayApp};
+pub use app::{AppBuilder, KeepAliveConfig, KernwayApp};
 pub use router::Router;

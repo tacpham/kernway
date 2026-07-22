@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::net::TcpStream;
 
-use kernway_core::request::Request;
+use kernway_core::request::{HttpVersion, Request};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -64,7 +64,7 @@ pub fn parse_bytes(buf: &[u8]) -> Result<Parsed, ParseError> {
     let mut lines = head.lines();
 
     let request_line = lines.next().unwrap_or("").trim();
-    let (method, path, query) = parse_request_line(request_line)?;
+    let (method, path, query, version) = parse_request_line(request_line)?;
 
     let mut headers: HashMap<String, String> = HashMap::new();
     for line in lines {
@@ -94,6 +94,7 @@ pub fn parse_bytes(buf: &[u8]) -> Result<Parsed, ParseError> {
         request: Request {
             method,
             path,
+            version,
             headers,
             query,
             path_params: HashMap::new(), // filled by the router
@@ -117,8 +118,10 @@ fn find_head_end(buf: &[u8]) -> Option<usize> {
     None
 }
 
-/// `GET /path?query HTTP/1.1` → method, path, decoded query pairs.
-fn parse_request_line(line: &str) -> Result<(String, String, HashMap<String, String>), ParseError> {
+/// `GET /path?query HTTP/1.1` → method, path, query pairs, version.
+type RequestLine = (String, String, HashMap<String, String>, HttpVersion);
+
+fn parse_request_line(line: &str) -> Result<RequestLine, ParseError> {
     let parts: Vec<&str> = line.splitn(3, ' ').collect();
     if parts.len() < 2 {
         return Err(ParseError::BadRequestLine(line.to_string()));
@@ -128,10 +131,17 @@ fn parse_request_line(line: &str) -> Result<(String, String, HashMap<String, Str
         Some(q) => (&full_path[..q], &full_path[q + 1..]),
         None => (full_path, ""),
     };
+    // A missing version means HTTP/0.9, which nobody speaks any more; treating
+    // it as 1.1 would wrongly hold the connection open, so it falls to 1.0.
+    let version = match parts.get(2).map(|v| v.trim()) {
+        Some("HTTP/1.0") | None => HttpVersion::Http10,
+        _ => HttpVersion::Http11,
+    };
     Ok((
         parts[0].to_uppercase(),
         path.to_string(),
         parse_query_string(query_str),
+        version,
     ))
 }
 
@@ -166,6 +176,10 @@ pub fn parse_from_reader<R: BufRead>(mut reader: R) -> Result<Request, ParseErro
     }
     let method    = parts[0].to_uppercase();
     let full_path = parts[1];
+    let version   = match parts.get(2).map(|v| v.trim()) {
+        Some("HTTP/1.0") | None => HttpVersion::Http10,
+        _ => HttpVersion::Http11,
+    };
 
     // Split the path and query string
     let (path, query_str) = match full_path.find('?') {
@@ -208,6 +222,7 @@ pub fn parse_from_reader<R: BufRead>(mut reader: R) -> Result<Request, ParseErro
     Ok(Request {
         method,
         path: path.to_string(),
+        version,
         headers,
         query,
         path_params: HashMap::new(), // filled by router

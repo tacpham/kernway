@@ -10,16 +10,40 @@
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use di_core::AppContext;
 use kernway_core::{error::StatusCode, request::Request, response::Response};
-use kernway_http::{encode_response, parse_bytes, Parsed};
+use kernway_http::{encode_response, encode_response_with, parse_bytes, Connection, Parsed};
 use rt_net::{AsyncTcpStream, ShardConfig};
 
 use crate::{middleware::Middleware, router::Router};
 
 /// Read buffer growth step per connection.
 const READ_CHUNK: usize = 8 * 1024;
+
+/// Bounds on persistent connections.
+#[derive(Debug, Clone, Copy)]
+pub struct KeepAliveConfig {
+    /// Serve more than one request per connection.
+    pub enabled: bool,
+    /// How long to wait for the next request before closing an idle connection.
+    pub idle_timeout: Duration,
+    /// Most requests to serve on one connection before closing it.
+    pub max_requests: u32,
+}
+
+impl Default for KeepAliveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            // Long enough for a browser to reuse the connection across a page
+            // load, short enough that abandoned sockets do not accumulate.
+            idle_timeout: Duration::from_secs(5),
+            max_requests: 1000,
+        }
+    }
+}
 
 fn apply_middleware(
     middlewares: &[Arc<dyn Middleware>],
@@ -39,6 +63,7 @@ pub struct AppBuilder {
     context:     AppContext,
     middlewares: Vec<Arc<dyn Middleware>>,
     shards:      Option<usize>,
+    keep_alive:  KeepAliveConfig,
 }
 
 impl AppBuilder {
@@ -49,6 +74,7 @@ impl AppBuilder {
             context: AppContext::new(),
             middlewares: Vec::new(),
             shards: None,
+            keep_alive: KeepAliveConfig::default(),
         }
     }
 
@@ -61,6 +87,12 @@ impl AppBuilder {
     /// Number of shards (threads). Defaults to one per CPU.
     pub fn workers(mut self, workers: usize) -> Self {
         self.shards = Some(workers);
+        self
+    }
+
+    /// Tune persistent connections (idle timeout, request cap, on/off).
+    pub fn keep_alive(mut self, keep_alive: KeepAliveConfig) -> Self {
+        self.keep_alive = keep_alive;
         self
     }
 
@@ -111,6 +143,7 @@ impl AppBuilder {
         KernwayApp {
             addr: self.addr,
             shards: self.shards,
+            keep_alive: self.keep_alive,
             router: Arc::new(self.router),
             context: Arc::new(self.context),
             middlewares: Arc::new(self.middlewares),
@@ -128,6 +161,7 @@ impl Default for AppBuilder {
 pub struct KernwayApp {
     addr:        String,
     shards:      Option<usize>,
+    keep_alive:  KeepAliveConfig,
     router:      Arc<Router>,
     context:     Arc<AppContext>,
     middlewares: Arc<Vec<Arc<dyn Middleware>>>,
@@ -159,55 +193,91 @@ impl KernwayApp {
         let router = Arc::clone(&self.router);
         let context = Arc::clone(&self.context);
         let middlewares = Arc::clone(&self.middlewares);
+        let keep_alive = self.keep_alive;
 
         rt_net::run_shards(config, move |stream| {
             let router = Arc::clone(&router);
             let context = Arc::clone(&context);
             let middlewares = Arc::clone(&middlewares);
             async move {
-                serve_connection(stream, router, context, middlewares).await;
+                serve_connection(stream, router, context, middlewares, keep_alive).await;
             }
         })
     }
 }
 
-/// Read one request off `stream`, answer it, and close.
+/// Serve requests on `stream` until the connection closes.
 ///
-/// `connection: close` is still the contract (keep-alive lands in v0.4), so the
-/// task ends after a single exchange.
+/// Persistent by default for HTTP/1.1 (RFC 9112 §9.3). Two bounds keep a
+/// kept-alive connection from being a free resource hold:
+///
+/// - [`KeepAliveConfig::idle_timeout`] — a client that opens a connection and
+///   goes quiet is dropped instead of pinning a task and an fd forever;
+/// - [`KeepAliveConfig::max_requests`] — an upper bound per connection, so
+///   buffers and any per-connection state are eventually reclaimed.
 async fn serve_connection(
     mut stream: AsyncTcpStream,
     router: Arc<Router>,
     context: Arc<AppContext>,
     middlewares: Arc<Vec<Arc<dyn Middleware>>>,
+    keep_alive: KeepAliveConfig,
 ) {
     let mut buf: Vec<u8> = Vec::with_capacity(READ_CHUNK);
     let mut chunk = vec![0u8; READ_CHUNK];
+    let mut served: u32 = 0;
 
-    let request = loop {
-        match parse_bytes(&buf) {
-            Ok(Parsed::Complete { request, .. }) => break request,
-            Ok(Parsed::Incomplete) => {}
-            Err(err) => {
-                let response = Response::new(StatusCode::BAD_REQUEST)
-                    .content_type("text/plain")
-                    .body(err.to_string().into_bytes());
-                let _ = stream.write_all(&encode_response(&response)).await;
-                return;
+    loop {
+        // --- Read until one whole request is buffered ---
+        let (request, consumed) = loop {
+            match parse_bytes(&buf) {
+                Ok(Parsed::Complete { request, consumed }) => break (request, consumed),
+                Ok(Parsed::Incomplete) => {}
+                Err(err) => {
+                    let response = Response::new(StatusCode::BAD_REQUEST)
+                        .content_type("text/plain")
+                        .body(err.to_string().into_bytes());
+                    let _ = stream.write_all(&encode_response(&response)).await;
+                    return close(&mut stream);
+                }
             }
-        }
-        match stream.read(&mut chunk).await {
-            // EOF before a complete request: the client went away, or it is a
-            // port scan. Nothing to answer.
-            Ok(0) | Err(_) => return,
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
-        }
-    };
+            // The idle timer covers waiting for the *first* byte of a request as
+            // well as a stalled one mid-way, which is what a slowloris does.
+            let read = rt_core::timeout(keep_alive.idle_timeout, stream.read(&mut chunk)).await;
+            match read {
+                // Timed out, EOF, or a broken connection: nothing left to serve.
+                Err(_) | Ok(Ok(0)) | Ok(Err(_)) => return close(&mut stream),
+                Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
+            }
+        };
 
-    let response = handle(request, &router, &context, &middlewares);
-    let _ = stream.write_all(&encode_response(&response)).await;
-    // Half-close so the peer sees EOF immediately rather than waiting on a
-    // timeout for the `connection: close` we promised.
+        // --- Answer it ---
+        served += 1;
+        let client_wants_more = request.wants_keep_alive();
+        let persist = keep_alive.enabled && client_wants_more && served < keep_alive.max_requests;
+
+        let response = handle(request, &router, &context, &middlewares);
+        let connection = if persist { Connection::KeepAlive } else { Connection::Close };
+        if stream
+            .write_all(&encode_response_with(&response, connection))
+            .await
+            .is_err()
+        {
+            return; // peer vanished mid-write; nothing to half-close
+        }
+
+        if !persist {
+            return close(&mut stream);
+        }
+
+        // Drop this request's bytes; anything left is a pipelined next request
+        // and must survive into the following iteration.
+        buf.drain(..consumed);
+    }
+}
+
+/// Half-close the write side so the peer sees EOF at once instead of waiting on
+/// its own timeout for the `connection: close` we announced.
+fn close(stream: &mut AsyncTcpStream) {
     let _ = stream.shutdown(std::net::Shutdown::Write);
 }
 
@@ -312,7 +382,14 @@ mod tests {
 
     /// Serve exactly one connection on an ephemeral port and return what the
     /// client received — the real socket → parse → handle → encode path.
+    ///
+    /// Keep-alive off: the client reads to EOF, so a persistent connection
+    /// would make every caller wait out the idle timeout.
     fn round_trip(router: Router, raw_request: &'static str) -> String {
+        round_trip_with(router, raw_request, KeepAliveConfig { enabled: false, ..Default::default() })
+    }
+
+    fn round_trip_with(router: Router, raw_request: &'static str, keep_alive: KeepAliveConfig) -> String {
         use std::io::{Read, Write};
 
         let ex = rt_core::Executor::new().unwrap();
@@ -337,7 +414,7 @@ mod tests {
         let middlewares: Arc<Vec<Arc<dyn Middleware>>> = Arc::new(Vec::new());
         ex.block_on(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_connection(stream, router, context, middlewares).await;
+            serve_connection(stream, router, context, middlewares, keep_alive).await;
         })
         .unwrap();
 
@@ -383,5 +460,182 @@ mod tests {
     fn a_bad_address_is_reported_instead_of_panicking() {
         let err = KernwayApp::builder().bind("not-an-address").build().run().unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+}
+
+#[cfg(test)]
+mod keep_alive_tests {
+    use super::*;
+    use kernway_core::request::HttpVersion;
+    use std::io::{Read, Write};
+    use std::time::Instant;
+
+    fn ping_router() -> Router {
+        let mut router = Router::new();
+        router.add("GET", "/n", Arc::new(|_req, _ctx| {
+            Response::new(StatusCode::OK).body(b"ok".to_vec())
+        }));
+        router
+    }
+
+    /// Serve one connection with `keep_alive`, driving it from a client closure.
+    fn with_server<T: Send + 'static>(
+        keep_alive: KeepAliveConfig,
+        client: impl FnOnce(std::net::TcpStream) -> T + Send + 'static,
+    ) -> T {
+        let ex = rt_core::Executor::new().unwrap();
+        let (mut listener, addr) = ex
+            .block_on(async {
+                let l = rt_net::AsyncTcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+                let a = l.local_addr().unwrap();
+                (l, a)
+            })
+            .unwrap();
+
+        let handle = std::thread::spawn(move || client(std::net::TcpStream::connect(addr).unwrap()));
+
+        let router = Arc::new(ping_router());
+        let context = Arc::new(AppContext::new());
+        let middlewares: Arc<Vec<Arc<dyn Middleware>>> = Arc::new(Vec::new());
+        ex.block_on(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_connection(stream, router, context, middlewares, keep_alive).await;
+        })
+        .unwrap();
+
+        handle.join().unwrap()
+    }
+
+    /// Read one response off `sock`, using content-length to know where it ends
+    /// — the same framing a real client relies on to reuse the connection.
+    fn read_one(sock: &mut std::net::TcpStream) -> String {
+        let mut got = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            let n = sock.read(&mut byte).unwrap();
+            assert_ne!(n, 0, "connection closed mid-response: {:?}", String::from_utf8_lossy(&got));
+            got.push(byte[0]);
+            if let Some(head_end) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&got[..head_end]).to_lowercase();
+                let len: usize = head
+                    .split("content-length:")
+                    .nth(1)
+                    .and_then(|rest| rest.split("\r\n").next())
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                if got.len() == head_end + 4 + len {
+                    return String::from_utf8(got).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn three_requests_are_served_on_one_connection() {
+        let responses = with_server(KeepAliveConfig::default(), |mut sock| {
+            let mut out = Vec::new();
+            for _ in 0..3 {
+                sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+                out.push(read_one(&mut sock));
+            }
+            // Tell the server we are done so it does not sit out the idle timeout.
+            sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\nconnection: close\r\n\r\n").unwrap();
+            out.push(read_one(&mut sock));
+            out
+        });
+
+        for response in &responses[..3] {
+            assert!(response.contains("connection: keep-alive"), "got {response:?}");
+            assert!(response.ends_with("ok"));
+        }
+        assert!(responses[3].contains("connection: close"), "got {:?}", responses[3]);
+    }
+
+    #[test]
+    fn pipelined_requests_in_one_packet_are_both_answered() {
+        // Both requests arrive in a single read; the leftover bytes of the
+        // first read must survive into the next loop iteration.
+        let responses = with_server(KeepAliveConfig::default(), |mut sock| {
+            sock.write_all(
+                b"GET /n HTTP/1.1\r\nHost: x\r\n\r\nGET /n HTTP/1.1\r\nHost: x\r\nconnection: close\r\n\r\n",
+            )
+            .unwrap();
+            (read_one(&mut sock), read_one(&mut sock))
+        });
+        assert!(responses.0.ends_with("ok"));
+        assert!(responses.1.ends_with("ok"));
+        assert!(responses.1.contains("connection: close"));
+    }
+
+    #[test]
+    fn an_http10_client_gets_a_closed_connection_by_default() {
+        let response = with_server(KeepAliveConfig::default(), |mut sock| {
+            sock.write_all(b"GET /n HTTP/1.0\r\nHost: x\r\n\r\n").unwrap();
+            let mut got = String::new();
+            sock.read_to_string(&mut got).unwrap(); // returns only on EOF
+            got
+        });
+        assert!(response.contains("connection: close"), "got {response:?}");
+    }
+
+    #[test]
+    fn an_idle_connection_is_closed_after_the_timeout() {
+        // Without this bound a client could hold a task and an fd indefinitely
+        // by connecting and saying nothing.
+        let started = Instant::now();
+        let keep_alive = KeepAliveConfig {
+            idle_timeout: Duration::from_millis(150),
+            ..Default::default()
+        };
+        let response = with_server(keep_alive, |mut sock| {
+            sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+            let mut got = String::new();
+            sock.read_to_string(&mut got).unwrap(); // blocks until the server gives up
+            got
+        });
+        assert!(response.contains("connection: keep-alive"));
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_millis(150), "closed too early: {waited:?}");
+        assert!(waited < Duration::from_secs(3), "idle timeout did not fire: {waited:?}");
+    }
+
+    #[test]
+    fn max_requests_closes_the_connection_even_if_the_client_wants_more() {
+        let keep_alive = KeepAliveConfig { max_requests: 2, ..Default::default() };
+        let responses = with_server(keep_alive, |mut sock| {
+            let mut out = Vec::new();
+            for _ in 0..2 {
+                sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+                out.push(read_one(&mut sock));
+            }
+            out
+        });
+        assert!(responses[0].contains("connection: keep-alive"));
+        assert!(
+            responses[1].contains("connection: close"),
+            "the cap must be announced, not just enforced silently: {:?}",
+            responses[1]
+        );
+    }
+
+    #[test]
+    fn keep_alive_can_be_turned_off_entirely() {
+        let config = KeepAliveConfig { enabled: false, ..Default::default() };
+        let response = with_server(config, |mut sock| {
+            sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+            let mut got = String::new();
+            sock.read_to_string(&mut got).unwrap();
+            got
+        });
+        assert!(response.contains("connection: close"), "got {response:?}");
+    }
+
+    #[test]
+    fn the_parser_reports_the_version_the_client_sent() {
+        let req = kernway_http::parse_bytes(b"GET / HTTP/1.0\r\n\r\n").unwrap();
+        match req {
+            Parsed::Complete { request, .. } => assert_eq!(request.version, HttpVersion::Http10),
+            Parsed::Incomplete => panic!("expected a complete request"),
+        }
     }
 }

@@ -3,11 +3,36 @@
 use crate::error::KernwayError;
 use std::collections::HashMap;
 
+/// HTTP protocol version of a request.
+///
+/// Only the two versions the framework speaks are modelled. The distinction is
+/// not cosmetic: it decides the default connection behaviour — HTTP/1.1 keeps
+/// the connection alive unless asked to close, HTTP/1.0 closes unless asked to
+/// keep it. Anything that is not exactly `HTTP/1.0` is treated as 1.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HttpVersion {
+    /// `HTTP/1.0` — connection closes by default.
+    Http10,
+    /// `HTTP/1.1` — connection is persistent by default (RFC 9112 §9.3).
+    #[default]
+    Http11,
+}
+
+impl std::fmt::Display for HttpVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            HttpVersion::Http10 => "HTTP/1.0",
+            HttpVersion::Http11 => "HTTP/1.1",
+        })
+    }
+}
+
 /// Raw HTTP request — implementation-agnostic.
 #[derive(Debug)]
 pub struct Request {
     pub method:      String,
     pub path:        String,
+    pub version:     HttpVersion,
     pub headers:     HashMap<String, String>,
     pub query:       HashMap<String, String>,
     pub path_params: HashMap<String, String>,
@@ -15,15 +40,28 @@ pub struct Request {
 }
 
 impl Request {
-    /// Create a new request (for testing).
+    /// Create a new request (for testing). Defaults to HTTP/1.1.
     pub fn new(method: impl Into<String>, path: impl Into<String>) -> Self {
         Self {
             method:      method.into(),
             path:        path.into(),
+            version:     HttpVersion::default(),
             headers:     HashMap::new(),
             query:       HashMap::new(),
             path_params: HashMap::new(),
             body:        Vec::new(),
+        }
+    }
+
+    /// Whether the connection should stay open after this request.
+    ///
+    /// Follows RFC 9112 §9.3: the `connection` header wins, and the version
+    /// supplies the default when the header is absent.
+    pub fn wants_keep_alive(&self) -> bool {
+        match self.header("connection").map(str::to_ascii_lowercase) {
+            Some(value) if value.split(',').any(|v| v.trim() == "close") => false,
+            Some(value) if value.split(',').any(|v| v.trim() == "keep-alive") => true,
+            _ => self.version == HttpVersion::Http11,
         }
     }
 
@@ -56,5 +94,53 @@ impl crate::response::IntoResponse for Rejection {
         crate::response::Response::new(StatusCode::BAD_REQUEST)
             .content_type("text/plain")
             .body(self.0.to_string().into_bytes())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_header(version: HttpVersion, value: &str) -> Request {
+        let mut req = Request::new("GET", "/");
+        req.version = version;
+        req.headers.insert("connection".into(), value.into());
+        req
+    }
+
+    #[test]
+    fn http11_keeps_the_connection_by_default() {
+        assert!(Request::new("GET", "/").wants_keep_alive());
+    }
+
+    #[test]
+    fn http10_closes_by_default() {
+        let mut req = Request::new("GET", "/");
+        req.version = HttpVersion::Http10;
+        assert!(!req.wants_keep_alive());
+    }
+
+    #[test]
+    fn the_connection_header_overrides_the_version_default() {
+        assert!(!with_header(HttpVersion::Http11, "close").wants_keep_alive());
+        assert!(with_header(HttpVersion::Http10, "keep-alive").wants_keep_alive());
+    }
+
+    #[test]
+    fn the_connection_header_is_case_insensitive() {
+        assert!(!with_header(HttpVersion::Http11, "Close").wants_keep_alive());
+        assert!(with_header(HttpVersion::Http10, "Keep-Alive").wants_keep_alive());
+    }
+
+    #[test]
+    fn close_wins_inside_a_comma_separated_list() {
+        // Proxies routinely send `connection: keep-alive, close` on the last hop.
+        assert!(!with_header(HttpVersion::Http11, "keep-alive, close").wants_keep_alive());
+    }
+
+    #[test]
+    fn version_renders_back_to_the_wire_form() {
+        assert_eq!(HttpVersion::Http10.to_string(), "HTTP/1.0");
+        assert_eq!(HttpVersion::Http11.to_string(), "HTTP/1.1");
     }
 }
