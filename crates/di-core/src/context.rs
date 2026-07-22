@@ -192,10 +192,13 @@ impl AppContext {
             .get(&type_id)
             .ok_or(DiError::NotFound { type_name })?;
 
-        let (_, instance) = list
-            .iter()
-            .find(|(e, _)| e.qualifier == Some(qualifier))
-            .ok_or(DiError::NotFound { type_name })?;
+        // Detect duplicate qualifiers instead of silently returning the first
+        // match: two beans sharing a qualifier is a configuration error.
+        let mut matches = list.iter().filter(|(e, _)| e.qualifier == Some(qualifier));
+        let (_, instance) = matches.next().ok_or(DiError::NotFound { type_name })?;
+        if matches.next().is_some() {
+            return Err(DiError::Ambiguous { type_name });
+        }
 
         Ok(Arc::clone(instance)
             .downcast::<T>()
@@ -572,6 +575,18 @@ mod tests {
         let mut ctx = AppContext::new();
         ctx.register_instance::<String>(Arc::new("noqual".to_string())).unwrap();
         assert!(ctx.get_qualified::<String>("missing").is_err());
+    }
+
+    #[test]
+    fn get_qualified_duplicate_qualifier_is_ambiguous() {
+        // Two beans sharing a qualifier must error, not silently pick the first.
+        let mut ctx = AppContext::new();
+        ctx.register_qualified::<String>("dup", Arc::new("first".to_string())).unwrap();
+        ctx.register_qualified::<String>("dup", Arc::new("second".to_string())).unwrap();
+        assert!(matches!(
+            ctx.get_qualified::<String>("dup"),
+            Err(DiError::Ambiguous { .. })
+        ));
     }
 
     // --- Auto-wiring: register_component + refresh -------------------

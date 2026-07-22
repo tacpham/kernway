@@ -59,6 +59,17 @@ where
     fn purge_expired(store: &mut HashMap<K, CacheEntry<V>>) {
         store.retain(|_, entry| !entry.is_expired());
     }
+
+    /// Lock the store, recovering from mutex poisoning instead of panicking.
+    /// A cache holds no cross-call invariant that a thread panicking mid-op
+    /// could corrupt, so one bad thread must not disable the whole cache
+    /// (the previous `.lock().unwrap()` turned a single panic into a
+    /// cache-wide poison-panic chain).
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<K, CacheEntry<V>>> {
+        self.store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 impl<K, V> Default for InMemoryCache<K, V>
@@ -75,7 +86,7 @@ where
     V: Clone + Send + Sync + 'static,
 {
     fn get(&self, key: &K) -> Result<Option<V>, CacheError> {
-        let mut store = self.store.lock().unwrap();
+        let mut store = self.lock();
         match store.get(key) {
             Some(entry) if !entry.is_expired() => {
                 self.hits.fetch_add(1, Ordering::Relaxed);
@@ -94,13 +105,13 @@ where
     }
 
     fn put(&self, key: K, value: V, ttl: Ttl) -> Result<(), CacheError> {
-        let mut store = self.store.lock().unwrap();
+        let mut store = self.lock();
         store.insert(key, CacheEntry::new(value, ttl));
         Ok(())
     }
 
     fn put_if_absent(&self, key: K, value: V, ttl: Ttl) -> Result<bool, CacheError> {
-        let mut store = self.store.lock().unwrap();
+        let mut store = self.lock();
         if let Some(entry) = store.get(&key) {
             if entry.is_expired() {
                 store.remove(&key);
@@ -116,17 +127,17 @@ where
     }
 
     fn evict(&self, key: &K) -> Result<(), CacheError> {
-        self.store.lock().unwrap().remove(key);
+        self.lock().remove(key);
         Ok(())
     }
 
     fn clear(&self) -> Result<(), CacheError> {
-        self.store.lock().unwrap().clear();
+        self.lock().clear();
         Ok(())
     }
 
     fn contains(&self, key: &K) -> Result<bool, CacheError> {
-        let mut store = self.store.lock().unwrap();
+        let mut store = self.lock();
         Ok(match store.get(key) {
             Some(e) if !e.is_expired() => true,
             Some(_) => {
@@ -138,13 +149,13 @@ where
     }
 
     fn size(&self) -> Result<usize, CacheError> {
-        let mut store = self.store.lock().unwrap();
+        let mut store = self.lock();
         Self::purge_expired(&mut store);
         Ok(store.len())
     }
 
     fn stats(&self) -> CacheStats {
-        let store = self.store.lock().unwrap();
+        let store = self.lock();
         CacheStats {
             hits: self.hits.load(Ordering::Relaxed),
             misses: self.misses.load(Ordering::Relaxed),

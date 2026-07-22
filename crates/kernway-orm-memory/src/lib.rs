@@ -86,11 +86,13 @@ where
             Filter::Ne { field, value } => get_field_str(entity, field)
                 .map(|candidate| candidate != *value)
                 .unwrap_or(false),
-            Filter::Gt { field, value } => get_field_str(entity, field)
-                .map(|candidate| candidate > *value)
+            Filter::Gt { field, value } => field_value(entity, field)
+                .and_then(|v| cmp_field_to_query(&v, value))
+                .map(|o| o == CmpOrdering::Greater)
                 .unwrap_or(false),
-            Filter::Lt { field, value } => get_field_str(entity, field)
-                .map(|candidate| candidate < *value)
+            Filter::Lt { field, value } => field_value(entity, field)
+                .and_then(|v| cmp_field_to_query(&v, value))
+                .map(|o| o == CmpOrdering::Less)
                 .unwrap_or(false),
             Filter::Like { field, pattern } => get_field_str(entity, field)
                 .map(|candidate| candidate.contains(pattern))
@@ -367,9 +369,14 @@ where
         Order::Asc(field) | Order::Desc(field) => field,
     };
 
-    let left_value = get_field_str(left, field).unwrap_or_default();
-    let right_value = get_field_str(right, field).unwrap_or_default();
-    let ordering = left_value.cmp(&right_value);
+    let left_value = field_value(left, field);
+    let right_value = field_value(right, field);
+    let ordering = match (left_value, right_value) {
+        (Some(l), Some(r)) => compare_field_values(&l, &r),
+        (None, Some(_)) => CmpOrdering::Less,
+        (Some(_), None) => CmpOrdering::Greater,
+        (None, None) => CmpOrdering::Equal,
+    };
 
     match order {
         Order::Asc(_) => ordering,
@@ -377,15 +384,61 @@ where
     }
 }
 
-fn get_field_str<T>(entity: &T, field: &str) -> Option<String>
+/// Extract a scalar field as its raw JSON value (String/Number/Bool).
+fn field_value<T>(entity: &T, field: &str) -> Option<serde_json::Value>
 where
     T: Serialize,
 {
     let value = serde_json::to_value(entity).ok()?;
-    match &value[field] {
-        serde_json::Value::String(s) => Some(s.clone()),
+    match value.get(field)? {
+        v @ (serde_json::Value::String(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::Bool(_)) => Some(v.clone()),
+        _ => None,
+    }
+}
+
+/// Stringified field, kept for Eq/Ne/Like (substring/equality) semantics.
+fn get_field_str<T>(entity: &T, field: &str) -> Option<String>
+where
+    T: Serialize,
+{
+    match field_value(entity, field)? {
+        serde_json::Value::String(s) => Some(s),
         serde_json::Value::Number(n) => Some(n.to_string()),
         serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// Order two field values numeric-aware: numbers compare by magnitude
+/// ("9" < "10"), matching the SQL backend instead of lexicographically.
+fn compare_field_values(a: &serde_json::Value, b: &serde_json::Value) -> CmpOrdering {
+    use serde_json::Value::{Bool, Number, String as JStr};
+    match (a, b) {
+        (Number(x), Number(y)) => match (x.as_f64(), y.as_f64()) {
+            (Some(xf), Some(yf)) => xf.partial_cmp(&yf).unwrap_or(CmpOrdering::Equal),
+            _ => x.to_string().cmp(&y.to_string()),
+        },
+        (JStr(x), JStr(y)) => x.cmp(y),
+        (Bool(x), Bool(y)) => x.cmp(y),
+        _ => a.to_string().cmp(&b.to_string()),
+    }
+}
+
+/// Compare an entity field value against a query string, numeric-aware so a
+/// numeric field orders by magnitude against the query value.
+fn cmp_field_to_query(field_val: &serde_json::Value, query: &str) -> Option<CmpOrdering> {
+    match field_val {
+        serde_json::Value::Number(n) => {
+            let lhs = n.as_f64()?;
+            match query.parse::<f64>() {
+                Ok(rhs) => lhs.partial_cmp(&rhs),
+                Err(_) => Some(n.to_string().as_str().cmp(query)),
+            }
+        }
+        serde_json::Value::String(s) => Some(s.as_str().cmp(query)),
+        serde_json::Value::Bool(b) => Some(b.to_string().as_str().cmp(query)),
         _ => None,
     }
 }
@@ -490,5 +543,51 @@ mod tests {
         assert_eq!(page.items.len(), 2);
         assert_eq!(page.items[0].id, 3);
         assert_eq!(page.items[1].id, 4);
+    }
+
+    // --- M1.0 correctness regression: numeric fields compare by magnitude ---
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[entity(table = "metrics")]
+    struct Metric {
+        #[id(strategy = "auto")]
+        id: u64,
+        score: i64,
+    }
+
+    fn metric(score: i64) -> Metric {
+        Metric { id: 0, score }
+    }
+
+    #[test]
+    fn memory_numeric_order_is_by_magnitude_not_lexicographic() {
+        let repo = InMemoryRepository::<Metric>::new();
+        for s in [100, 9, 20, 3] {
+            repo.save(metric(s)).unwrap();
+        }
+        let items = repo.query().order_by_asc("score").fetch_all().unwrap();
+        let scores: Vec<i64> = items.iter().map(|m| m.score).collect();
+        // Lexicographic would give [100, 20, 3, 9]; numeric must give ascending.
+        assert_eq!(scores, vec![3, 9, 20, 100]);
+    }
+
+    #[test]
+    fn memory_numeric_filter_gt_is_numeric() {
+        let repo = InMemoryRepository::<Metric>::new();
+        for s in [9, 10, 100] {
+            repo.save(metric(s)).unwrap();
+        }
+        // filter_gt("score","9") must include 10 and 100 (not exclude them as
+        // string comparison "10" < "9" would).
+        let mut scores: Vec<i64> = repo
+            .query()
+            .filter_gt("score", "9")
+            .fetch_all()
+            .unwrap()
+            .iter()
+            .map(|m| m.score)
+            .collect();
+        scores.sort();
+        assert_eq!(scores, vec![10, 100]);
     }
 }
