@@ -15,7 +15,7 @@ pub mod buildable;
 
 pub use context::AppContext;
 pub use container::Container;
-pub use bean::BeanEntry;
+pub use bean::{BeanEntry, BeanOrigin};
 pub use error::DiError;
 pub use marker::{KernwayComponent, KernwayController};
 pub use buildable::{Buildable, RegistersComponent};

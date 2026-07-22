@@ -14,7 +14,7 @@ pub enum BeanOrigin {
 }
 
 /// Metadata for a bean in AppContext.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BeanEntry {
     /// TypeId of the concrete type.
     pub type_id:   TypeId,

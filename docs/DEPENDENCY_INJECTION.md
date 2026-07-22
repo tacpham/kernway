@@ -18,7 +18,9 @@ does not** copy Spring because Rust has a more effective idiom.
 | Wiring | Automatic dependency ordering + cycle detection | `register_component::<T>()` + `refresh()` | ✅ |
 | Safety | Missing bean → `DiError` instead of a panic | `Buildable::build → Result` | ✅ |
 | Polymorphism | Inject by interface `Arc<dyn Trait>` | `#[provides(dyn T)]`, `register_as`/`get_as` | ✅ |
-| Identity | Qualifier / named injection | `#[inject(qualifier = "…")]`, `register_qualified` | ✅ |
+| Identity | Qualifier / named injection | `#[inject(qualifier = "…")]`, `#[qualifier("…")]`, `register_qualified` | ✅ |
+| Identity | Primary bean (disambiguation) | `#[primary]` | ✅ |
+| Override | Framework default replaced by a user bean | `#[default_impl]` | ✅ |
 | Ergonomics | Optional injection | `#[inject] Option<Arc<T>>` | ✅ |
 | Ergonomics | Collection injection (all beans of a type) | `#[inject] Vec<Arc<dyn T>>`, `get_all`/`get_all_as` | ✅ |
 | Lifecycle | Post-construct hook (receives `Arc<Self>`) | `#[post_construct(method)]` | ✅ |
@@ -75,6 +77,37 @@ struct Config {
 ctx.register_qualified::<String>("db_url", Arc::new("postgres://…".into()))?;
 ```
 
+A component names *itself* with `#[qualifier("…")]`. The name covers the concrete
+bean **and** every `#[provides]` trait binding, so an interface field can be
+selected by name too:
+
+```rust
+#[derive(Component)] #[provides(dyn Notifier)] #[primary]
+struct EmailNotifier;                      // the unqualified `Arc<dyn Notifier>`
+
+#[derive(Component)] #[provides(dyn Notifier)] #[qualifier("sms")]
+struct SmsNotifier;
+
+#[derive(Component)]
+struct AlertService {
+    #[inject]                       default_channel: Arc<dyn Notifier>,  // → email
+    #[inject(qualifier = "sms")]    urgent_channel:  Arc<dyn Notifier>,  // → sms
+}
+```
+
+### 2.4b Framework defaults: `#[default_impl]`
+A bean marked `#[default_impl]` is a fallback: if a user bean of the same type
+(or the same `#[provides]` interface) is registered, the default is dropped —
+in either registration order, no error, no `#[primary]` needed.
+
+```rust
+#[derive(Component)] #[provides(dyn Clock)] #[default_impl]
+struct SystemClock;                        // framework ships this
+
+#[derive(Component)] #[provides(dyn Clock)]
+struct FixedClock;                         // user app defines this → wins
+```
+
 ### 2.5 Optional injection
 ```rust
 #[derive(Component)]
@@ -121,8 +154,9 @@ Capabilities Kernway matches (different syntax, same concept):
 | `@Autowired` (field) | `#[inject]` on a field | Codegen can access private fields too |
 | Constructor injection | the derived `build()` body | Fully wired the moment it is constructed |
 | Inject by interface | `#[inject] Arc<dyn T>` + `#[provides(dyn T)]` | Program-to-interface |
-| `@Qualifier("name")` | `#[inject(qualifier = "name")]` | Select a bean by name |
-| `@Primary` | `BeanEntry.is_primary` | Disambiguation |
+| `@Qualifier("name")` | `#[qualifier("name")]` on the bean + `#[inject(qualifier = "name")]` on the field | Select a bean by name — works for `Arc<T>` and `Arc<dyn T>` alike |
+| `@Primary` | `#[primary]` on the bean | Disambiguation |
+| `@ConditionalOnMissingBean` (roughly) | `#[default_impl]` on the bean | A user bean of the same type silently replaces the framework default |
 | `@Autowired(required=false)` / `Optional<T>` | `#[inject] Option<Arc<T>>` | Optional injection |
 | Inject `List<T>` / `Map<String,T>` | `#[inject] Vec<Arc<dyn T>>` | Collection injection |
 | `ApplicationContext.refresh()` | `ctx.refresh()` | Topo-sort of the whole graph |
@@ -202,7 +236,7 @@ let svc = Service::build(&Mock { repo })?;   // no AppContext / refresh needed
 
 ## 9. Known limitations / roadmap
 
-- **Trait bindings have no primary/qualifier yet**: two `#[provides(dyn T)]` → `get_as` returns `Ambiguous`; use `get_all_as` (collection). The macro does not parse `#[primary]` for trait bindings.
+- **Two providers, neither `#[primary]`**: `get_as` returns `Ambiguous` — add `#[primary]` to one, name them with `#[qualifier("…")]`, or collect them all with `get_all_as`. Two `#[primary]` beans of the same type is also `Ambiguous`, not first-wins.
 - **`MissingDependency`** currently names only the dependent bean, not *which* type is missing (a `TypeId` carries no name).
 - Prototype scope / lazy init / `#[value("key")]`: not yet (optional, future work).
 

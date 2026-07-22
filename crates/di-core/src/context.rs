@@ -165,11 +165,14 @@ impl AppContext {
         let instance = if list.len() == 1 {
             &list[0].1
         } else {
-            // More than one → find the primary bean
-            list.iter()
-                .find(|(e, _)| e.is_primary)
-                .map(|(_, i)| i)
-                .ok_or(DiError::Ambiguous { type_name })?
+            // More than one → exactly one must be `#[primary]`. Two primaries is
+            // as ambiguous as none, so report it instead of picking the first.
+            let mut primaries = list.iter().filter(|(e, _)| e.is_primary);
+            let (_, instance) = primaries.next().ok_or(DiError::Ambiguous { type_name })?;
+            if primaries.next().is_some() {
+                return Err(DiError::Ambiguous { type_name });
+            }
+            instance
         };
 
         // Infallible: `register_with_entry` guarantees the stored concrete type
@@ -289,13 +292,35 @@ impl AppContext {
             provides:  T::provides(),
             build: Box::new(|ctx: &mut AppContext| {
                 let instance = T::build(ctx)?;
-                ctx.register_instance::<T>(Arc::clone(&instance))?;
+                // Honour the bean's own metadata (`#[default_impl]`, `#[primary]`,
+                // `#[qualifier]`) rather than filing everything as a plain user bean.
+                ctx.register_with_entry(
+                    Self::component_entry::<T>(TypeId::of::<T>(), std::any::type_name::<T>()),
+                    Arc::clone(&instance) as BeanInstance,
+                )?;
                 T::register_bindings(ctx, &instance)?;
                 T::post_construct(ctx, &instance)?;
                 Ok(())
             }),
         });
         self
+    }
+
+    /// Bean entry carrying `T`'s declared metadata (`#[default_impl]`,
+    /// `#[primary]`, `#[qualifier]`). Shared by the concrete registration and by
+    /// the `#[provides]` trait bindings so both resolve identically.
+    fn component_entry<T: RegistersComponent>(
+        type_id: TypeId,
+        type_name: &'static str,
+    ) -> BeanEntry {
+        let mut entry = BeanEntry::new(type_id, type_name, T::bean_origin());
+        if T::is_primary() {
+            entry = entry.primary();
+        }
+        if let Some(q) = T::qualifier() {
+            entry = entry.qualifier(q);
+        }
+        entry
     }
 
     /// Build every component queued with [`register_component`](Self::register_component),
@@ -415,8 +440,10 @@ impl AppContext {
     /// Registered as a plain `User` bean (no primary / qualifier). If two
     /// providers back the same trait, [`get_as`](Self::get_as) reports
     /// [`DiError::Ambiguous`]; collect them with [`get_all_as`](Self::get_all_as)
-    /// instead. (Primary/qualifier for trait bindings is not yet wired through
-    /// the `#[provides]` macro.)
+    /// instead, or use
+    /// [`register_as_component`](Self::register_as_component) — what
+    /// `#[provides]` emits — to carry `#[primary]` / `#[qualifier]` onto the
+    /// binding.
     pub fn register_as<T: ?Sized + Send + Sync + 'static>(
         &mut self,
         instance: Arc<T>,
@@ -427,6 +454,28 @@ impl AppContext {
                 TypeId::of::<Arc<T>>(),
                 std::any::type_name::<Arc<T>>(),
                 BeanOrigin::User,
+            ),
+            erased,
+        )
+    }
+
+    /// Register a trait binding carrying the metadata of the component that
+    /// provides it — used by `#[derive(Component)]` + `#[provides(dyn Trait)]`.
+    ///
+    /// This is what makes `#[primary]` / `#[qualifier("…")]` work for
+    /// `Arc<dyn Trait>` injection: the binding is filed under the *same*
+    /// qualifier as the concrete bean, so `#[inject(qualifier = "sql")]` on an
+    /// `Arc<dyn UserRepo>` field resolves the provider named `"sql"`.
+    pub fn register_as_component<T, Tr>(&mut self, instance: Arc<Tr>) -> Result<(), DiError>
+    where
+        T: RegistersComponent,
+        Tr: ?Sized + Send + Sync + 'static,
+    {
+        let erased: BeanInstance = Arc::new(instance); // Arc<Arc<Tr>>
+        self.register_with_entry(
+            Self::component_entry::<T>(
+                TypeId::of::<Arc<Tr>>(),
+                std::any::type_name::<Arc<Tr>>(),
             ),
             erased,
         )
@@ -545,6 +594,31 @@ mod tests {
             Arc::new("b".to_string()) as BeanInstance,
         )
         .unwrap();
+        assert!(matches!(ctx.get::<String>(), Err(DiError::Ambiguous { .. })));
+    }
+
+    #[test]
+    fn single_primary_wins_over_the_others() {
+        let mut ctx = AppContext::new();
+        ctx.register_instance::<String>(Arc::new("plain".to_string())).unwrap();
+        ctx.register_with_entry(
+            BeanEntry::new(TypeId::of::<String>(), "String", BeanOrigin::User).primary(),
+            Arc::new("chosen".to_string()) as BeanInstance,
+        )
+        .unwrap();
+        assert_eq!(*ctx.get::<String>().unwrap(), "chosen");
+    }
+
+    #[test]
+    fn two_primaries_are_ambiguous_not_first_wins() {
+        let mut ctx = AppContext::new();
+        for s in ["a", "b"] {
+            ctx.register_with_entry(
+                BeanEntry::new(TypeId::of::<String>(), "String", BeanOrigin::User).primary(),
+                Arc::new(s.to_string()) as BeanInstance,
+            )
+            .unwrap();
+        }
         assert!(matches!(ctx.get::<String>(), Err(DiError::Ambiguous { .. })));
     }
 
