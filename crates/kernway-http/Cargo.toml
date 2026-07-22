@@ -1,0 +1,10 @@
+[package]
+name        = "kernway-http"
+description = "Kernway HTTP/1.1 parser + writer — pure std, no external deps"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+
+[dependencies]
+kernway-core = { workspace = true }
+thiserror    = { workspace = true }

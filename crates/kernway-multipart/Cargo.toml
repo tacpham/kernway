@@ -1,0 +1,9 @@
+[package]
+name        = "kernway-multipart"
+description = "Kernway multipart/form-data parser — RFC 7578, pure std"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kernway-core = { workspace = true }

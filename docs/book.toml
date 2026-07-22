@@ -1,0 +1,17 @@
+[book]
+title       = "Kernway Documentation"
+description = "Rust Web Framework — Spring-inspired"
+authors     = ["Kernway Contributors"]
+language    = "en"
+src         = "src"
+
+[output.html]
+site-url           = "https://kernway.dev/docs/"
+git-repository-url = "https://github.com/kernway/kernway-docs"
+edit-url-template  = "https://github.com/kernway/kernway-docs/edit/main/src/{path}"
+default-theme      = "navy"
+
+[output.html.search]
+enable            = true
+limit-results     = 30
+teaser-word-count = 30

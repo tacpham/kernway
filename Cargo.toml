@@ -1,0 +1,81 @@
+[workspace]
+members = [
+    "crates/kernway-core",
+    "crates/di-core",
+    "crates/di-macro",
+    "crates/kernway-http",
+    "crates/kernway-web",
+    "crates/kernway-server",
+    "crates/kernway-orm-core",
+    "crates/kernway-orm-macro",
+    "crates/kernway-orm-memory",
+    "crates/kernway-orm-sqlite",
+    "crates/kernway-cache-core",
+    "crates/kernway-cache-macro",
+    "crates/kernway-cache-memory",
+    "crates/kernway-openapi",
+    "crates/kernway-sse",
+    "crates/kernway-multipart",
+    "crates/kernway",
+    "examples/hello-di",
+    "examples/hello-di-v2",
+    "examples/hello-di-v3",
+    "examples/hello-web",
+    "examples/todo-orm",
+    "examples/hello-cache",
+    "examples/hello-openapi",
+    "examples/todo-app",
+    "examples/todo-sqlite",
+]
+resolver = "2"
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2021"
+authors      = ["Kernway Contributors"]
+license      = "MIT"
+repository   = "https://github.com/kernway/kernway"
+homepage     = "https://kernway.dev"
+# MSRV — enforced by the `msrv` CI job. Bumping this is a deliberate,
+# documented decision (see docs/VERSIONING.md), not incidental.
+rust-version = "1.78"
+
+[workspace.dependencies]
+# Proc-macro
+syn         = { version = "2", features = ["full", "extra-traits", "derive"] }
+quote       = "1"
+proc-macro2 = "1"
+
+# Error handling
+thiserror = "1"
+anyhow    = "1"
+
+# Serialization
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async
+futures-core = "0.3"
+
+# Internal crates
+kernway-core         = { path = "crates/kernway-core" }
+kernway-http         = { path = "crates/kernway-http" }
+kernway-web          = { path = "crates/kernway-web" }
+kernway-server       = { path = "crates/kernway-server" }
+kernway-orm-core     = { path = "crates/kernway-orm-core" }
+kernway-orm-macro    = { path = "crates/kernway-orm-macro" }
+kernway-orm-memory   = { path = "crates/kernway-orm-memory" }
+kernway-orm-sqlite   = { path = "crates/kernway-orm-sqlite" }
+kernway-cache-core   = { path = "crates/kernway-cache-core" }
+kernway-cache-macro  = { path = "crates/kernway-cache-macro" }
+kernway-cache-memory = { path = "crates/kernway-cache-memory" }
+kernway-openapi      = { path = "crates/kernway-openapi" }
+kernway-sse          = { path = "crates/kernway-sse" }
+kernway-multipart    = { path = "crates/kernway-multipart" }
+di-core              = { path = "crates/di-core" }
+di-macro             = { path = "crates/di-macro" }
+
+[profile.release]
+opt-level = 3
+lto       = "thin"
+strip     = true

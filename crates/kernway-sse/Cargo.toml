@@ -1,0 +1,9 @@
+[package]
+name        = "kernway-sse"
+description = "Kernway Server-Sent Events — SseEvent, SseStream response type"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kernway-core = { workspace = true }

@@ -1,0 +1,10 @@
+/target/
+/.idea/
+
+# macOS
+.DS_Store
+
+# SQLite runtime artifacts
+*.db
+*.db-wal
+*.db-shm

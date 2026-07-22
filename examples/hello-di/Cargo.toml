@@ -1,0 +1,13 @@
+[package]
+name    = "hello-di"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "hello-di"
+path = "src/main.rs"
+
+[dependencies]
+kernway = { path = "../../crates/kernway" }
+di-core = { path = "../../crates/di-core" }
+di-macro = { path = "../../crates/di-macro" }

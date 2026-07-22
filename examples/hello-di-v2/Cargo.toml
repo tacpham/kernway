@@ -1,0 +1,12 @@
+[package]
+name    = "hello-di-v2"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "hello-di-v2"
+path = "src/main.rs"
+
+[dependencies]
+di-core  = { path = "../../crates/di-core" }
+di-macro = { path = "../../crates/di-macro" }

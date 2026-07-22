@@ -1,0 +1,12 @@
+[package]
+name        = "kernway-server"
+description = "Kernway HTTP server — Router, KernwayApp builder"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+
+[dependencies]
+kernway-core = { workspace = true }
+kernway-http = { workspace = true }
+di-core      = { workspace = true }
+thiserror    = { workspace = true }
