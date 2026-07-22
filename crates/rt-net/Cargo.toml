@@ -1,0 +1,18 @@
+[package]
+name        = "rt-net"
+description = "Kernway async TCP — AsyncTcpStream + per-core shard bootstrap"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+homepage.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+rt-core = { workspace = true }
+mio     = { workspace = true }
+
+# Platform layer (`sys/`) — SO_REUSEPORT before bind.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }

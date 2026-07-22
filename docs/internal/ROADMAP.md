@@ -36,12 +36,22 @@ kernway-di = "0.1"
 
 **Goal**: The custom async runtime runs on Linux/macOS/Windows.
 
-- [ ] `rt-core/sys/`: platform layer (libc bindings, CPU affinity, graceful shutdown)
-- [ ] Reactor wrapping `mio::Poll` + custom Waker
-- [ ] Executor + Task system (`VecDeque<Rc<Task>>`, `RawWakerVTable`)
-- [ ] `rt-net`: `AsyncTcpStream` wrapping `mio::net::TcpStream`
-- [ ] Shard bootstrap: `SO_REUSEPORT` (Linux/macOS) + shared socket (Windows)
-- [ ] `examples/echo-server`: benchmark vs tokio
+- [x] `rt-core/sys/`: platform layer (CPU affinity). Linux only — macOS has no
+      affinity API and Windows is unimplemented; both report `Unsupported`
+      rather than faking success. Graceful shutdown still to do.
+- [x] Reactor wrapping `mio::Poll` + custom Waker
+- [x] Executor + Task system (`RawWakerVTable`). Deviation from the module doc:
+      the waker payload is `Arc<WakeHandle>`, not `Rc<Task>` — a `Waker` is
+      `Send + Sync`, so an `Rc`-backed one races its refcount the moment a
+      `spawn_blocking` worker or timer wakes it. The `!Send` future still lives
+      in an `Rc<Task>` pinned to its shard.
+- [x] `rt-net`: `AsyncTcpStream` wrapping `mio::net::TcpStream`
+- [x] Shard bootstrap: `SO_REUSEPORT` (Linux/macOS). Note: only Linux actually
+      *balances* across the sockets; BSD/macOS just permit the shared bind.
+      Windows (shared socket + IOCP) not started.
+- [x] `examples/echo-server` — runs; **benchmark vs tokio not run yet**
+- [ ] Benchmark: p99 within 20% of the tokio echo example (needs a Linux host)
+- [ ] Graceful shutdown / drain for `run_shards`
 
 **Criterion**: p99 must not deviate by more than 20% from the tokio echo example.
 

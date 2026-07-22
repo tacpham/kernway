@@ -120,6 +120,7 @@ These compile with only external crates (`thiserror`/`syn`/`serde`…) and pull 
 | `kernway-orm-core` | ORM spec (traits) | `thiserror` |
 | `kernway-cache-core` | Cache spec (traits) | `thiserror` |
 | `di-core` | DI container runtime | `thiserror` |
+| `rt-core` | Async runtime (Reactor + Executor) | `mio`, `libc` |
 | `di-macro` | `#[derive(Component)]` | `syn`/`quote`/`proc-macro2` |
 | `kernway-orm-macro` | `#[entity]`/`#[id]`/`#[column]` | `syn`/`quote`/`proc-macro2` |
 | `kernway-cache-macro` | `#[cacheable]` | `syn`/`quote`/`proc-macro2` |
@@ -140,12 +141,17 @@ kernway-orm-core ──┬── kernway-orm-memory
 
 kernway-cache-core ── kernway-cache-memory
 
+rt-core ── rt-net                            (+ mio, libc)
+
 kernway (facade) ── kernway-core + di-core + di-macro
 ```
 
 - **Web crates → `kernway-core`**: legitimate — HTTP handlers cannot exist without the
   `Request`/`Response`/`Layer` spec. (Mirrors `spring-web` → `spring-core`.)
 - **`kernway-server` → core + http + di-core**: it is the composition/app layer.
+- **`rt-net` → `rt-core`**: a socket is meaningless without the reactor that drives
+  it. The runtime pair stays clear of `kernway-core` for the same reason DI does —
+  a TCP layer must not know about HTTP types.
 
 ### Two hard rules that keep independence intact
 

@@ -108,15 +108,30 @@ impl Inner {
     /// is what closes the lost-wakeup race: a wake landing after the check finds
     /// `parked == true` and sends the unparker, and `mio::Waker` also unblocks a
     /// `poll()` that has not started yet.
-    fn park(&self, timeout: Option<Duration>) -> io::Result<()> {
+    fn park(&self) -> io::Result<()> {
         self.shared.set_parked(true);
         if self.shared.has_ready() {
             self.shared.set_parked(false);
             return Ok(());
         }
-        let result = self.reactor.borrow_mut().poll(timeout);
+        let result = self.reactor.borrow_mut().poll(None);
         self.shared.set_parked(false);
         result.map(|_| ())
+    }
+
+    /// Service the reactor without blocking.
+    ///
+    /// The loop must do this on every iteration where it *doesn't* park.
+    /// Otherwise a task that keeps waking itself — a busy poll loop, a chain of
+    /// `yield_now`s, any CPU-bound work spread across awaits — keeps the run
+    /// queue permanently non-empty, the executor never parks, and no I/O event
+    /// is ever collected. Sockets then wait forever on data the kernel already
+    /// has. A zero timeout costs one non-blocking syscall per iteration.
+    fn poll_io_now(&self) -> io::Result<()> {
+        self.reactor
+            .borrow_mut()
+            .poll(Some(Duration::ZERO))
+            .map(|_| ())
     }
 }
 
@@ -216,7 +231,11 @@ impl Executor {
             if self.inner.tasks.borrow().len() == 0 {
                 return Ok(());
             }
-            self.inner.park(None)?;
+            if self.inner.shared.has_ready() {
+                self.inner.poll_io_now()?; // keep I/O alive under a busy run queue
+            } else {
+                self.inner.park()?;
+            }
         }
     }
 
@@ -227,6 +246,9 @@ impl Executor {
         let _guard = self.enter();
         let mut buf = VecDeque::new();
         let mut total = 0;
+        // Collect any readiness that arrived since the last call, so a task
+        // parked on a socket becomes runnable in this pass rather than the next.
+        let _ = self.inner.poll_io_now();
         loop {
             let polled = self.inner.drain_ready(&mut buf);
             total += polled;
@@ -260,9 +282,12 @@ impl Executor {
             }
             self.inner.drain_ready(&mut buf);
             if self.inner.shared.take_main_woken() || self.inner.shared.has_ready() {
-                continue; // progress is possible without sleeping
+                // Progress is possible without sleeping — but still collect I/O,
+                // or a self-waking task starves every socket on this shard.
+                self.inner.poll_io_now()?;
+                continue;
             }
-            self.inner.park(None)?;
+            self.inner.park()?;
         }
     }
 }
@@ -301,11 +326,19 @@ pub fn try_handle() -> Option<Handle> {
 /// If called outside an executor, or re-entrantly from inside another
 /// `with_reactor` closure.
 pub fn with_reactor<R>(f: impl FnOnce(&mut Reactor) -> R) -> R {
-    let inner = CURRENT
-        .with(|c| c.borrow().clone())
-        .expect("rt_core::with_reactor called outside an executor");
+    try_with_reactor(f).expect("rt_core::with_reactor called outside an executor")
+}
+
+/// Like [`with_reactor`], but returns `None` instead of panicking when no
+/// executor is running.
+///
+/// This is what `Drop` impls want: a socket may well be dropped after its
+/// executor has finished, and failing to deregister is harmless there — the
+/// reactor it was registered with is already gone.
+pub fn try_with_reactor<R>(f: impl FnOnce(&mut Reactor) -> R) -> Option<R> {
+    let inner = CURRENT.with(|c| c.borrow().clone())?;
     let mut reactor = inner.reactor.borrow_mut();
-    f(&mut reactor)
+    Some(f(&mut reactor))
 }
 
 #[cfg(test)]
