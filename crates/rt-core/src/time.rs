@@ -66,6 +66,12 @@ impl Timers {
         }
     }
 
+    /// Whether any timer entry is pending — a cheap check the executor makes
+    /// on every round of a busy run queue, before paying for `Instant::now`.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.heap.is_empty()
+    }
+
     /// Forget `id`. Its heap entry is dropped when it reaches the top.
     pub(crate) fn cancel(&mut self, id: TimerId) {
         self.wakers.remove(&id);
