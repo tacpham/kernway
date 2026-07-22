@@ -454,6 +454,7 @@ dependencies = [
 name = "kernway-server"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "di-core",
  "kernway-core",
  "kernway-http",
