@@ -1,0 +1,16 @@
+[package]
+name    = "kernway-orm-sqlite"
+version.workspace = true
+edition.workspace = true
+description = "SQLite backend for kernway-orm-core (backed by rusqlite)"
+license.workspace = true
+
+[dependencies]
+kernway-orm-core = { workspace = true }
+rusqlite         = { version = "0.31", features = ["bundled"] }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+thiserror        = { workspace = true }
+
+[dev-dependencies]
+kernway-orm-macro = { workspace = true }

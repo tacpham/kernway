@@ -1,0 +1,12 @@
+[package]
+name        = "kernway-openapi"
+description = "Kernway OpenAPI 3.0 spec generation — annotate routes, serve /openapi.json"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kernway-core   = { workspace = true }
+kernway-server = { path = "../kernway-server" }
+serde          = { workspace = true }
+serde_json     = { workspace = true }

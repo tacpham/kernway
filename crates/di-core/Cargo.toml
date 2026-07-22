@@ -1,0 +1,12 @@
+[package]
+name        = "di-core"
+description = "Kernway DI runtime — AppContext, bean registry"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+
+[dependencies]
+kernway-core = { workspace = true }
+thiserror    = { workspace = true }

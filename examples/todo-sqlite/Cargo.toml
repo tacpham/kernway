@@ -1,0 +1,19 @@
+[package]
+name    = "todo-sqlite"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "todo-sqlite"
+path = "src/main.rs"
+
+[dependencies]
+kernway-core       = { workspace = true }
+kernway-server     = { path = "../../crates/kernway-server" }
+kernway-web        = { path = "../../crates/kernway-web" }
+kernway-orm-core   = { path = "../../crates/kernway-orm-core" }
+kernway-orm-macro  = { path = "../../crates/kernway-orm-macro" }
+kernway-orm-sqlite = { path = "../../crates/kernway-orm-sqlite" }
+di-core            = { path = "../../crates/di-core" }
+serde              = { workspace = true }
+serde_json         = { workspace = true }

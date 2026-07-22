@@ -1,0 +1,17 @@
+[package]
+name    = "hello-web"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "hello-web"
+path = "src/main.rs"
+
+[dependencies]
+di-core        = { path = "../../crates/di-core" }
+di-macro       = { path = "../../crates/di-macro" }
+kernway-core   = { workspace = true }
+kernway-web    = { path = "../../crates/kernway-web" }
+kernway-server = { path = "../../crates/kernway-server" }
+serde          = { workspace = true }
+serde_json     = { workspace = true }

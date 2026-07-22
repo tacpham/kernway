@@ -1,0 +1,9 @@
+[package]
+name        = "kernway-orm-core"
+description = "Kernway ORM spec — Entity, Repository, QueryBuilder traits (sync)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }

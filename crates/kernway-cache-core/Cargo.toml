@@ -1,0 +1,9 @@
+[package]
+name        = "kernway-cache-core"
+description = "Kernway cache spec — Cache<K,V> trait, TTL, eviction (sync)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }

@@ -1,0 +1,9 @@
+[package]
+name        = "kernway-cache-memory"
+description = "Kernway in-memory cache — for testing and development, not production"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kernway-cache-core = { path = "../kernway-cache-core" }

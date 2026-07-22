@@ -1,0 +1,20 @@
+[package]
+name    = "hello-cache"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "hello-cache"
+path = "src/main.rs"
+
+[dependencies]
+di-core              = { path = "../../crates/di-core" }
+di-macro             = { path = "../../crates/di-macro" }
+kernway-core         = { workspace = true }
+kernway-server       = { path = "../../crates/kernway-server" }
+kernway-web          = { path = "../../crates/kernway-web" }
+kernway-cache-core   = { path = "../../crates/kernway-cache-core" }
+kernway-cache-macro  = { path = "../../crates/kernway-cache-macro" }
+kernway-cache-memory = { path = "../../crates/kernway-cache-memory" }
+serde                = { workspace = true }
+serde_json           = { workspace = true }

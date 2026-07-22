@@ -1,0 +1,15 @@
+[package]
+name        = "kernway-orm-macro"
+description = "Kernway ORM proc-macros — #[entity], #[id], #[column]"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn              = { workspace = true }
+quote            = { workspace = true }
+proc-macro2      = { workspace = true }
+kernway-orm-core = { path = "../kernway-orm-core" }
