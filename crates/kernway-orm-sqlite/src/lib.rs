@@ -122,35 +122,57 @@ fn sql_to_json(v: SqlValue, col: &ColumnDef) -> serde_json::Value {
     }
 }
 
-fn json_to_sql(v: serde_json::Value, col: &ColumnDef) -> SqlValue {
-    match v {
+/// Convert a JSON number to a SQLite INTEGER, erroring (never silently
+/// coercing to 0 or wrapping to a negative) when the value can't be represented
+/// as i64 — SQLite's only integer type. `ctx` names the source for the message.
+fn number_to_integer(n: &serde_json::Number, ctx: &str) -> Result<i64, OrmError> {
+    if let Some(i) = n.as_i64() {
+        Ok(i)
+    } else if let Some(u) = n.as_u64() {
+        i64::try_from(u).map_err(|_| {
+            OrmError::TypeConversion(format!("{ctx} value {u} exceeds SQLite INTEGER range (i64)"))
+        })
+    } else {
+        Err(OrmError::TypeConversion(format!(
+            "{ctx} is not an integer: {n}"
+        )))
+    }
+}
+
+fn json_to_sql(v: serde_json::Value, col: &ColumnDef) -> Result<SqlValue, OrmError> {
+    Ok(match v {
         serde_json::Value::Null => SqlValue::Null,
         serde_json::Value::Bool(b) => SqlValue::Integer(b as i64),
         serde_json::Value::Number(n) => {
             if col.col_type == ColumnType::Float {
-                SqlValue::Real(n.as_f64().unwrap_or(0.0))
+                SqlValue::Real(n.as_f64().ok_or_else(|| {
+                    OrmError::TypeConversion(format!("column '{}' expects a float", col.name))
+                })?)
+            } else if let Some(f) = n.as_f64().filter(|_| n.as_i64().is_none() && n.as_u64().is_none()) {
+                // Non-float column carrying a fractional number — store as REAL
+                // rather than truncate silently.
+                SqlValue::Real(f)
             } else {
-                SqlValue::Integer(
-                    n.as_i64()
-                        .unwrap_or_else(|| n.as_u64().map(|u| u as i64).unwrap_or(0)),
-                )
+                SqlValue::Integer(number_to_integer(&n, &format!("column '{}'", col.name))?)
             }
         }
         serde_json::Value::String(s) => SqlValue::Text(s),
         other => SqlValue::Text(serde_json::to_string(&other).unwrap_or_default()),
-    }
+    })
 }
 
 fn id_to_sql<Id: Serialize>(id: &Id) -> Result<SqlValue, OrmError> {
     let v = serde_json::to_value(id).map_err(map_serde)?;
     Ok(match v {
-        serde_json::Value::Number(n) => SqlValue::Integer(
-            n.as_i64()
-                .unwrap_or_else(|| n.as_u64().map(|u| u as i64).unwrap_or(0)),
-        ),
+        serde_json::Value::Number(n) => SqlValue::Integer(number_to_integer(&n, "id")?),
         serde_json::Value::String(s) => SqlValue::Text(s),
         serde_json::Value::Bool(b) => SqlValue::Integer(b as i64),
-        _ => SqlValue::Null,
+        serde_json::Value::Null => SqlValue::Null,
+        other => {
+            return Err(OrmError::TypeConversion(format!(
+                "id must be a scalar (number/string/bool), got {other}"
+            )))
+        }
     })
 }
 
@@ -219,19 +241,9 @@ where
     _marker: std::marker::PhantomData<T>,
 }
 
-unsafe impl<T> Send for SqliteRepository<T>
-where
-    T: Entity + Serialize + DeserializeOwned,
-    T::Id: Serialize + DeserializeOwned,
-{
-}
-
-unsafe impl<T> Sync for SqliteRepository<T>
-where
-    T: Entity + Serialize + DeserializeOwned,
-    T::Id: Serialize + DeserializeOwned,
-{
-}
+// Send/Sync derive automatically from `Arc<Mutex<Connection>>` (Send+Sync) and
+// hold exactly when `T` is Send/Sync. No `unsafe impl` — an explicit one would
+// mask unsoundness if a non-thread-safe field were added later.
 
 impl<T> SqliteRepository<T>
 where
@@ -296,7 +308,7 @@ where
         let vals: Vec<SqlValue> = insert_cols
             .iter()
             .map(|c| json_to_sql(obj.get(c.field).cloned().unwrap_or(serde_json::Value::Null), c))
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         let conn = self
             .conn
@@ -351,7 +363,7 @@ where
         let mut vals: Vec<SqlValue> = set_cols
             .iter()
             .map(|c| json_to_sql(obj.get(c.field).cloned().unwrap_or(serde_json::Value::Null), c))
-            .collect();
+            .collect::<Result<_, _>>()?;
         vals.push(id_to_sql(entity.id())?);
 
         self.conn
@@ -485,13 +497,17 @@ where
     }
 }
 
+// SECURITY: `col` is ALWAYS a `&'static str` taken from `T::columns()` metadata —
+// never a caller-supplied string. This makes SQL identifier injection structurally
+// impossible: an unknown field is rejected (recorded as an error) instead of being
+// interpolated raw. Values still go through `?N` bind parameters.
 #[derive(Clone)]
 enum Filter {
-    Eq { col: String, val: SqlValue },
-    Ne { col: String, val: SqlValue },
-    Gt { col: String, val: SqlValue },
-    Lt { col: String, val: SqlValue },
-    Like { col: String, pat: String },
+    Eq { col: &'static str, val: SqlValue },
+    Ne { col: &'static str, val: SqlValue },
+    Gt { col: &'static str, val: SqlValue },
+    Lt { col: &'static str, val: SqlValue },
+    Like { col: &'static str, pat: String },
 }
 
 #[derive(Clone)]
@@ -502,7 +518,7 @@ enum SortDir {
 
 #[derive(Clone)]
 struct Sort {
-    col: String,
+    col: &'static str,
     dir: SortDir,
 }
 
@@ -516,22 +532,17 @@ where
     order: Vec<Sort>,
     lim: Option<u64>,
     off: u64,
+    /// First unknown-field error encountered while building the query, surfaced
+    /// at the terminal operation (fetch_*). Keeps the builder API infallible
+    /// while still rejecting invalid identifiers.
+    error: Option<OrmError>,
     _marker: std::marker::PhantomData<T>,
 }
 
-unsafe impl<T> Send for SqliteQueryBuilder<T>
-where
-    T: Entity + Serialize + DeserializeOwned,
-    T::Id: Serialize + DeserializeOwned,
-{
-}
-
-unsafe impl<T> Sync for SqliteQueryBuilder<T>
-where
-    T: Entity + Serialize + DeserializeOwned,
-    T::Id: Serialize + DeserializeOwned,
-{
-}
+// Send/Sync are derived automatically: `Arc<Mutex<Connection>>` is Send+Sync
+// (Connection is Send) and the builder is only Send/Sync when `T` is. No
+// `unsafe impl` — a hand-written one would silently become unsound if a
+// non-Send/Sync field were ever added.
 
 impl<T> SqliteQueryBuilder<T>
 where
@@ -545,14 +556,29 @@ where
             order: Vec::new(),
             lim: None,
             off: 0,
+            error: None,
             _marker: std::marker::PhantomData,
         }
     }
 
-    fn col_name_for_field(&self, field: &str) -> String {
-        column_for_field::<T>(field)
-            .map(|c| c.name.to_string())
-            .unwrap_or_else(|| field.to_string())
+    /// Resolve a caller-supplied field name to a validated `&'static str` column
+    /// name from entity metadata. Unknown fields are rejected (recorded in
+    /// `self.error`) instead of being interpolated into SQL. See the `Filter`
+    /// security note.
+    fn resolve_col(&mut self, field: &str) -> Option<&'static str> {
+        match column_for_field::<T>(field) {
+            Some(c) => Some(c.name),
+            None => {
+                if self.error.is_none() {
+                    self.error = Some(OrmError::Query(format!(
+                        "unknown field '{}' for entity '{}'",
+                        field,
+                        T::table_name()
+                    )));
+                }
+                None
+            }
+        }
     }
 
     fn build_where_clause(&self) -> (String, Vec<SqlValue>) {
@@ -632,63 +658,58 @@ where
     T::Id: Serialize + DeserializeOwned,
 {
     fn filter_eq(mut self: Box<Self>, field: &'static str, value: &str) -> Box<dyn QueryBuilder<T>> {
-        let col = self.col_name_for_field(field);
-        self.filters.push(Filter::Eq {
-            col,
-            val: filter_value_for_field::<T>(field, value),
-        });
+        if let Some(col) = self.resolve_col(field) {
+            let val = filter_value_for_field::<T>(field, value);
+            self.filters.push(Filter::Eq { col, val });
+        }
         self
     }
 
     fn filter_ne(mut self: Box<Self>, field: &'static str, value: &str) -> Box<dyn QueryBuilder<T>> {
-        let col = self.col_name_for_field(field);
-        self.filters.push(Filter::Ne {
-            col,
-            val: filter_value_for_field::<T>(field, value),
-        });
+        if let Some(col) = self.resolve_col(field) {
+            let val = filter_value_for_field::<T>(field, value);
+            self.filters.push(Filter::Ne { col, val });
+        }
         self
     }
 
     fn filter_gt(mut self: Box<Self>, field: &'static str, value: &str) -> Box<dyn QueryBuilder<T>> {
-        let col = self.col_name_for_field(field);
-        self.filters.push(Filter::Gt {
-            col,
-            val: filter_value_for_field::<T>(field, value),
-        });
+        if let Some(col) = self.resolve_col(field) {
+            let val = filter_value_for_field::<T>(field, value);
+            self.filters.push(Filter::Gt { col, val });
+        }
         self
     }
 
     fn filter_lt(mut self: Box<Self>, field: &'static str, value: &str) -> Box<dyn QueryBuilder<T>> {
-        let col = self.col_name_for_field(field);
-        self.filters.push(Filter::Lt {
-            col,
-            val: filter_value_for_field::<T>(field, value),
-        });
+        if let Some(col) = self.resolve_col(field) {
+            let val = filter_value_for_field::<T>(field, value);
+            self.filters.push(Filter::Lt { col, val });
+        }
         self
     }
 
     fn filter_like(mut self: Box<Self>, field: &'static str, pattern: &str) -> Box<dyn QueryBuilder<T>> {
-        let col = self.col_name_for_field(field);
-        self.filters.push(Filter::Like {
-            col,
-            pat: pattern.to_string(),
-        });
+        if let Some(col) = self.resolve_col(field) {
+            self.filters.push(Filter::Like {
+                col,
+                pat: pattern.to_string(),
+            });
+        }
         self
     }
 
     fn order_by_asc(mut self: Box<Self>, field: &'static str) -> Box<dyn QueryBuilder<T>> {
-        self.order.push(Sort {
-            col: self.col_name_for_field(field),
-            dir: SortDir::Asc,
-        });
+        if let Some(col) = self.resolve_col(field) {
+            self.order.push(Sort { col, dir: SortDir::Asc });
+        }
         self
     }
 
     fn order_by_desc(mut self: Box<Self>, field: &'static str) -> Box<dyn QueryBuilder<T>> {
-        self.order.push(Sort {
-            col: self.col_name_for_field(field),
-            dir: SortDir::Desc,
-        });
+        if let Some(col) = self.resolve_col(field) {
+            self.order.push(Sort { col, dir: SortDir::Desc });
+        }
         self
     }
 
@@ -706,7 +727,10 @@ where
         self
     }
 
-    fn fetch_all(self: Box<Self>) -> Result<Vec<T>, OrmError> {
+    fn fetch_all(mut self: Box<Self>) -> Result<Vec<T>, OrmError> {
+        if let Some(err) = self.error.take() {
+            return Err(err);
+        }
         let cols = T::columns();
         let (sql, params) = self.build_select_query();
         let conn = self
@@ -726,7 +750,10 @@ where
         Ok(items.pop())
     }
 
-    fn fetch_count(self: Box<Self>) -> Result<u64, OrmError> {
+    fn fetch_count(mut self: Box<Self>) -> Result<u64, OrmError> {
+        if let Some(err) = self.error.take() {
+            return Err(err);
+        }
         let (sql, params) = self.build_count_query();
         let count: i64 = self
             .conn
@@ -738,6 +765,9 @@ where
     }
 
     fn fetch_page(mut self: Box<Self>, page: u64, size: u64) -> Result<Page<T>, OrmError> {
+        if let Some(err) = self.error.take() {
+            return Err(err);
+        }
         let (count_sql, count_params) = self.build_count_query();
         let total: i64 = self
             .conn
@@ -885,5 +915,38 @@ mod tests {
         assert_eq!(page.items.len(), 2);
         assert_eq!(page.items[0].id, 3);
         assert_eq!(page.items[1].id, 4);
+    }
+
+    // --- M1.0 correctness regressions ------------------------------------
+
+    #[test]
+    fn unknown_filter_field_is_rejected_not_injected() {
+        // An unrecognised field name must surface an error at the terminal op,
+        // never be interpolated into SQL (identifier-injection guard).
+        let repo = SqliteRepository::<Item>::in_memory().unwrap();
+        repo.save(sample("alpha", 10)).unwrap();
+
+        let result = repo
+            .query()
+            .filter_eq("name = 'x' OR 1=1 --", "irrelevant")
+            .fetch_all();
+        assert!(result.is_err(), "unknown field must error, got {result:?}");
+    }
+
+    #[test]
+    fn unknown_order_field_is_rejected() {
+        let repo = SqliteRepository::<Item>::in_memory().unwrap();
+        repo.save(sample("alpha", 10)).unwrap();
+        assert!(repo.query().order_by_asc("nope; DROP TABLE items").fetch_all().is_err());
+    }
+
+    #[test]
+    fn u64_id_exceeding_i64_errors_not_wraps() {
+        // number_to_integer must reject u64 values that don't fit i64 instead of
+        // silently wrapping to a negative rowid.
+        let big = serde_json::Number::from(u64::MAX);
+        assert!(number_to_integer(&big, "id").is_err());
+        let ok = serde_json::Number::from(42u64);
+        assert_eq!(number_to_integer(&ok, "id").unwrap(), 42);
     }
 }
