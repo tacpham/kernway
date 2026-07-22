@@ -2,6 +2,7 @@
 members = [
     "crates/kernway-core",
     "crates/rt-core",
+    "crates/rt-net",
     "crates/di-core",
     "crates/di-macro",
     "crates/kernway-http",
@@ -18,6 +19,7 @@ members = [
     "crates/kernway-sse",
     "crates/kernway-multipart",
     "crates/kernway",
+    "examples/echo-server",
     "examples/hello-di",
     "examples/hello-di-v2",
     "examples/hello-di-v3",
@@ -80,6 +82,7 @@ kernway-openapi      = { path = "crates/kernway-openapi" }
 kernway-sse          = { path = "crates/kernway-sse" }
 kernway-multipart    = { path = "crates/kernway-multipart" }
 rt-core              = { path = "crates/rt-core" }
+rt-net               = { path = "crates/rt-net" }
 di-core              = { path = "crates/di-core" }
 di-macro             = { path = "crates/di-macro" }
 

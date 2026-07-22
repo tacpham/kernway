@@ -1,0 +1,10 @@
+[package]
+name    = "echo-server"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+publish = false
+
+[dependencies]
+rt-core = { workspace = true }
+rt-net  = { workspace = true }

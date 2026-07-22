@@ -40,7 +40,7 @@ pub mod sys;
 pub mod task;
 
 pub use blocking::{spawn_blocking, Blocking};
-pub use executor::{spawn, try_handle, with_reactor, Executor, Handle};
+pub use executor::{spawn, try_handle, try_with_reactor, with_reactor, Executor, Handle};
 pub use reactor::{Direction, Reactor};
 pub use sys::{default_shard_count, pin_current_thread_to_core};
 pub use task::TaskId;
