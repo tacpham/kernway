@@ -52,25 +52,76 @@ pub fn encode_response(response: &Response) -> Vec<u8> {
 /// `content-length` is always emitted: without it a persistent connection has
 /// no way to tell where one response ends and the next begins.
 pub fn encode_response_with(response: &Response, connection: Connection) -> Vec<u8> {
-    let status_text = status_text(response.status.0);
-    let mut head = format!("HTTP/1.1 {} {}\r\n", response.status.0, status_text);
+    // Built straight into the output buffer: a separate head `String` copied in
+    // afterwards costs an extra allocation and pass over bytes we already have.
+    // `push_str` rather than `format!` per header for the same reason — each
+    // `format!` is one throwaway allocation on a path that runs per response.
+    let mut out = Vec::with_capacity(head_estimate(response) + response.body.len());
+    out.extend_from_slice(b"HTTP/1.1 ");
+    out.extend_from_slice(itoa(u64::from(response.status.0)).as_bytes());
+    out.push(b' ');
+    out.extend_from_slice(status_text(response.status.0).as_bytes());
+    out.extend_from_slice(b"\r\n");
 
     for (name, value) in &response.headers {
         // The connection header is the transport's call, not the handler's.
         if name.eq_ignore_ascii_case("connection") || name.eq_ignore_ascii_case("content-length") {
             continue;
         }
-        head.push_str(&format!("{}: {}\r\n", name, value));
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(b": ");
+        out.extend_from_slice(value.as_bytes());
+        out.extend_from_slice(b"\r\n");
     }
     // Content-Length is required (RFC 9112 §6.2)
-    head.push_str(&format!("content-length: {}\r\n", response.body.len()));
-    head.push_str(&format!("connection: {}\r\n", connection.header_value()));
-    head.push_str("\r\n");
+    out.extend_from_slice(b"content-length: ");
+    out.extend_from_slice(itoa(u64::try_from(response.body.len()).expect("a body length fits in u64")).as_bytes());
+    out.extend_from_slice(b"\r\nconnection: ");
+    out.extend_from_slice(connection.header_value().as_bytes());
+    out.extend_from_slice(b"\r\n\r\n");
 
-    let mut out = Vec::with_capacity(head.len() + response.body.len());
-    out.extend_from_slice(head.as_bytes());
     out.extend_from_slice(&response.body);
     out
+}
+
+/// Big enough for the head in one allocation, without walking the headers twice
+/// to get it exactly right. Over-estimating a few bytes is cheaper than a
+/// realloc; under-estimating only costs the growth `Vec` would have done anyway.
+fn head_estimate(response: &Response) -> usize {
+    const STATUS_AND_FIXED_HEADERS: usize = 64; // status line + content-length + connection
+    let headers: usize = response
+        .headers
+        .iter()
+        .map(|(name, value)| name.len() + value.len() + 4)
+        .sum();
+    STATUS_AND_FIXED_HEADERS + headers
+}
+
+/// Decimal digits of `n`, without the allocation `format!`/`to_string` makes.
+///
+/// Both call sites are small integers — a status code and a body length — so a
+/// 20-byte stack buffer covers every `u64`.
+struct Digits {
+    buf: [u8; 20],
+    start: usize,
+}
+
+impl Digits {
+    fn as_bytes(&self) -> &[u8] {
+        &self.buf[self.start..]
+    }
+}
+
+fn itoa(mut n: u64) -> Digits {
+    let mut d = Digits { buf: [0; 20], start: 20 };
+    loop {
+        d.start -= 1;
+        d.buf[d.start] = b'0' + u8::try_from(n % 10).expect("a decimal digit fits in u8");
+        n /= 10;
+        if n == 0 {
+            return d;
+        }
+    }
 }
 
 fn status_text(code: u16) -> &'static str {
