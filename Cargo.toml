@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/kernway-core",
+    "crates/rt-core",
     "crates/di-core",
     "crates/di-macro",
     "crates/kernway-http",
@@ -57,6 +58,12 @@ serde_json = "1"
 # Async
 futures-core = "0.3"
 
+# Runtime — I/O readiness (epoll/kqueue/IOCP) and the platform layer.
+# `mio` is the only third-party primitive rt-core builds on; everything above it
+# (Task, Waker, Executor, Reactor) is hand-written — see docs/internal/modules/rt-core.md.
+mio  = { version = "1", features = ["os-poll", "net"] }
+libc = "0.2"
+
 # Internal crates
 kernway-core         = { path = "crates/kernway-core" }
 kernway-http         = { path = "crates/kernway-http" }
@@ -72,6 +79,7 @@ kernway-cache-memory = { path = "crates/kernway-cache-memory" }
 kernway-openapi      = { path = "crates/kernway-openapi" }
 kernway-sse          = { path = "crates/kernway-sse" }
 kernway-multipart    = { path = "crates/kernway-multipart" }
+rt-core              = { path = "crates/rt-core" }
 di-core              = { path = "crates/di-core" }
 di-macro             = { path = "crates/di-macro" }
 
