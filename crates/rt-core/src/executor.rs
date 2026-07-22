@@ -8,7 +8,7 @@
 //! inside the [`Reactor`] until the OS reports readiness (or another thread
 //! unparks us).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
@@ -75,7 +75,32 @@ struct Inner {
     reactor: RefCell<Reactor>,
     timers: RefCell<Timers>,
     shared: Arc<Shared>,
+    /// Rounds of a busy run queue since the clock was last read. See
+    /// [`ROUNDS_PER_CLOCK_READ`].
+    io_tick: Cell<u32>,
+    /// When the reactor was last polled, for the [`IO_POLL_INTERVAL`] budget.
+    last_io_poll: Cell<Instant>,
 }
+
+/// How long a busy run queue may go without the reactor being polled.
+///
+/// A zero-timeout `poll()` is still a syscall — measured at ~14µs on macOS —
+/// so calling it once per round made a self-waking task pay a syscall per
+/// yield: `wake_poll_cycle` was 13.5µs where the scheduling work itself is
+/// ~47ns. Rationing it is therefore worth a lot.
+///
+/// The budget is *time*, not a round count, because a round is not a fixed
+/// amount of work — "every 61 rounds", the shape tokio's `event_interval`
+/// uses, bounds socket latency by a quantity that varies with the workload.
+/// A microsecond budget bounds it by the thing actually being promised.
+const IO_POLL_INTERVAL: Duration = Duration::from_micros(100);
+
+/// Rounds between clock reads on that path.
+///
+/// `Instant::now` is ~17ns — cheap next to the syscall it guards, but not next
+/// to a 47ns round. Checking every 16th round makes it ~1ns amortized while
+/// still resolving the budget far finer than it is wide.
+const ROUNDS_PER_CLOCK_READ: u32 = 16;
 
 impl Inner {
     /// Poll one task, removing it from the slab when it completes.
@@ -125,12 +150,19 @@ impl Inner {
             .map(|d| d.saturating_duration_since(Instant::now()));
         let result = self.reactor.borrow_mut().poll(timeout);
         self.shared.set_parked(false);
+        self.mark_io_polled(); // the reactor is current again
         self.fire_timers();
         result.map(|_| ())
     }
 
     /// Wake every task whose deadline has passed.
     fn fire_timers(&self) {
+        // Reading the clock is not free (~17ns, measured) and this runs on every
+        // round of a busy run queue. Most shards have no timer pending at any
+        // given moment, and for those a heap peek answers the question.
+        if self.timers.borrow().is_empty() {
+            return;
+        }
         let mut expired = Vec::new();
         self.timers
             .borrow_mut()
@@ -143,12 +175,13 @@ impl Inner {
 
     /// Service the reactor without blocking.
     ///
-    /// The loop must do this on every iteration where it *doesn't* park.
-    /// Otherwise a task that keeps waking itself — a busy poll loop, a chain of
-    /// `yield_now`s, any CPU-bound work spread across awaits — keeps the run
-    /// queue permanently non-empty, the executor never parks, and no I/O event
-    /// is ever collected. Sockets then wait forever on data the kernel already
-    /// has. A zero timeout costs one non-blocking syscall per iteration.
+    /// The loop must keep doing this while it *doesn't* park. Otherwise a task
+    /// that keeps waking itself — a busy poll loop, a chain of `yield_now`s,
+    /// any CPU-bound work spread across awaits — keeps the run queue
+    /// permanently non-empty, the executor never parks, and no I/O event is
+    /// ever collected. Sockets then wait forever on data the kernel already
+    /// has. A zero timeout still costs a syscall, so the busy path reaches this
+    /// through [`Inner::poll_io_periodic`] rather than calling it every round.
     fn poll_io_now(&self) -> io::Result<()> {
         let result = self
             .reactor
@@ -157,8 +190,35 @@ impl Inner {
             .map(|_| ());
         // Timers must advance here too, or a busy run queue would postpone every
         // deadline for as long as it stays busy.
+        self.mark_io_polled();
         self.fire_timers();
         result
+    }
+
+    /// Restart the I/O budget: the reactor's view of readiness is current.
+    fn mark_io_polled(&self) {
+        self.io_tick.set(0);
+        self.last_io_poll.set(Instant::now());
+    }
+
+    /// Service I/O from a *busy* run queue: a real reactor poll once the
+    /// [`IO_POLL_INTERVAL`] budget is spent, timers on every round.
+    ///
+    /// Timers are not rate-limited alongside it because `fire_expired` is a
+    /// heap peek rather than a syscall — cheap enough to run every round, and
+    /// rationing it would let sleeps overshoot under load.
+    fn poll_io_periodic(&self) -> io::Result<()> {
+        let tick = self.io_tick.get() + 1;
+        if tick >= ROUNDS_PER_CLOCK_READ {
+            self.io_tick.set(0);
+            if self.last_io_poll.get().elapsed() >= IO_POLL_INTERVAL {
+                return self.poll_io_now();
+            }
+        } else {
+            self.io_tick.set(tick);
+        }
+        self.fire_timers();
+        Ok(())
     }
 }
 
@@ -209,6 +269,8 @@ impl Executor {
                 reactor: RefCell::new(reactor),
                 timers: RefCell::new(Timers::default()),
                 shared: Arc::new(Shared::new(unparker)),
+                io_tick: Cell::new(0),
+                last_io_poll: Cell::new(Instant::now()),
             }),
         })
     }
@@ -260,7 +322,7 @@ impl Executor {
                 return Ok(());
             }
             if self.inner.shared.has_ready() {
-                self.inner.poll_io_now()?; // keep I/O alive under a busy run queue
+                self.inner.poll_io_periodic()?; // keep I/O alive under a busy run queue
             } else {
                 self.inner.park()?;
             }
@@ -310,9 +372,10 @@ impl Executor {
             }
             self.inner.drain_ready(&mut buf);
             if self.inner.shared.take_main_woken() || self.inner.shared.has_ready() {
-                // Progress is possible without sleeping — but still collect I/O,
-                // or a self-waking task starves every socket on this shard.
-                self.inner.poll_io_now()?;
+                // Progress is possible without sleeping — but still collect I/O
+                // periodically, or a self-waking task starves every socket on
+                // this shard.
+                self.inner.poll_io_periodic()?;
                 continue;
             }
             self.inner.park()?;
@@ -516,6 +579,73 @@ mod tests {
         assert!(done.get());
         // Nothing runnable left → returns immediately rather than parking.
         assert_eq!(ex.run_until_stalled(), 0);
+    }
+
+    #[test]
+    fn a_spinning_task_does_not_starve_a_socket() {
+        /// Parks the polling task on `server` becoming readable.
+        struct Readable {
+            source: Option<mio::net::TcpStream>,
+        }
+
+        impl Future for Readable {
+            type Output = ();
+            fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+                let Some(mut source) = self.source.take() else {
+                    return Poll::Ready(()); // woken: the kernel had data for us
+                };
+                let token = with_reactor(|r| r.register(&mut source).unwrap());
+                with_reactor(|r| r.park(token, crate::Direction::Read, cx.waker().clone()));
+                std::mem::forget(source); // the test ends here; no deregistration dance
+                self.source = None;
+                Poll::Pending
+            }
+        }
+
+        // The reason `poll_io_periodic` may ration the syscall but never drop
+        // it: with a task that keeps waking itself the executor never parks, so
+        // this is the only path that ever collects readiness. Data already in
+        // the kernel must still reach a parked reader.
+        use std::io::Write;
+
+        let ex = Executor::new().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let server = mio::net::TcpStream::from_std(server);
+        client.write_all(b"ping").unwrap();
+
+        // A sibling task spins for far longer than one I/O interval, so the run
+        // queue never empties and the executor never parks.
+        let spins = Rc::new(Cell::new(0usize));
+        // Long enough to outlast several `IO_POLL_INTERVAL` budgets even if a
+        // round turns out to be far cheaper than measured.
+        const SPIN_ROUNDS: usize = 50_000;
+        let counter = Rc::clone(&spins);
+        ex.spawn(async move {
+            for _ in 0..SPIN_ROUNDS {
+                counter.set(counter.get() + 1);
+                YieldOnce(false).await;
+            }
+        });
+
+        let observed = Rc::new(Cell::new(usize::MAX));
+        let at_wake = Rc::clone(&observed);
+        let seen = Rc::clone(&spins);
+        ex.block_on(async move {
+            Readable { source: Some(server) }.await;
+            at_wake.set(seen.get());
+        })
+        .unwrap();
+
+        assert!(
+            observed.get() < SPIN_ROUNDS,
+            "readiness arrived only after the spinner finished ({} of {} rounds) — \
+             a busy run queue starved the socket",
+            observed.get(),
+            SPIN_ROUNDS
+        );
     }
 
     #[test]
