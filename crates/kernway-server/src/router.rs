@@ -35,13 +35,20 @@ impl Router {
 
     /// Find a route matching the method and path.
     /// Returns (handler, path_params) if found.
+    ///
+    /// Routes are tried in registration order, so the first one added wins.
+    ///
+    /// Matching and extraction are separate passes on purpose. Every route
+    /// tried pays the match; only the one that wins pays for a map of its
+    /// parameters. Building that map inside the loop meant every candidate
+    /// allocated one, then threw it away on the next mismatch.
     pub fn find(&self, method: &str, path: &str) -> Option<(Handler, HashMap<String, String>)> {
-        let method = method.to_uppercase();
         for route in &self.routes {
-            if route.method != method { continue; }
-            if let Some(params) = match_pattern(&route.pattern, path) {
-                return Some((Arc::clone(&route.handler), params));
-            }
+            // Compared in place: `method.to_uppercase()` allocated a String per
+            // request only to compare it against an already-uppercased field.
+            if !route.method.eq_ignore_ascii_case(method) { continue; }
+            if !matches_pattern(&route.pattern, path) { continue; }
+            return Some((Arc::clone(&route.handler), extract_params(&route.pattern, path)));
         }
         None
     }
@@ -51,26 +58,47 @@ impl Default for Router {
     fn default() -> Self { Self::new() }
 }
 
-/// Pattern matching: "/users/{id}" matches "/users/42" → { "id": "42" }
-fn match_pattern(pattern: &str, path: &str) -> Option<HashMap<String, String>> {
-    let pat_segs: Vec<&str> = pattern.split('/').collect();
-    let pth_segs: Vec<&str> = path.split('/').collect();
+/// The name inside a pattern segment, if it is a placeholder: `{id}` → `id`.
+fn placeholder(segment: &str) -> Option<&str> {
+    segment.strip_prefix('{')?.strip_suffix('}')
+}
 
-    if pat_segs.len() != pth_segs.len() {
-        return None;
-    }
-
-    let mut params = HashMap::new();
-    for (pat, pth) in pat_segs.iter().zip(pth_segs.iter()) {
-        if pat.starts_with('{') && pat.ends_with('}') {
-            // Path param
-            let key = &pat[1..pat.len() - 1];
-            params.insert(key.to_string(), pth.to_string());
-        } else if pat != pth {
-            return None;
+/// Whether `pattern` matches `path` — `/users/{id}` against `/users/42`.
+///
+/// Walks the two segment iterators in step rather than collecting them. The
+/// old form built a `Vec` for each side, which meant two heap allocations for
+/// every route the router tried and then discarded, on every request.
+fn matches_pattern(pattern: &str, path: &str) -> bool {
+    let mut pat = pattern.split('/');
+    let mut pth = path.split('/');
+    loop {
+        match (pat.next(), pth.next()) {
+            (None, None) => return true,
+            // Unequal segment counts: one iterator runs out before the other.
+            (None, Some(_)) | (Some(_), None) => return false,
+            (Some(p), Some(s)) => {
+                if placeholder(p).is_none() && p != s {
+                    return false;
+                }
+            }
         }
     }
-    Some(params)
+}
+
+/// The path parameters of a pattern known to match: `/users/{id}` + `/users/42`
+/// → `{ "id": "42" }`.
+///
+/// Only ever called on the route that won, so a pattern with no placeholders
+/// costs nothing here — `HashMap::new` does not allocate until something is
+/// inserted.
+fn extract_params(pattern: &str, path: &str) -> HashMap<String, String> {
+    let mut params = HashMap::new();
+    for (pat, pth) in pattern.split('/').zip(path.split('/')) {
+        if let Some(key) = placeholder(pat) {
+            params.insert(key.to_string(), pth.to_string());
+        }
+    }
+    params
 }
 
 #[cfg(test)]
@@ -79,26 +107,63 @@ mod tests {
 
     #[test]
     fn exact_match() {
-        assert!(match_pattern("/health", "/health").is_some());
-        assert!(match_pattern("/health", "/other").is_none());
+        assert!(matches_pattern("/health", "/health"));
+        assert!(!matches_pattern("/health", "/other"));
     }
 
     #[test]
     fn path_param_match() {
-        let params = match_pattern("/users/{id}", "/users/42").unwrap();
+        assert!(matches_pattern("/users/{id}", "/users/42"));
+        let params = extract_params("/users/{id}", "/users/42");
         assert_eq!(params.get("id").unwrap(), "42");
     }
 
     #[test]
     fn multi_param_match() {
-        let params = match_pattern("/users/{uid}/posts/{pid}", "/users/1/posts/99").unwrap();
+        let pattern = "/users/{uid}/posts/{pid}";
+        assert!(matches_pattern(pattern, "/users/1/posts/99"));
+        let params = extract_params(pattern, "/users/1/posts/99");
         assert_eq!(params["uid"], "1");
         assert_eq!(params["pid"], "99");
     }
 
     #[test]
     fn length_mismatch() {
-        assert!(match_pattern("/users/{id}", "/users/1/extra").is_none());
+        assert!(!matches_pattern("/users/{id}", "/users/1/extra"));
+        // The other direction too: the path running out first must not match
+        // by silently ignoring the pattern's remaining segments.
+        assert!(!matches_pattern("/users/{id}/posts", "/users/1"));
+    }
+
+    #[test]
+    fn a_static_route_yields_no_params() {
+        let params = extract_params("/health", "/health");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn an_unclosed_brace_is_a_literal_segment() {
+        // `{id` is not a placeholder, so it only matches itself.
+        assert!(matches_pattern("/users/{id", "/users/{id"));
+        assert!(!matches_pattern("/users/{id", "/users/42"));
+    }
+
+    #[test]
+    fn first_registered_route_wins() {
+        let mut router = Router::new();
+        let ok = |body: &'static str| -> Handler {
+            Arc::new(move |_req, _ctx| {
+                kernway_core::response::Response::new(kernway_core::error::StatusCode::OK)
+                    .body(body.as_bytes().to_vec())
+            })
+        };
+        router.add("GET", "/users/{id}", ok("dynamic"));
+        router.add("GET", "/users/me", ok("static"));
+        let (handler, params) = router.find("GET", "/users/me").unwrap();
+        let ctx = di_core::AppContext::new();
+        let resp = handler(&kernway_core::request::Request::new("GET", "/users/me"), &ctx);
+        assert_eq!(resp.body, b"dynamic", "registration order decides, not specificity");
+        assert_eq!(params.get("id").unwrap(), "me");
     }
 
     #[test]
