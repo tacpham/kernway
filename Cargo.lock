@@ -40,7 +40,6 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 name = "di-core"
 version = "0.1.0"
 dependencies = [
- "kernway-core",
  "thiserror",
 ]
 
@@ -231,8 +230,6 @@ dependencies = [
 name = "kernway-openapi"
 version = "0.1.0"
 dependencies = [
- "kernway-core",
- "kernway-server",
  "serde",
  "serde_json",
 ]
@@ -248,7 +245,6 @@ dependencies = [
 name = "kernway-orm-macro"
 version = "0.1.0"
 dependencies = [
- "kernway-orm-core",
  "proc-macro2",
  "quote",
  "syn 2.0.119",

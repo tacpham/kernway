@@ -50,10 +50,21 @@ use syn::{
 ///     }
 /// }
 /// ```
-#[proc_macro_derive(Component, attributes(inject, provides, post_construct))]
+#[proc_macro_derive(
+    Component,
+    attributes(inject, provides, post_construct, primary, qualifier, default_impl)
+)]
 pub fn derive_component(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name  = &input.ident;
+
+    // --- Bean metadata: `#[primary]`, `#[qualifier("…")]`, `#[default_impl]` ---
+    let bean_qualifier: Option<String> = match parse_bean_qualifier(&input.attrs) {
+        Ok(q) => q,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    let is_primary   = input.attrs.iter().any(|a| a.path().is_ident("primary"));
+    let is_default   = input.attrs.iter().any(|a| a.path().is_ident("default_impl"));
 
     // --- Interface bindings: `#[provides(dyn Trait)]` on the struct ---
     let provided: Vec<Type> = match parse_provides(&input.attrs) {
@@ -185,9 +196,26 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
             // Clone to the concrete `Arc<Self>`, then let-coerce to `Arc<dyn Trait>`.
             let __concrete = ::std::sync::Arc::clone(this);
             let __binding: ::std::sync::Arc<#t> = __concrete;
-            ctx.register_as::<#t>(__binding)?;
+            // Carries this bean's origin/primary/qualifier onto the binding, so
+            // `Arc<dyn Trait>` injection honours `#[primary]` / `#[qualifier]`.
+            ctx.register_as_component::<Self, #t>(__binding)?;
         })
         .collect();
+
+    // Bean metadata overrides on `RegistersComponent`.
+    let origin_impl = is_default.then(|| quote! {
+        fn bean_origin() -> ::di_core::BeanOrigin {
+            ::di_core::BeanOrigin::FrameworkDefault
+        }
+    });
+    let primary_impl = is_primary.then(|| quote! {
+        fn is_primary() -> bool { true }
+    });
+    let qualifier_impl = bean_qualifier.map(|q| quote! {
+        fn qualifier() -> ::std::option::Option<&'static str> {
+            ::std::option::Option::Some(#q)
+        }
+    });
 
     // `#[post_construct(method)]` → override the lifecycle hook.
     let post_construct_impl = post_ctor.map(|m| quote! {
@@ -209,6 +237,10 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
         }
 
         impl ::di_core::RegistersComponent for #name {
+            #origin_impl
+            #primary_impl
+            #qualifier_impl
+
             fn dependencies() -> ::std::vec::Vec<::std::any::TypeId> {
                 ::std::vec![ #(#hard_deps),* ]
             }
@@ -314,6 +346,24 @@ fn parse_post_construct(attrs: &[syn::Attribute]) -> syn::Result<Option<syn::Ide
     // Expect exactly one method identifier: `#[post_construct(start)]`.
     let ident: syn::Ident = attr.parse_args()?;
     Ok(Some(ident))
+}
+
+// ============================================================
+// Helper: parse `#[qualifier("name")]` on the struct
+// ============================================================
+
+/// The name this bean is registered under — applied to the concrete bean *and*
+/// to every `#[provides]` trait binding (Spring's `@Qualifier` on the bean).
+fn parse_bean_qualifier(attrs: &[syn::Attribute]) -> syn::Result<Option<String>> {
+    let mut found: Option<String> = None;
+    for attr in attrs.iter().filter(|a| a.path().is_ident("qualifier")) {
+        if found.is_some() {
+            return Err(syn::Error::new_spanned(attr, "duplicate `#[qualifier]` on this bean"));
+        }
+        let lit: syn::LitStr = attr.parse_args()?;
+        found = Some(lit.value());
+    }
+    Ok(found)
 }
 
 // ============================================================

@@ -1,5 +1,6 @@
 //! Buildable trait — automatic construction from AppContext.
 
+use crate::bean::BeanOrigin;
 use crate::container::Container;
 use crate::context::AppContext;
 use crate::error::DiError;
@@ -45,6 +46,31 @@ pub trait Buildable: Sized + Send + Sync + 'static {
 /// `register_bindings` publishes those trait bindings after the concrete bean
 /// is built.
 pub trait RegistersComponent: Buildable {
+    /// Where this bean comes from — drives the override rules in
+    /// [`AppContext::register_with_entry`](crate::AppContext::register_with_entry).
+    ///
+    /// `#[default_impl]` reports [`BeanOrigin::FrameworkDefault`], so a user bean
+    /// of the same type silently replaces it. Everything else is
+    /// [`BeanOrigin::User`].
+    fn bean_origin() -> BeanOrigin {
+        BeanOrigin::User
+    }
+
+    /// Whether `#[primary]` was applied — wins when several beans share a type
+    /// (or a `#[provides]` trait) and no qualifier was requested.
+    fn is_primary() -> bool {
+        false
+    }
+
+    /// The `#[qualifier("name")]` this bean was registered under, if any.
+    ///
+    /// Applies to the concrete bean *and* every `#[provides]` trait binding, so
+    /// `#[inject(qualifier = "…")] Arc<dyn Trait>` resolves the same way as the
+    /// concrete type does.
+    fn qualifier() -> Option<&'static str> {
+        None
+    }
+
     /// TypeIds this bean needs resolved before it can be built.
     ///
     /// Concrete deps are keyed by `TypeId::of::<C>()`; trait deps (`Arc<dyn Tr>`)

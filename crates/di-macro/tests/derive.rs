@@ -240,3 +240,109 @@ fn component_builds_against_a_mock_container() {
     let svc = Service::build(&mock).expect("Service should build from the mock");
     assert_eq!(svc.repo.name(), "repo");
 }
+
+// --- Bean metadata: #[primary] / #[qualifier] / #[default_impl] --------
+
+trait Notifier: Send + Sync {
+    fn channel(&self) -> &'static str;
+}
+
+#[derive(Component)]
+#[provides(dyn Notifier)]
+#[primary]
+struct EmailNotifier;
+impl Notifier for EmailNotifier {
+    fn channel(&self) -> &'static str { "email" }
+}
+
+#[derive(Component)]
+#[provides(dyn Notifier)]
+#[qualifier("sms")]
+struct SmsNotifier;
+impl Notifier for SmsNotifier {
+    fn channel(&self) -> &'static str { "sms" }
+}
+
+#[derive(Component)]
+struct AlertService {
+    #[inject]
+    default_channel: Arc<dyn Notifier>,
+    #[inject(qualifier = "sms")]
+    urgent_channel: Arc<dyn Notifier>,
+}
+
+#[test]
+fn primary_and_qualifier_disambiguate_trait_bindings() {
+    let mut ctx = AppContext::new();
+    ctx.register_component::<AlertService>()
+        .register_component::<EmailNotifier>()
+        .register_component::<SmsNotifier>();
+    ctx.refresh().expect("primary + qualifier must resolve both fields");
+
+    let svc = ctx.get::<AlertService>().unwrap();
+    // Unqualified `Arc<dyn Notifier>` → the #[primary] provider.
+    assert_eq!(svc.default_channel.channel(), "email");
+    // `#[inject(qualifier = "sms")]` on a trait field used to be dead code:
+    // the binding carried no qualifier, so it always failed with NotFound.
+    assert_eq!(svc.urgent_channel.channel(), "sms");
+
+    // The same holds for direct resolution off the context.
+    assert_eq!(ctx.get_as::<dyn Notifier>().unwrap().channel(), "email");
+    assert_eq!(ctx.get_all_as::<dyn Notifier>().len(), 2);
+}
+
+#[test]
+fn qualifier_on_the_bean_also_names_the_concrete_type() {
+    let mut ctx = AppContext::new();
+    ctx.register_component::<SmsNotifier>();
+    ctx.refresh().unwrap();
+    // `#[qualifier("sms")]` applies to the concrete bean as well as the binding.
+    assert!(ctx.get_qualified::<SmsNotifier>("sms").is_ok());
+}
+
+// `#[default_impl]` — a framework fallback a user bean silently replaces.
+
+trait Clock: Send + Sync {
+    fn now(&self) -> u64;
+}
+
+#[derive(Component)]
+#[provides(dyn Clock)]
+#[default_impl]
+struct SystemClock;
+impl Clock for SystemClock {
+    fn now(&self) -> u64 { 0 }
+}
+
+#[derive(Component)]
+#[provides(dyn Clock)]
+struct FixedClock;
+impl Clock for FixedClock {
+    fn now(&self) -> u64 { 42 }
+}
+
+#[test]
+fn default_impl_is_used_when_no_user_bean_exists() {
+    let mut ctx = AppContext::new();
+    ctx.register_component::<SystemClock>();
+    ctx.refresh().unwrap();
+    assert_eq!(ctx.get_as::<dyn Clock>().unwrap().now(), 0);
+}
+
+#[test]
+fn user_bean_overrides_default_impl_in_either_order() {
+    // Default registered first.
+    let mut ctx = AppContext::new();
+    ctx.register_component::<SystemClock>()
+        .register_component::<FixedClock>();
+    ctx.refresh().unwrap();
+    assert_eq!(ctx.get_as::<dyn Clock>().unwrap().now(), 42, "user bean must win");
+    assert_eq!(ctx.get_all_as::<dyn Clock>().len(), 1, "default must be dropped, not kept");
+
+    // User bean registered first — same outcome.
+    let mut ctx2 = AppContext::new();
+    ctx2.register_component::<FixedClock>()
+        .register_component::<SystemClock>();
+    ctx2.refresh().unwrap();
+    assert_eq!(ctx2.get_as::<dyn Clock>().unwrap().now(), 42);
+}
