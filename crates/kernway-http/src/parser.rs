@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::net::TcpStream;
 
+use kernway_core::headers::Headers;
 use kernway_core::request::{HttpVersion, Request};
 use thiserror::Error;
 
@@ -47,7 +48,7 @@ pub enum Parsed {
 /// Accepts LF as well as CRLF line endings, so a request typed by hand through
 /// `nc` parses like one sent by `curl`.
 pub fn parse_bytes(buf: &[u8]) -> Result<Parsed, ParseError> {
-    let Some(head_end) = find_head_end(buf) else {
+    let Some((head_end, line_count)) = find_head_end(buf) else {
         // No blank line yet. Bound the wait, or a client that never sends one
         // could grow this buffer without limit.
         if buf.len() > MAX_HEAD_BYTES {
@@ -66,14 +67,18 @@ pub fn parse_bytes(buf: &[u8]) -> Result<Parsed, ParseError> {
     let request_line = lines.next().unwrap_or("").trim();
     let (method, path, query, version) = parse_request_line(request_line)?;
 
-    let mut headers: HashMap<String, String> = HashMap::new();
+    // One allocation for the whole set, sized from the head we already have in
+    // front of us — see the note on `Headers` for why this is not a `HashMap`.
+    // `append` rather than `insert`: the head is walked in order, so a repeated
+    // header resolves to the last one without a duplicate check per line.
+    let mut headers = Headers::with_capacity(head.len(), line_count.saturating_sub(1));
     for line in lines {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             break;
         }
         if let Some((name, value)) = split_header(trimmed) {
-            headers.insert(name, value);
+            headers.append(name, value);
         }
     }
 
@@ -104,15 +109,22 @@ pub fn parse_bytes(buf: &[u8]) -> Result<Parsed, ParseError> {
     })
 }
 
-/// Byte offset just past the blank line that ends the head, if it has arrived.
-fn find_head_end(buf: &[u8]) -> Option<usize> {
+/// Byte offset just past the blank line that ends the head, plus how many lines
+/// preceded it — if the head has arrived at all.
+///
+/// The line count comes out of this scan for free, and it is exactly the header
+/// capacity the caller needs. Counting `\n` again afterwards would walk the
+/// whole head a second time to learn something already known here.
+fn find_head_end(buf: &[u8]) -> Option<(usize, usize)> {
     let mut pos = 0;
+    let mut lines = 0;
     while let Some(offset) = buf[pos..].iter().position(|&b| b == b'\n') {
         let end = pos + offset;
         let line = buf[pos..end].strip_suffix(b"\r").unwrap_or(&buf[pos..end]);
         if line.is_empty() {
-            return Some(end + 1);
+            return Some((end + 1, lines));
         }
+        lines += 1;
         pos = end + 1;
     }
     None
@@ -122,36 +134,43 @@ fn find_head_end(buf: &[u8]) -> Option<usize> {
 type RequestLine = (String, String, HashMap<String, String>, HttpVersion);
 
 fn parse_request_line(line: &str) -> Result<RequestLine, ParseError> {
-    let parts: Vec<&str> = line.splitn(3, ' ').collect();
-    if parts.len() < 2 {
+    // Walked with the iterator rather than collected: `collect::<Vec<_>>` puts a
+    // heap allocation on the request-line path for three string slices.
+    let mut parts = line.splitn(3, ' ');
+    let (Some(method), Some(full_path)) = (parts.next(), parts.next()) else {
+        return Err(ParseError::BadRequestLine(line.to_string()));
+    };
+    if method.is_empty() {
         return Err(ParseError::BadRequestLine(line.to_string()));
     }
-    let full_path = parts[1];
     let (path, query_str) = match full_path.find('?') {
         Some(q) => (&full_path[..q], &full_path[q + 1..]),
         None => (full_path, ""),
     };
     // A missing version means HTTP/0.9, which nobody speaks any more; treating
     // it as 1.1 would wrongly hold the connection open, so it falls to 1.0.
-    let version = match parts.get(2).map(|v| v.trim()) {
+    let version = match parts.next().map(str::trim) {
         Some("HTTP/1.0") | None => HttpVersion::Http10,
         _ => HttpVersion::Http11,
     };
     Ok((
-        parts[0].to_uppercase(),
+        // ASCII-only: RFC 9110 §9 defines methods as tokens, so the Unicode
+        // case tables `to_uppercase` consults can only cost time here.
+        method.to_ascii_uppercase(),
         path.to_string(),
         parse_query_string(query_str),
         version,
     ))
 }
 
-/// `Name: value` → `("name", "value")`. Names are lowercased for lookup.
-fn split_header(line: &str) -> Option<(String, String)> {
+/// `Name: value` → `("Name", "value")`, borrowed from `line`.
+///
+/// Nothing is copied or lowercased here: `Headers` owns the one buffer these
+/// end up in and lowercases the name as it copies. Returning `String`s would
+/// put two allocations per header back on the path this exists to keep clear.
+fn split_header(line: &str) -> Option<(&str, &str)> {
     let colon = line.find(':')?;
-    Some((
-        line[..colon].trim().to_lowercase(),
-        line[colon + 1..].trim().to_string(),
-    ))
+    Some((line[..colon].trim(), line[colon + 1..].trim()))
 }
 
 /// Parse an HTTP/1.1 request from a blocking TcpStream.
@@ -190,16 +209,14 @@ pub fn parse_from_reader<R: BufRead>(mut reader: R) -> Result<Request, ParseErro
     let query = parse_query_string(query_str);
 
     // --- Headers ---
-    let mut headers: HashMap<String, String> = HashMap::new();
+    let mut headers = Headers::new();
     loop {
         let mut line = String::new();
         reader.read_line(&mut line)?;
         let trimmed = line.trim();
         if trimmed.is_empty() { break; }
-        if let Some(colon) = trimmed.find(':') {
-            let name  = trimmed[..colon].trim().to_lowercase();
-            let value = trimmed[colon + 1..].trim().to_string();
-            headers.insert(name, value);
+        if let Some((name, value)) = split_header(trimmed) {
+            headers.append(name, value);
         }
     }
 
@@ -326,7 +343,7 @@ mod byte_parser_tests {
         let (req, consumed) = complete(raw);
         assert_eq!(req.method, "GET");
         assert_eq!(req.path, "/health");
-        assert_eq!(req.headers["host"], "localhost");
+        assert_eq!(req.headers.get("host"), Some("localhost"));
         assert_eq!(consumed, raw.len(), "a bodyless request consumes exactly its head");
     }
 
@@ -368,7 +385,7 @@ mod byte_parser_tests {
         // What a hand-typed `nc` session sends.
         let (req, _) = complete("GET /ping HTTP/1.1\nHost: x\n\n");
         assert_eq!(req.path, "/ping");
-        assert_eq!(req.headers["host"], "x");
+        assert_eq!(req.headers.get("host"), Some("x"));
     }
 
     #[test]

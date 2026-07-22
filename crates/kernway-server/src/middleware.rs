@@ -17,7 +17,7 @@ impl Middleware for RequestIdMiddleware {
 
     fn handle(&self, req: &mut Request, next: &dyn Fn(&mut Request) -> Response) -> Response {
         let id = generate_request_id();
-        req.headers.insert("x-request-id".to_string(), id.clone());
+        req.headers.insert("x-request-id", &id);
         let mut resp = next(req);
         resp.headers.insert("x-request-id".to_string(), id);
         resp
@@ -74,12 +74,12 @@ mod tests {
         let resp = middleware.handle(&mut req, &|request| {
             let mut resp = Response::new(StatusCode::OK);
             if let Some(id) = request.headers.get("x-request-id") {
-                resp.headers.insert("seen-request-id".to_string(), id.clone());
+                resp.headers.insert("seen-request-id".to_string(), id.to_string());
             }
             resp
         });
 
-        let req_id = req.headers.get("x-request-id").cloned().unwrap();
+        let req_id = req.headers.get("x-request-id").unwrap().to_string();
         assert_eq!(resp.headers.get("x-request-id"), Some(&req_id));
         assert_eq!(resp.headers.get("seen-request-id"), Some(&req_id));
     }
