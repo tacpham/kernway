@@ -5,5 +5,5 @@
 
 pub mod parser;
 pub mod writer;
-pub use parser::parse_request;
-pub use writer::write_response;
+pub use parser::{parse_bytes, parse_request, Parsed};
+pub use writer::{encode_response, write_response};

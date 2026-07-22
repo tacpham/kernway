@@ -17,7 +17,137 @@ pub enum ParseError {
     TooLarge,
 }
 
-/// Parse an HTTP/1.1 request from TcpStream.
+/// Largest request head (request line + headers) accepted, in bytes.
+pub const MAX_HEAD_BYTES: usize = 8 * 1024;
+
+/// Largest body accepted, in bytes.
+pub const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
+
+/// Result of parsing a byte buffer that may not hold a whole request yet.
+///
+/// `Complete` is much larger than `Incomplete`; boxing it to even them out
+/// would add a heap allocation to every request, which is the wrong trade for a
+/// ~224-byte move on the hot path.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
+pub enum Parsed {
+    /// A full request was decoded; `consumed` bytes may be dropped from the
+    /// front of the buffer (anything beyond belongs to the next request).
+    Complete { request: Request, consumed: usize },
+    /// Not enough bytes yet — read more and call again.
+    Incomplete,
+}
+
+/// Parse an HTTP/1.1 request out of a byte buffer.
+///
+/// This is the entry point for async transports: the caller owns the socket and
+/// the read loop, and `kernway-http` stays free of any runtime dependency —
+/// it never touches a socket, it decodes bytes.
+///
+/// Accepts LF as well as CRLF line endings, so a request typed by hand through
+/// `nc` parses like one sent by `curl`.
+pub fn parse_bytes(buf: &[u8]) -> Result<Parsed, ParseError> {
+    let Some(head_end) = find_head_end(buf) else {
+        // No blank line yet. Bound the wait, or a client that never sends one
+        // could grow this buffer without limit.
+        if buf.len() > MAX_HEAD_BYTES {
+            return Err(ParseError::TooLarge);
+        }
+        return Ok(Parsed::Incomplete);
+    };
+    if head_end > MAX_HEAD_BYTES {
+        return Err(ParseError::TooLarge);
+    }
+
+    let head = std::str::from_utf8(&buf[..head_end])
+        .map_err(|_| ParseError::BadRequestLine("head is not valid UTF-8".into()))?;
+    let mut lines = head.lines();
+
+    let request_line = lines.next().unwrap_or("").trim();
+    let (method, path, query) = parse_request_line(request_line)?;
+
+    let mut headers: HashMap<String, String> = HashMap::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = split_header(trimmed) {
+            headers.insert(name, value);
+        }
+    }
+
+    let content_length: usize = headers
+        .get("content-length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    if content_length > MAX_BODY_BYTES {
+        return Err(ParseError::TooLarge);
+    }
+
+    let total = head_end + content_length;
+    if buf.len() < total {
+        return Ok(Parsed::Incomplete);
+    }
+
+    Ok(Parsed::Complete {
+        request: Request {
+            method,
+            path,
+            headers,
+            query,
+            path_params: HashMap::new(), // filled by the router
+            body: buf[head_end..total].to_vec(),
+        },
+        consumed: total,
+    })
+}
+
+/// Byte offset just past the blank line that ends the head, if it has arrived.
+fn find_head_end(buf: &[u8]) -> Option<usize> {
+    let mut pos = 0;
+    while let Some(offset) = buf[pos..].iter().position(|&b| b == b'\n') {
+        let end = pos + offset;
+        let line = buf[pos..end].strip_suffix(b"\r").unwrap_or(&buf[pos..end]);
+        if line.is_empty() {
+            return Some(end + 1);
+        }
+        pos = end + 1;
+    }
+    None
+}
+
+/// `GET /path?query HTTP/1.1` → method, path, decoded query pairs.
+fn parse_request_line(line: &str) -> Result<(String, String, HashMap<String, String>), ParseError> {
+    let parts: Vec<&str> = line.splitn(3, ' ').collect();
+    if parts.len() < 2 {
+        return Err(ParseError::BadRequestLine(line.to_string()));
+    }
+    let full_path = parts[1];
+    let (path, query_str) = match full_path.find('?') {
+        Some(q) => (&full_path[..q], &full_path[q + 1..]),
+        None => (full_path, ""),
+    };
+    Ok((
+        parts[0].to_uppercase(),
+        path.to_string(),
+        parse_query_string(query_str),
+    ))
+}
+
+/// `Name: value` → `("name", "value")`. Names are lowercased for lookup.
+fn split_header(line: &str) -> Option<(String, String)> {
+    let colon = line.find(':')?;
+    Some((
+        line[..colon].trim().to_lowercase(),
+        line[colon + 1..].trim().to_string(),
+    ))
+}
+
+/// Parse an HTTP/1.1 request from a blocking TcpStream.
+///
+/// Retained for tooling and tests that already hold a std socket; the server
+/// itself is async and goes through [`parse_bytes`].
 pub fn parse_request(stream: &TcpStream) -> Result<Request, ParseError> {
     parse_from_reader(BufReader::new(stream))
 }
@@ -161,5 +291,105 @@ mod tests {
     fn parse_query_string_no_value() {
         let req = parse("GET /items?flag HTTP/1.1\r\n\r\n").unwrap();
         assert_eq!(req.query.get("flag").unwrap(), "");
+    }
+}
+
+#[cfg(test)]
+mod byte_parser_tests {
+    use super::*;
+
+    fn complete(raw: &str) -> (Request, usize) {
+        match parse_bytes(raw.as_bytes()).unwrap() {
+            Parsed::Complete { request, consumed } => (request, consumed),
+            Parsed::Incomplete => panic!("expected a complete request from {raw:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_a_whole_request_in_one_buffer() {
+        let raw = "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let (req, consumed) = complete(raw);
+        assert_eq!(req.method, "GET");
+        assert_eq!(req.path, "/health");
+        assert_eq!(req.headers["host"], "localhost");
+        assert_eq!(consumed, raw.len(), "a bodyless request consumes exactly its head");
+    }
+
+    #[test]
+    fn head_split_across_reads_is_incomplete_until_the_blank_line() {
+        assert!(matches!(
+            parse_bytes(b"GET /health HTTP/1.1\r\nHost: loc").unwrap(),
+            Parsed::Incomplete
+        ));
+        assert!(matches!(
+            parse_bytes(b"GET /health HTTP/1.1\r\nHost: localhost\r\n").unwrap(),
+            Parsed::Incomplete
+        ));
+    }
+
+    #[test]
+    fn body_split_across_reads_is_incomplete_until_content_length_arrives() {
+        let head = "POST /users HTTP/1.1\r\ncontent-length: 10\r\n\r\n";
+        assert!(matches!(
+            parse_bytes(format!("{head}12345").as_bytes()).unwrap(),
+            Parsed::Incomplete
+        ));
+        let (req, _) = complete(&format!("{head}1234567890"));
+        assert_eq!(req.body, b"1234567890");
+    }
+
+    #[test]
+    fn consumed_stops_at_the_end_of_this_request() {
+        // Pipelined requests: the second must be left in the buffer untouched.
+        let raw = "GET /a HTTP/1.1\r\n\r\nGET /b HTTP/1.1\r\n\r\n";
+        let (first, consumed) = complete(raw);
+        assert_eq!(first.path, "/a");
+        let (second, _) = complete(&raw[consumed..]);
+        assert_eq!(second.path, "/b");
+    }
+
+    #[test]
+    fn lf_only_line_endings_are_accepted() {
+        // What a hand-typed `nc` session sends.
+        let (req, _) = complete("GET /ping HTTP/1.1\nHost: x\n\n");
+        assert_eq!(req.path, "/ping");
+        assert_eq!(req.headers["host"], "x");
+    }
+
+    #[test]
+    fn query_string_is_decoded_into_pairs() {
+        let (req, _) = complete("GET /search?q=rust&page=2 HTTP/1.1\r\n\r\n");
+        assert_eq!(req.path, "/search");
+        assert_eq!(req.query["q"], "rust");
+        assert_eq!(req.query["page"], "2");
+    }
+
+    #[test]
+    fn a_head_that_never_ends_is_rejected_rather_than_buffered_forever() {
+        let flood = vec![b'x'; MAX_HEAD_BYTES + 1];
+        assert!(matches!(parse_bytes(&flood), Err(ParseError::TooLarge)));
+    }
+
+    #[test]
+    fn an_oversized_content_length_is_rejected_before_allocating() {
+        let raw = format!(
+            "POST /upload HTTP/1.1\r\ncontent-length: {}\r\n\r\n",
+            MAX_BODY_BYTES + 1
+        );
+        assert!(matches!(parse_bytes(raw.as_bytes()), Err(ParseError::TooLarge)));
+    }
+
+    #[test]
+    fn a_malformed_request_line_is_an_error_not_a_hang() {
+        assert!(matches!(
+            parse_bytes(b"BADLINE\r\n\r\n"),
+            Err(ParseError::BadRequestLine(_))
+        ));
+    }
+
+    #[test]
+    fn method_is_normalised_to_uppercase() {
+        let (req, _) = complete("post /x HTTP/1.1\r\n\r\n");
+        assert_eq!(req.method, "POST");
     }
 }

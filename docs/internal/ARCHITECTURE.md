@@ -129,7 +129,7 @@ These compile with only external crates (`thiserror`/`syn`/`serde`…) and pull 
 ### Legitimate dependency edges (kept)
 
 ```
-kernway-core ──┬── kernway-http ── kernway-server ──┐ (server also needs di-core)
+kernway-core ──┬── kernway-http ── kernway-server ──┐ (server also needs di-core + rt-net)
                ├── kernway-web                       │
                ├── kernway-sse                       │
                └── kernway-multipart                 │
@@ -152,6 +152,11 @@ kernway (facade) ── kernway-core + di-core + di-macro
 - **`rt-net` → `rt-core`**: a socket is meaningless without the reactor that drives
   it. The runtime pair stays clear of `kernway-core` for the same reason DI does —
   a TCP layer must not know about HTTP types.
+- **`kernway-server` → `rt-net`**: the server owns the transport, so it is the
+  layer that picks a runtime. `kernway-http` deliberately does **not** depend on
+  the runtime: it decodes `&[u8]` (`parse_bytes`) and encodes to `Vec<u8>`
+  (`encode_response`), never touching a socket, so the same codec serves the
+  async server, a blocking tool, or a future HTTP/2 path.
 
 ### Two hard rules that keep independence intact
 

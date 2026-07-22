@@ -152,5 +152,6 @@ fn main() {
             kernway_core::error::StatusCode::NO_CONTENT.into_response()
         })
         .build()
-        .run();
+        .run()
+        .expect("server failed to start");
 }

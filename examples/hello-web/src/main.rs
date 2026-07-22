@@ -113,5 +113,6 @@ fn main() {
         })
 
         .build()
-        .run();
+        .run()
+        .expect("server failed to start");
 }

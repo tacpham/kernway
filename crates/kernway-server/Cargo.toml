@@ -8,5 +8,7 @@ license.workspace    = true
 [dependencies]
 kernway-core = { workspace = true }
 kernway-http = { workspace = true }
+rt-net       = { workspace = true }
+rt-core      = { workspace = true }
 di-core      = { workspace = true }
 thiserror    = { workspace = true }
