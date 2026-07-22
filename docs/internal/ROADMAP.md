@@ -50,8 +50,16 @@ kernway-di = "0.1"
       *balances* across the sockets; BSD/macOS just permit the shared bind.
       Windows (shared socket + IOCP) not started.
 - [x] `examples/echo-server` — runs; **benchmark vs tokio not run yet**
+- [x] Port `kernway-server` off `std::net` + thread-per-connection onto
+      `rt-net`: one shard per core, one task per connection. Handlers and
+      middleware stay **synchronous** — the transport moved, no handler
+      signature changed. Making them async belongs with the `kernway-core` spec
+      work, not here.
+- [x] `kernway-http` made transport-agnostic (`parse_bytes` / `encode_response`)
+      so the codec has no runtime dependency.
 - [ ] Benchmark: p99 within 20% of the tokio echo example (needs a Linux host)
 - [ ] Graceful shutdown / drain for `run_shards`
+- [ ] HTTP keep-alive (today every response still says `connection: close`)
 
 **Criterion**: p99 must not deviate by more than 20% from the tokio echo example.
 

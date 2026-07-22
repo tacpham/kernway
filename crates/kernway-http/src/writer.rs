@@ -12,25 +12,33 @@ pub fn write_response(stream: &mut TcpStream, response: &Response) {
 
 /// Write an HTTP/1.1 response to any `Write` — useful for testing.
 pub fn write_to<W: Write>(writer: &mut W, response: &Response) {
-    let status_text = status_text(response.status.0);
-    let mut output = format!(
-        "HTTP/1.1 {} {}\r\n",
-        response.status.0, status_text
-    );
+    let bytes = encode_response(response);
+    let _ = writer.write_all(&bytes);
+    let _ = writer.flush();
+}
 
-    // Headers
+/// Serialize a response to bytes.
+///
+/// The entry point for async transports: the caller owns the socket and does
+/// the writing, so `kernway-http` needs no runtime dependency. Head and body go
+/// into one buffer so a small response leaves as a single `write`.
+pub fn encode_response(response: &Response) -> Vec<u8> {
+    let status_text = status_text(response.status.0);
+    let mut head = format!("HTTP/1.1 {} {}\r\n", response.status.0, status_text);
+
     for (name, value) in &response.headers {
-        output.push_str(&format!("{}: {}\r\n", name, value));
+        head.push_str(&format!("{}: {}\r\n", name, value));
     }
     // Content-Length is required (RFC 9112 §6.2)
-    output.push_str(&format!("content-length: {}\r\n", response.body.len()));
+    head.push_str(&format!("content-length: {}\r\n", response.body.len()));
     // Connection: close for v0.3 (keep-alive in v0.4)
-    output.push_str("connection: close\r\n");
-    output.push_str("\r\n");
+    head.push_str("connection: close\r\n");
+    head.push_str("\r\n");
 
-    let _ = writer.write_all(output.as_bytes());
-    let _ = writer.write_all(&response.body);
-    let _ = writer.flush();
+    let mut out = Vec::with_capacity(head.len() + response.body.len());
+    out.extend_from_slice(head.as_bytes());
+    out.extend_from_slice(&response.body);
+    out
 }
 
 fn status_text(code: u16) -> &'static str {

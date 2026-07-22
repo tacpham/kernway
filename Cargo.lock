@@ -287,6 +287,8 @@ dependencies = [
  "di-core",
  "kernway-core",
  "kernway-http",
+ "rt-core",
+ "rt-net",
  "thiserror",
 ]
 

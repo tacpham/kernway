@@ -430,5 +430,6 @@ fn main() {
             SseStream::new(all).into_response()
         })
         .build()
-        .run();
+        .run()
+        .expect("server failed to start");
 }
