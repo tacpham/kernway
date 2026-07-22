@@ -10,6 +10,7 @@
 #![allow(missing_docs)] // v0.1 — complete documentation planned for v1.0
 
 pub mod error;
+pub mod headers;
 pub mod request;
 pub mod response;
 pub mod layer;
