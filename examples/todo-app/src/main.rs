@@ -354,7 +354,7 @@ fn main() {
             }
         })
         .get("/todos", |req, ctx| {
-            let done_filter = req.query.get("done").and_then(|value| match value.as_str() {
+            let done_filter = req.query.get("done").and_then(|value| match value {
                 "true" => Some(true),
                 "false" => Some(false),
                 _ => None,

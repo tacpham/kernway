@@ -1,7 +1,7 @@
 //! HTTP Request abstraction + FromRequest trait.
 
 use crate::error::KernwayError;
-use crate::headers::Headers;
+use crate::fields::{Headers, QueryParams};
 use std::collections::HashMap;
 
 /// HTTP protocol version of a request.
@@ -35,7 +35,7 @@ pub struct Request {
     pub path:        String,
     pub version:     HttpVersion,
     pub headers:     Headers,
-    pub query:       HashMap<String, String>,
+    pub query:       QueryParams,
     pub path_params: HashMap<String, String>,
     pub body:        Vec<u8>,
 }
@@ -48,7 +48,7 @@ impl Request {
             path:        path.into(),
             version:     HttpVersion::default(),
             headers:     Headers::new(),
-            query:       HashMap::new(),
+            query:       QueryParams::new(),
             path_params: HashMap::new(),
             body:        Vec::new(),
         }

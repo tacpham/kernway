@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::net::TcpStream;
 
-use kernway_core::headers::Headers;
+use kernway_core::fields::{Headers, QueryParams};
 use kernway_core::request::{HttpVersion, Request};
 use thiserror::Error;
 
@@ -131,7 +131,7 @@ fn find_head_end(buf: &[u8]) -> Option<(usize, usize)> {
 }
 
 /// `GET /path?query HTTP/1.1` → method, path, query pairs, version.
-type RequestLine = (String, String, HashMap<String, String>, HttpVersion);
+type RequestLine = (String, String, QueryParams, HttpVersion);
 
 fn parse_request_line(line: &str) -> Result<RequestLine, ParseError> {
     // Walked with the iterator rather than collected: `collect::<Vec<_>>` puts a
@@ -247,18 +247,34 @@ pub fn parse_from_reader<R: BufRead>(mut reader: R) -> Result<Request, ParseErro
     })
 }
 
-fn parse_query_string(query: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
+/// `a=1&b=2` → the pairs, sharing one buffer.
+///
+/// `append` rather than `insert` for the same reason the header loop uses it:
+/// the string is walked in order, so a repeated parameter resolves to the last
+/// one through `QueryParams::get` without a duplicate check per pair.
+fn parse_query_string(query: &str) -> QueryParams {
+    // An empty query allocates nothing — `Vec::with_capacity(0)` does not.
+    let mut params = QueryParams::with_capacity(query.len(), estimated_params(query));
     for pair in query.split('&') {
         if pair.is_empty() { continue; }
-        let mut parts = pair.splitn(2, '=');
-        let key = parts.next().unwrap_or("").to_string();
-        let val = parts.next().unwrap_or("").to_string();
+        let (key, val) = match pair.find('=') {
+            Some(eq) => (&pair[..eq], &pair[eq + 1..]),
+            None => (pair, ""),
+        };
         if !key.is_empty() {
-            map.insert(key, val);
+            params.append(key, val);
         }
     }
-    map
+    params
+}
+
+/// One more than the number of separators — exact for a well-formed query and
+/// harmless when it isn't.
+fn estimated_params(query: &str) -> usize {
+    if query.is_empty() {
+        return 0;
+    }
+    query.bytes().filter(|&b| b == b'&').count() + 1
 }
 
 #[cfg(test)]
@@ -282,8 +298,8 @@ mod tests {
     fn parse_path_with_query_string() {
         let req = parse("GET /search?q=rust&page=2 HTTP/1.1\r\n\r\n").unwrap();
         assert_eq!(req.path, "/search");
-        assert_eq!(req.query.get("q").unwrap(), "rust");
-        assert_eq!(req.query.get("page").unwrap(), "2");
+        assert_eq!(req.query.get("q"), Some("rust"));
+        assert_eq!(req.query.get("page"), Some("2"));
     }
 
     #[test]
@@ -322,7 +338,7 @@ mod tests {
     #[test]
     fn parse_query_string_no_value() {
         let req = parse("GET /items?flag HTTP/1.1\r\n\r\n").unwrap();
-        assert_eq!(req.query.get("flag").unwrap(), "");
+        assert_eq!(req.query.get("flag"), Some(""));
     }
 }
 
@@ -392,8 +408,8 @@ mod byte_parser_tests {
     fn query_string_is_decoded_into_pairs() {
         let (req, _) = complete("GET /search?q=rust&page=2 HTTP/1.1\r\n\r\n");
         assert_eq!(req.path, "/search");
-        assert_eq!(req.query["q"], "rust");
-        assert_eq!(req.query["page"], "2");
+        assert_eq!(req.query.get("q"), Some("rust"));
+        assert_eq!(req.query.get("page"), Some("2"));
     }
 
     #[test]

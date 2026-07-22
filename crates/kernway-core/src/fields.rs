@@ -1,10 +1,18 @@
-//! Request headers — one buffer, many ranges.
+//! Name/value pairs of a request — one buffer, many ranges.
+//!
+//! Backs both the headers and the query parameters. They are the same problem
+//! wearing different names: a short list of `(name, value)` pairs, cut out of
+//! bytes that have just been read, looked up a handful of times, then dropped
+//! with the request. Only the case rule differs, so that is the one thing
+//! [`Fields`] is generic over — resolved at compile time, so a lookup pays no
+//! branch for it.
 //!
 //! The obvious model is `HashMap<String, String>`, and that is what this
 //! replaced. On a typical browser request (8 headers) it cost ~690ns of the
 //! ~1.2µs spent parsing: ~295ns allocating 16 short `String`s, ~167ns hashing
 //! them, and ~226ns freeing them again when the request was dropped. The
-//! scanning of the bytes themselves was only ~196ns. Measured with
+//! scanning of the bytes themselves was only ~196ns. A query string of two
+//! parameters cost a further ~175ns for the same reason. Measured with
 //! `kernway-http`'s `parse` benches.
 //!
 //! So the cost was the container, not the parsing. This one copies the header
@@ -12,14 +20,14 @@
 //! it: one allocation for the whole set, and dropping a request frees one
 //! buffer rather than walking sixteen.
 //!
-//! Lookup is a linear scan rather than a hash. With the header counts real
-//! requests carry that is not a compromise — comparing a handful of short byte
-//! strings beats hashing one, and it removes the `to_lowercase` allocation the
-//! old `get` made on *every* lookup.
+//! Lookup is a linear scan rather than a hash. At the counts real requests
+//! carry that is not a compromise — comparing a handful of short byte strings
+//! beats hashing one, and it removes the `to_lowercase` allocation the old
+//! header `get` made on *every* lookup.
 
 use std::ops::Range;
 
-/// A `(name, value)` pair, as ranges into [`Headers::buf`].
+/// A `(name, value)` pair, as ranges into [`Fields::buf`].
 ///
 /// `u32` rather than `usize` keeps this to 16 bytes; the parser caps a head at
 /// 8KiB long before four gigabytes becomes a question.
@@ -29,28 +37,36 @@ struct Entry {
     value: Range<u32>,
 }
 
-/// The headers of a request.
+/// A set of `(name, value)` pairs cut from one buffer.
 ///
-/// Names are stored lowercased, so lookup never has to allocate a normalized
-/// copy of the name it was handed.
+/// `CASE_INSENSITIVE` says whether names are matched — and stored — without
+/// regard to case. Prefer the two aliases to naming it directly: [`Headers`],
+/// where RFC 9110 §5.1 makes field names case-insensitive, and [`QueryParams`],
+/// where they are not (`?Page=2` and `?page=2` are different parameters).
 #[derive(Default, Clone)]
-pub struct Headers {
-    /// Header text, names already lowercased. Bytes belonging to a replaced
-    /// header stay here as dead weight — see [`Headers::insert`].
+pub struct Fields<const CASE_INSENSITIVE: bool> {
+    /// The name and value text. Bytes belonging to a replaced pair stay here as
+    /// dead weight — see [`Fields::insert`].
     buf: Vec<u8>,
     entries: Vec<Entry>,
 }
 
-impl Headers {
+/// The headers of a request. Names are matched and stored case-insensitively.
+pub type Headers = Fields<true>;
+
+/// The query parameters of a request. Names keep their case and must match it.
+pub type QueryParams = Fields<false>;
+
+impl<const CASE_INSENSITIVE: bool> Fields<CASE_INSENSITIVE> {
     /// An empty set.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// An empty set sized for `count` headers occupying about `bytes` bytes.
+    /// An empty set sized for `count` pairs occupying about `bytes` bytes.
     ///
     /// The parser knows both up front, which is what makes one allocation per
-    /// request possible instead of one per header.
+    /// request possible instead of one per pair.
     pub fn with_capacity(bytes: usize, count: usize) -> Self {
         Self {
             buf: Vec::with_capacity(bytes),
@@ -58,34 +74,40 @@ impl Headers {
         }
     }
 
-    /// Add `name: value`, replacing any header of the same name.
+    /// Add `name: value`, replacing any pair of the same name.
     ///
     /// Replacement drops the old entry but leaves its bytes in the buffer:
-    /// compacting would invalidate every range after it, and a replaced header
+    /// compacting would invalidate every range after it, and a replaced pair
     /// is rare enough that a few dead bytes are the cheaper trade.
     ///
     /// # Panics
-    /// If the accumulated header text would exceed 4GiB.
+    /// If the accumulated text would exceed 4GiB.
     pub fn insert(&mut self, name: &str, value: &str) {
         self.entries.retain(|e| !Self::name_matches(&self.buf, e, name));
         self.push(name, value);
     }
 
-    /// Add `name: value` without checking for an existing header of that name.
+    /// Add `name: value` without checking for an existing pair of that name.
     ///
-    /// The parse path uses this: it walks the head in order, and a repeated
-    /// header there means the *last* one wins, which falls out of the reverse
-    /// scan in [`Headers::get`] without paying for a duplicate check per line.
+    /// The parse path uses this: it walks the input in order, and a repeated
+    /// name there means the *last* one wins, which falls out of the reverse
+    /// scan in [`Fields::get`] without paying for a duplicate check per pair.
     ///
     /// # Panics
-    /// If the accumulated header text would exceed 4GiB.
+    /// If the accumulated text would exceed 4GiB.
     pub fn append(&mut self, name: &str, value: &str) {
         self.push(name, value);
     }
 
     fn push(&mut self, name: &str, value: &str) {
         let name_start = Self::offset(self.buf.len());
-        self.buf.extend(name.bytes().map(|b| b.to_ascii_lowercase()));
+        if CASE_INSENSITIVE {
+            // Normalized once here so that `get` never has to allocate a
+            // lowercased copy of the name it is handed.
+            self.buf.extend(name.bytes().map(|b| b.to_ascii_lowercase()));
+        } else {
+            self.buf.extend_from_slice(name.as_bytes());
+        }
         let name_end = Self::offset(self.buf.len());
         self.buf.extend_from_slice(value.as_bytes());
         let value_end = Self::offset(self.buf.len());
@@ -99,10 +121,10 @@ impl Headers {
         u32::try_from(len).expect("header text stays far below 4GiB")
     }
 
-    /// The value of `name`, if present. Matching is ASCII case-insensitive.
+    /// The value of `name`, if present.
     ///
-    /// Scanned in reverse so that when a header appears twice the last one
-    /// wins, matching what a `HashMap` built by inserting in order would hold.
+    /// Scanned in reverse so that when a name appears twice the last one wins,
+    /// matching what a `HashMap` built by inserting in order would hold.
     pub fn get(&self, name: &str) -> Option<&str> {
         self.entries
             .iter()
@@ -116,19 +138,19 @@ impl Headers {
         self.get(name).is_some()
     }
 
-    /// Every header, in the order it was added.
+    /// Every pair, in the order it was added.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
         self.entries
             .iter()
             .map(|e| (self.slice(&e.name), self.slice(&e.value)))
     }
 
-    /// How many headers are stored.
+    /// How many pairs are stored.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Whether there are no headers.
+    /// Whether the set is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -144,11 +166,15 @@ impl Headers {
     /// is mutably borrowed by `retain`.
     fn name_matches(buf: &[u8], entry: &Entry, name: &str) -> bool {
         let stored = &buf[entry.name.start as usize..entry.name.end as usize];
-        stored.eq_ignore_ascii_case(name.as_bytes())
+        if CASE_INSENSITIVE {
+            stored.eq_ignore_ascii_case(name.as_bytes())
+        } else {
+            stored == name.as_bytes()
+        }
     }
 }
 
-impl std::fmt::Debug for Headers {
+impl<const CASE_INSENSITIVE: bool> std::fmt::Debug for Fields<CASE_INSENSITIVE> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_map().entries(self.iter()).finish()
     }
@@ -240,6 +266,33 @@ mod tests {
     fn debug_renders_the_pairs() {
         let shown = format!("{:?}", sample());
         assert!(shown.contains("\"host\": \"example.com\""), "got {shown}");
+    }
+
+    #[test]
+    fn query_params_keep_their_name_case() {
+        let mut q = QueryParams::new();
+        q.insert("sortBy", "name");
+        assert_eq!(q.get("sortBy"), Some("name"));
+        assert_eq!(q.iter().map(|(n, _)| n).collect::<Vec<_>>(), vec!["sortBy"]);
+    }
+
+    #[test]
+    fn query_param_lookup_is_case_sensitive() {
+        // `?Page=2` and `?page=2` are different parameters — unlike headers.
+        let mut q = QueryParams::new();
+        q.insert("page", "2");
+        assert_eq!(q.get("page"), Some("2"));
+        assert_eq!(q.get("Page"), None);
+    }
+
+    #[test]
+    fn query_params_of_differing_case_coexist() {
+        let mut q = QueryParams::new();
+        q.insert("page", "2");
+        q.insert("Page", "9");
+        assert_eq!(q.len(), 2, "case-sensitive names must not collapse");
+        assert_eq!(q.get("page"), Some("2"));
+        assert_eq!(q.get("Page"), Some("9"));
     }
 
     #[test]
