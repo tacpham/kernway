@@ -16,10 +16,11 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::reactor::{Reactor, UNPARK_TOKEN};
 use crate::task::{waker_for, Shared, Task, TaskId, MAIN_TASK};
+use crate::time::Timers;
 
 thread_local! {
     /// The executor driving this thread, if any — backs [`spawn`] and
@@ -72,6 +73,7 @@ impl Slab {
 struct Inner {
     tasks: RefCell<Slab>,
     reactor: RefCell<Reactor>,
+    timers: RefCell<Timers>,
     shared: Arc<Shared>,
 }
 
@@ -114,9 +116,29 @@ impl Inner {
             self.shared.set_parked(false);
             return Ok(());
         }
-        let result = self.reactor.borrow_mut().poll(None);
+        // Sleep no longer than the nearest deadline, so timers fire on time
+        // without a dedicated thread: the reactor's own timeout is the clock.
+        let timeout = self
+            .timers
+            .borrow_mut()
+            .next_deadline()
+            .map(|d| d.saturating_duration_since(Instant::now()));
+        let result = self.reactor.borrow_mut().poll(timeout);
         self.shared.set_parked(false);
+        self.fire_timers();
         result.map(|_| ())
+    }
+
+    /// Wake every task whose deadline has passed.
+    fn fire_timers(&self) {
+        let mut expired = Vec::new();
+        self.timers
+            .borrow_mut()
+            .fire_expired(Instant::now(), &mut expired);
+        // Wake outside the borrow: a woken task may register a new timer.
+        for waker in expired {
+            waker.wake();
+        }
     }
 
     /// Service the reactor without blocking.
@@ -128,10 +150,15 @@ impl Inner {
     /// is ever collected. Sockets then wait forever on data the kernel already
     /// has. A zero timeout costs one non-blocking syscall per iteration.
     fn poll_io_now(&self) -> io::Result<()> {
-        self.reactor
+        let result = self
+            .reactor
             .borrow_mut()
             .poll(Some(Duration::ZERO))
-            .map(|_| ())
+            .map(|_| ());
+        // Timers must advance here too, or a busy run queue would postpone every
+        // deadline for as long as it stays busy.
+        self.fire_timers();
+        result
     }
 }
 
@@ -180,6 +207,7 @@ impl Executor {
             inner: Rc::new(Inner {
                 tasks: RefCell::new(Slab::default()),
                 reactor: RefCell::new(reactor),
+                timers: RefCell::new(Timers::default()),
                 shared: Arc::new(Shared::new(unparker)),
             }),
         })
@@ -327,6 +355,22 @@ pub fn try_handle() -> Option<Handle> {
 /// `with_reactor` closure.
 pub fn with_reactor<R>(f: impl FnOnce(&mut Reactor) -> R) -> R {
     try_with_reactor(f).expect("rt_core::with_reactor called outside an executor")
+}
+
+/// Run `f` against the current thread's timer heap.
+///
+/// # Panics
+/// If called outside an executor.
+pub(crate) fn with_timers<R>(f: impl FnOnce(&mut Timers) -> R) -> R {
+    try_with_timers(f).expect("rt_core timers used outside an executor")
+}
+
+/// Like [`with_timers`], but `None` when no executor is running — what `Drop`
+/// needs, since a timer may outlive the shard that registered it.
+pub(crate) fn try_with_timers<R>(f: impl FnOnce(&mut Timers) -> R) -> Option<R> {
+    let inner = CURRENT.with(|c| c.borrow().clone())?;
+    let mut timers = inner.timers.borrow_mut();
+    Some(f(&mut timers))
 }
 
 /// Like [`with_reactor`], but returns `None` instead of panicking when no

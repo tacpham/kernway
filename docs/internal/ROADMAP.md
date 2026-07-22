@@ -57,9 +57,15 @@ kernway-di = "0.1"
       work, not here.
 - [x] `kernway-http` made transport-agnostic (`parse_bytes` / `encode_response`)
       so the codec has no runtime dependency.
+- [x] Timers in `rt-core` (`sleep`, `timeout`) — the reactor's own poll timeout
+      is the clock, so waiting on a deadline costs no extra thread.
+- [x] HTTP keep-alive, persistent by default for HTTP/1.1 (RFC 9112 §9.3),
+      bounded by an idle timeout and a per-connection request cap. Verified with
+      `curl` reporting *Re-using existing connection*.
 - [ ] Benchmark: p99 within 20% of the tokio echo example (needs a Linux host)
 - [ ] Graceful shutdown / drain for `run_shards`
-- [ ] HTTP keep-alive (today every response still says `connection: close`)
+- [ ] `transfer-encoding: chunked` — request bodies must still declare
+      `content-length`
 
 **Criterion**: p99 must not deviate by more than 20% from the tokio echo example.
 
