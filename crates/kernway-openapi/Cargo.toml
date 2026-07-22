@@ -6,7 +6,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-kernway-core   = { workspace = true }
-kernway-server = { path = "../kernway-server" }
-serde          = { workspace = true }
-serde_json     = { workspace = true }
+# Spec generation is pure data — it only needs serde. It does NOT depend on the
+# HTTP server or kernway-core; wiring OpenAPI into a running server is done by
+# the consumer (e.g. kernway-server), not by this crate.
+serde      = { workspace = true }
+serde_json = { workspace = true }

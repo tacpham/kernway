@@ -2,6 +2,11 @@
 
 > Pure spec — traits and annotations only. No implementation. Compile time < 1s.  
 > Equivalent to JPA (JSR-338) in Java.  
+> **Standalone crate — zero kernway dependencies** (only `thiserror`). The whole ORM
+> subsystem (`orm-core` → `orm-macro`/`orm-memory`/`orm-sqlite`) is usable à la carte
+> without pulling the web stack; `orm-macro` emits `::kernway_orm_core::` token paths
+> only and does **not** depend on this crate. See "Crate dependency graph & module
+> independence" in `ARCHITECTURE.md`.  
 > **Compatibility note**: see [kernway-orm-jpa-compat.md](kernway-orm-jpa-compat.md) — ~85% of JPA features, 15% redesigned around Rust idioms.
 
 ## Standards
