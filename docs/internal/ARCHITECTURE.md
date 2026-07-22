@@ -103,6 +103,88 @@ See: `docs/internal/modules/kernway-orm-core.md`
 
 ---
 
+## Crate dependency graph & module independence
+
+**Principle (Spring-style):** a module depends on another **only** when it genuinely
+needs it. Subsystems that *can* stand alone *do* stand alone — you can pull the DI
+container, the ORM, or the cache into any project without dragging the web stack in.
+
+### Fully independent crates — **zero** internal dependencies
+
+These compile with only external crates (`thiserror`/`syn`/`serde`…) and pull in
+**no** other kernway crate. Use any of them à la carte:
+
+| Crate | Role | External deps only |
+|---|---|---|
+| `kernway-core` | Web/HTTP spec (traits) | `futures-core`, `thiserror` |
+| `kernway-orm-core` | ORM spec (traits) | `thiserror` |
+| `kernway-cache-core` | Cache spec (traits) | `thiserror` |
+| `di-core` | DI container runtime | `thiserror` |
+| `di-macro` | `#[derive(Component)]` | `syn`/`quote`/`proc-macro2` |
+| `kernway-orm-macro` | `#[entity]`/`#[id]`/`#[column]` | `syn`/`quote`/`proc-macro2` |
+| `kernway-cache-macro` | `#[cacheable]` | `syn`/`quote`/`proc-macro2` |
+| `kernway-openapi` | OpenAPI 3.0 spec gen | `serde`, `serde_json` |
+
+### Legitimate dependency edges (kept)
+
+```
+kernway-core ──┬── kernway-http ── kernway-server ──┐ (server also needs di-core)
+               ├── kernway-web                       │
+               ├── kernway-sse                       │
+               └── kernway-multipart                 │
+                                                     │
+di-core ─────────────────────────────────────────────┘
+
+kernway-orm-core ──┬── kernway-orm-memory
+                   └── kernway-orm-sqlite   (+ rusqlite)
+
+kernway-cache-core ── kernway-cache-memory
+
+kernway (facade) ── kernway-core + di-core + di-macro
+```
+
+- **Web crates → `kernway-core`**: legitimate — HTTP handlers cannot exist without the
+  `Request`/`Response`/`Layer` spec. (Mirrors `spring-web` → `spring-core`.)
+- **`kernway-server` → core + http + di-core**: it is the composition/app layer.
+
+### Two hard rules that keep independence intact
+
+1. **DI and ORM never depend on `kernway-core`.** `kernway-core` is *web-flavoured*
+   (`Request`, `Response`, `Layer`, `template`) — not a neutral utility core. A DI
+   container or a data-access layer that imported it would leak HTTP types across a
+   boundary. `di-core` and `kernway-orm-core` therefore stay at **zero** kernway deps.
+2. **A proc-macro crate never depends on its runtime crate.** `di-macro`,
+   `kernway-orm-macro`, `kernway-cache-macro` only *emit* token paths
+   (`::kernway_orm_core::…`) inside `quote!{}`; those paths resolve in the **user's**
+   crate, not in the macro crate. Declaring the runtime crate as a normal dependency
+   there is a phantom dep — forbidden.
+
+> **Audit note (2026-07-22):** three phantom/dead dependencies were removed to satisfy
+> the rules above — `di-core → kernway-core`, `kernway-openapi → {kernway-core,
+> kernway-server}`, and `kernway-orm-macro → kernway-orm-core` (all had **0** uses in
+> `src/`). Verified with `cargo tree -e normal` (0 internal deps) and a green
+> `cargo test --workspace`.
+
+### Verifying independence
+
+```bash
+# Any of these must show NO other kernway/di crate in the tree:
+cargo tree -p di-core          -e normal
+cargo tree -p kernway-orm-core -e normal
+cargo tree -p kernway-openapi  -e normal
+
+# A domain crate must build without the web stack:
+cargo build -p kernway-orm-sqlite   # pulls only kernway-orm-core
+cargo build -p kernway-cache-memory # pulls only kernway-cache-core
+```
+
+**Next lever for flexibility:** no crate uses Cargo `[features]` yet. Feature-gating
+optional backends (e.g. `kernway-server` re-exporting `sse`/`openapi`/`multipart`
+behind features, `orm` selecting `sqlite`/`memory`) is the planned way to make the
+*dependency* side as à-la-carte as the *independence* side already is. See ROADMAP.
+
+---
+
 ## Override System — "Defaults + Override anywhere"
 
 > **Mandatory implementation rule**: Every default framework behavior MUST be overridable. No behavior may be hardcoded without an extension point.

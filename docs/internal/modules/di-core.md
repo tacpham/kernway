@@ -4,6 +4,11 @@
 
 `AppContext`: bean registry, lifecycle management, dependency graph resolution.
 
+> **Standalone crate — zero kernway dependencies.** `di-core` depends on no other
+> kernway crate (only `thiserror`). It must never import `kernway-core`, which is
+> web-flavoured (`Request`/`Response`/`Layer`); the container stays usable in any
+> project. See "Crate dependency graph & module independence" in `ARCHITECTURE.md`.
+
 ## Standards
 
 - JSR-330 patterns (Dependency Injection for Java) — design inspiration

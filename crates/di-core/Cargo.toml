@@ -8,5 +8,7 @@ license.workspace    = true
 repository.workspace = true
 
 [dependencies]
-kernway-core = { workspace = true }
-thiserror    = { workspace = true }
+# NOTE: di-core is intentionally standalone — it depends on NO other kernway
+# crate. `kernway-core` is web-flavoured (Request/Response/middleware), so the
+# DI container must not pull it in. Keep this section free of internal deps.
+thiserror = { workspace = true }
