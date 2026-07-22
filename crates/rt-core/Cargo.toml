@@ -1,0 +1,17 @@
+[package]
+name        = "rt-core"
+description = "Kernway async runtime — thread-per-core Reactor + Executor"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+homepage.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+mio = { workspace = true }
+
+# Platform layer (`sys/`) — CPU affinity. Unix only; see sys/mod.rs.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
