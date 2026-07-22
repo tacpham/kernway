@@ -17,8 +17,13 @@ type BeanInstance = Arc<dyn Any + Send + Sync>;
 
 /// A `TypeId` is already a well-distributed hash, so running SipHash over its
 /// bytes on every `get` is pure overhead. This passthrough `Hasher` captures the
-/// value `TypeId` feeds in and returns it directly — a ~2× win on the hot path,
-/// with zero extra dependencies (pure `std`).
+/// value `TypeId` feeds in and returns it directly, with zero extra
+/// dependencies (pure `std`).
+///
+/// Worth 6× on lookups, not the ~2× this comment used to claim: 17 lookups over
+/// a populated map take 158ns with SipHash and 26ns with this. See the
+/// `passthrough_hasher_vs_siphash` group in `benches/resolve.rs`, which exists
+/// to keep the claim honest.
 #[derive(Default)]
 struct TypeIdHasher {
     hash: u64,
