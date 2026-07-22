@@ -1,6 +1,7 @@
 //! HTTP Request abstraction + FromRequest trait.
 
 use crate::error::KernwayError;
+use crate::fields::{Headers, QueryParams};
 use std::collections::HashMap;
 
 /// HTTP protocol version of a request.
@@ -33,8 +34,8 @@ pub struct Request {
     pub method:      String,
     pub path:        String,
     pub version:     HttpVersion,
-    pub headers:     HashMap<String, String>,
-    pub query:       HashMap<String, String>,
+    pub headers:     Headers,
+    pub query:       QueryParams,
     pub path_params: HashMap<String, String>,
     pub body:        Vec<u8>,
 }
@@ -46,8 +47,8 @@ impl Request {
             method:      method.into(),
             path:        path.into(),
             version:     HttpVersion::default(),
-            headers:     HashMap::new(),
-            query:       HashMap::new(),
+            headers:     Headers::new(),
+            query:       QueryParams::new(),
             path_params: HashMap::new(),
             body:        Vec::new(),
         }
@@ -58,16 +59,24 @@ impl Request {
     /// Follows RFC 9112 §9.3: the `connection` header wins, and the version
     /// supplies the default when the header is absent.
     pub fn wants_keep_alive(&self) -> bool {
-        match self.header("connection").map(str::to_ascii_lowercase) {
-            Some(value) if value.split(',').any(|v| v.trim() == "close") => false,
-            Some(value) if value.split(',').any(|v| v.trim() == "keep-alive") => true,
+        // Compared in place rather than through `to_ascii_lowercase`: this runs
+        // once per request and the old form allocated a whole copy of the value
+        // to answer a question about two known tokens.
+        let has = |value: &str, token: &str| {
+            value
+                .split(',')
+                .any(|v| v.trim().eq_ignore_ascii_case(token))
+        };
+        match self.header("connection") {
+            Some(value) if has(value, "close") => false,
+            Some(value) if has(value, "keep-alive") => true,
             _ => self.version == HttpVersion::Http11,
         }
     }
 
-    /// Get a header value.
+    /// Get a header value. Matching is ASCII case-insensitive.
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.get(&name.to_lowercase()).map(|s| s.as_str())
+        self.headers.get(name)
     }
 }
 
@@ -104,7 +113,7 @@ mod tests {
     fn with_header(version: HttpVersion, value: &str) -> Request {
         let mut req = Request::new("GET", "/");
         req.version = version;
-        req.headers.insert("connection".into(), value.into());
+        req.headers.insert("connection", value);
         req
     }
 
