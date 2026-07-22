@@ -90,10 +90,16 @@ pub struct Query<T>(pub T);
 
 impl<T: DeserializeOwned> Query<T> {
     pub fn from_request(req: &Request) -> Result<Self, String> {
-        // Convert query HashMap → JSON → deserialize into T
-        let json_str = serde_json::to_string(&req.query)
-            .map_err(|e| e.to_string())?;
-        serde_json::from_str(&json_str)
+        // Built as a `serde_json::Map` rather than serialized to a string and
+        // parsed back: the round trip through text was only ever there to reach
+        // `from_str`. `QueryParams` deliberately does not implement `Serialize`
+        // — `kernway-core` is spec-only and carries no serde dependency.
+        let map: serde_json::Map<String, serde_json::Value> = req
+            .query
+            .iter()
+            .map(|(name, value)| (name.to_string(), serde_json::Value::String(value.to_string())))
+            .collect();
+        serde_json::from_value(serde_json::Value::Object(map))
             .map(Query)
             .map_err(|e| format!("invalid query params: {}", e))
     }
