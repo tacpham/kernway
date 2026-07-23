@@ -15,3 +15,10 @@ proc-macro2 = { workspace = true }
 # NOTE: no dep on kernway-orm-core. The macro only *emits* `::kernway_orm_core::`
 # token paths inside quote!{}; that crate is resolved in the USER's crate, not
 # here. (Same pattern as di-macro.) Adding it back would be a phantom dep.
+
+[lints]
+workspace = true
+
+# docs.rs builds with every feature on, so feature-gated items still appear.
+[package.metadata.docs.rs]
+all-features = true

@@ -43,6 +43,18 @@ homepage     = "https://kernway.dev"
 # documented decision (see docs/VERSIONING.md), not incidental.
 rust-version = "1.78"
 
+# Documentation is part of the API, so it is linted like the API.
+# `missing_docs` keeps every public item explained; the rustdoc lints keep the
+# links between them from rotting. Warn, not deny: a work-in-progress branch
+# should not fail to build over a missing sentence — CI is where this bites.
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "warn"
+private_intra_doc_links = "warn"
+invalid_html_tags = "warn"
+
 [workspace.dependencies]
 # Proc-macro
 syn         = { version = "2", features = ["full", "extra-traits", "derive"] }

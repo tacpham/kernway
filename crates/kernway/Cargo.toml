@@ -12,3 +12,10 @@ homepage.workspace   = true
 kernway-core = { workspace = true }
 di-core      = { workspace = true }
 di-macro     = { workspace = true }
+
+[lints]
+workspace = true
+
+# docs.rs builds with every feature on, so feature-gated items still appear.
+[package.metadata.docs.rs]
+all-features = true

@@ -12,3 +12,10 @@ proc-macro = true
 syn         = { workspace = true }
 quote       = { workspace = true }
 proc-macro2 = { workspace = true }
+
+[lints]
+workspace = true
+
+# docs.rs builds with every feature on, so feature-gated items still appear.
+[package.metadata.docs.rs]
+all-features = true

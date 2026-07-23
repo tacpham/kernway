@@ -16,6 +16,10 @@ impl std::error::Error for TemplateError {}
 
 /// Context data for template rendering — key/value pairs.
 pub trait TemplateContext {
+    /// Look up one value by name, as referenced from the template.
+    ///
+    /// Returns `None` for an unknown key — an engine decides for itself whether
+    /// that renders as empty or is an error.
     fn get(&self, key: &str) -> Option<&dyn std::any::Any>;
 }
 
@@ -31,5 +35,9 @@ impl TemplateContext for HashMap<String, Box<dyn std::any::Any>> {
 /// Equivalent to `ViewResolver` + `TemplateEngine` in Spring MVC/Thymeleaf.
 /// `KernleafEngine` implements this trait.
 pub trait TemplateEngine: Send + Sync {
+    /// Render `template` (a name the engine resolves to a file) against `ctx`.
+    ///
+    /// Implementations are expected to HTML-escape interpolated values by
+    /// default, so a template cannot become an XSS vector by accident.
     fn render(&self, template: &str, ctx: &dyn TemplateContext) -> Result<String, TemplateError>;
 }

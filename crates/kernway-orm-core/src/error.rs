@@ -1,21 +1,43 @@
 use thiserror::Error;
 
+/// Everything an ORM operation can fail with.
+///
+/// Backends map their native error types onto these variants, so calling code
+/// distinguishes "duplicate email" from "database is down" without knowing
+/// which driver is underneath.
 #[derive(Debug, Error)]
 pub enum OrmError {
+    /// The row does not exist. Note that `find_by_id` returns `Ok(None)` for a
+    /// simple miss — this variant is for operations that require a row.
     #[error("record not found")]
     NotFound,
+    /// A UNIQUE constraint rejected the write. Usually a 409 to the client.
     #[error("unique constraint violation on field: {field}")]
-    UniqueViolation { field: String },
+    UniqueViolation {
+        /// The column whose constraint was violated.
+        field: String,
+    },
+    /// A foreign key constraint rejected the write — the referenced row is
+    /// missing, or still referenced by others.
     #[error("foreign key violation")]
     ForeignKeyViolation,
+    /// Could not obtain or use a connection: pool exhausted, network down,
+    /// credentials refused.
     #[error("connection error: {0}")]
     Connection(String),
+    /// The statement failed — bad SQL, a type mismatch, a missing column.
     #[error("query error: {0}")]
     Query(String),
+    /// A transaction could not begin, commit, or roll back. Also covers a
+    /// poisoned lock in the single-process backends.
     #[error("transaction error: {0}")]
     Transaction(String),
+    /// A stored value would not convert into the Rust field type — the schema
+    /// and the entity have drifted apart.
     #[error("type conversion error: {0}")]
     TypeConversion(String),
+    /// The backend does not implement this operation. Lets a driver decline a
+    /// feature honestly instead of failing in some subtler way.
     #[error("driver not supported: {0}")]
     Unsupported(String),
 }

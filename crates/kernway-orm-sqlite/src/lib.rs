@@ -1,4 +1,4 @@
-//! SQLite implementation of kernway-orm-core's Repository<T> trait.
+//! SQLite implementation of kernway-orm-core's `Repository<T>` trait.
 //!
 //! Row marshaling uses serde_json as an intermediary layer:
 //!   Entity → serde_json::Value → rusqlite params  (write)
@@ -261,12 +261,17 @@ where
         Ok(repo)
     }
 
+    /// Open (or create) a SQLite database file and ensure `T`'s table exists.
     pub fn open(path: &str) -> Result<Self, OrmError> {
         Connection::open(path)
             .map_err(|e| OrmError::Connection(e.to_string()))
             .and_then(Self::init)
     }
 
+    /// Open a private in-memory database — the usual choice for tests.
+    ///
+    /// The database lives as long as this repository and is not shared with any
+    /// other connection.
     pub fn in_memory() -> Result<Self, OrmError> {
         Connection::open_in_memory()
             .map_err(|e| OrmError::Connection(e.to_string()))
@@ -281,6 +286,11 @@ where
             .map_err(|e| OrmError::Query(e.to_string()))
     }
 
+    /// Run raw SQL directly against the connection.
+    ///
+    /// An escape hatch for schema tweaks and test fixtures. It bypasses the
+    /// `Repository` abstraction entirely, so nothing here is portable to
+    /// another backend.
     pub fn execute_raw(&self, sql: &str) -> Result<(), OrmError> {
         self.conn
             .lock()
@@ -522,6 +532,10 @@ struct Sort {
     dir: SortDir,
 }
 
+/// Fluent query builder that accumulates filters, ordering, and limits, then
+/// renders them into a single parameterised `SELECT` on a terminal call.
+///
+/// Nothing touches the database until a terminal operation runs.
 pub struct SqliteQueryBuilder<T>
 where
     T: Entity + Serialize + DeserializeOwned,

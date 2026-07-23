@@ -67,6 +67,8 @@ pub struct AppBuilder {
 }
 
 impl AppBuilder {
+    /// Start a builder with the defaults: `0.0.0.0:8080`, one shard per
+    /// available core, and the standard keep-alive and drain timeouts.
     pub fn new() -> Self {
         Self {
             addr: "0.0.0.0:8080".to_string(),
@@ -168,6 +170,7 @@ pub struct KernwayApp {
 }
 
 impl KernwayApp {
+    /// Begin configuring an application.
     pub fn builder() -> AppBuilder {
         AppBuilder::new()
     }

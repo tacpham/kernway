@@ -70,6 +70,26 @@ if ! OUT=$(cargo test "${PKG_ARGS[@]}" 2>&1); then
   note "FAIL tests — $(grep -cE '^test .* FAILED' <<<"$OUT") failing in: ${TOUCHED[*]}"
 fi
 
+# --- solid: docs ---------------------------------------------------------
+# Documentation is part of the published API, so it is checked, not trusted.
+# `cargo doc` surfaces two distinct failures worth separating: a missing_docs
+# warning means a public item has no explanation, a broken_intra_doc_links
+# warning means an explanation points at something that no longer exists.
+# The doctests are the real safeguard — an example that stops compiling is a
+# doc that has started lying.
+if ! OUT=$(cargo doc "${PKG_ARGS[@]}" --no-deps 2>&1); then
+  note "FAIL cargo doc could not run — see: cargo doc ${PKG_ARGS[*]} --no-deps"
+else
+  UNDOC=$(grep -cE '^warning: missing documentation' <<<"$OUT")
+  LINKS=$(grep -cE '^warning: (unresolved link|public documentation for)' <<<"$OUT")
+  [[ $UNDOC -gt 0 ]] && note "DOC  $UNDOC public item(s) undocumented in: ${TOUCHED[*]}"
+  [[ $LINKS -gt 0 ]] && note "DOC  $LINKS broken intra-doc link(s) — a doc points at something gone"
+fi
+
+if ! OUT=$(cargo test "${PKG_ARGS[@]}" --doc 2>&1); then
+  note "FAIL doctests — an example in the docs no longer compiles or passes"
+fi
+
 # --- solid: clippy, stricter than the workspace default ------------------
 # Core is a published API surface, so it is held to pedantic. Two carve-outs:
 # module_name_repetitions fights the crate's own naming, and missing_errors_doc

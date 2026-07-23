@@ -7,3 +7,10 @@ license.workspace = true
 
 [dependencies]
 kernway-cache-core = { path = "../kernway-cache-core" }
+
+[lints]
+workspace = true
+
+# docs.rs builds with every feature on, so feature-gated items still appear.
+[package.metadata.docs.rs]
+all-features = true

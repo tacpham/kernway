@@ -8,12 +8,23 @@ use kernway_core::fields::{Headers, QueryParams};
 use kernway_core::request::{HttpVersion, Request};
 use thiserror::Error;
 
+/// Why a request could not be decoded.
+///
+/// Every variant is a client-visible failure: the connection is answered with a
+/// 4xx and closed rather than left in an ambiguous state, since a half-parsed
+/// request stream cannot be resynchronised.
 #[derive(Debug, Error)]
 pub enum ParseError {
+    /// The underlying transport failed while reading.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// The request line did not match `method SP request-target SP version`
+    /// (RFC 9112 §3). Carries the offending line for the log.
     #[error("malformed request line: {0}")]
     BadRequestLine(String),
+    /// The head exceeded [`MAX_HEAD_BYTES`] or the body [`MAX_BODY_BYTES`].
+    ///
+    /// Bounded on purpose: an unbounded head is a memory-exhaustion vector.
     #[error("request too large")]
     TooLarge,
 }
@@ -34,7 +45,13 @@ pub const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 pub enum Parsed {
     /// A full request was decoded; `consumed` bytes may be dropped from the
     /// front of the buffer (anything beyond belongs to the next request).
-    Complete { request: Request, consumed: usize },
+    Complete {
+        /// The decoded request.
+        request: Request,
+        /// Bytes consumed from the front of the buffer. Anything past this
+        /// point belongs to the next pipelined request and must be kept.
+        consumed: usize,
+    },
     /// Not enough bytes yet — read more and call again.
     Incomplete,
 }

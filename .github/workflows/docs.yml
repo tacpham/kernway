@@ -1,0 +1,38 @@
+# Documentation is part of the API, so CI treats it that way.
+#
+# Three things are checked, because they fail independently:
+#   1. every public item is documented        (missing_docs)
+#   2. every doc link still resolves          (broken_intra_doc_links)
+#   3. every example in the docs still runs   (doctests)
+#
+# (3) is the one that catches real rot: an example that stops compiling is a
+# document that has started lying. Warnings are promoted to errors here — the
+# workspace lints stay at `warn` so a work-in-progress branch still builds.
+name: docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  docs:
+    name: rustdoc + doctests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build docs (deny warnings)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --all-features
+
+      - name: Run doctests
+        run: cargo test --workspace --doc --all-features

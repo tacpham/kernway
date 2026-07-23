@@ -1,13 +1,109 @@
 //! # kernway-core
 //!
-//! Spec-only crate — contains trait definitions only.
-//! No implementations. Compile time < 1s.
+//! The spec crate: trait definitions and the plain data types they pass around.
+//! No implementations, no `serde`, no `diesel`, no `rustls`. It compiles in
+//! under a second, and it is meant to stay that way.
 //!
-//! All other crates in the Kernway workspace implement these traits.
-//! Community crates can also implement these traits — no need to fork Kernway.
+//! ## The idea
+//!
+//! Every other crate in the workspace depends on this one; this one depends on
+//! almost nothing. That direction is the whole design. A framework that couples
+//! its abstractions to its implementations forces you to fork it to swap a
+//! piece — swapping the template engine means patching the core.
+//!
+//! Here, "swap a piece" means writing an impl of a trait defined in this crate.
+//! `kernleaf` implements [`TemplateEngine`]; a Tera adapter would implement the
+//! same trait and drop in beside it. A community crate never needs to be merged
+//! upstream to participate, because there is nothing upstream to change.
+//!
+//! [`TemplateEngine`]: template::TemplateEngine
+//!
+//! ## Request lifecycle — where each trait sits
+//!
+//! ```text
+//!  bytes on a socket
+//!         │
+//!         ▼
+//!   ┌───────────┐   parsed by kernway-http into…
+//!   │  Request  │   method · path · version · headers · query · body
+//!   └───────────┘
+//!         │
+//!         ▼
+//!   Layer::handle ──► Layer::handle ──► … ──► handler        (layer)
+//!    (logging)          (auth)                   │
+//!         ▲                                      │  arguments extracted via
+//!         │                                      │  FromRequest              (request)
+//!         │                                      ▼
+//!         │                                  your code
+//!         │                                      │  returns anything that is
+//!         │                                      │  IntoResponse             (response)
+//!         │                                      ▼
+//!         └──────────── Response ◄───────────────┘
+//! ```
+//!
+//! A [`Layer`] wraps the rest of the chain rather than sitting in a list: work
+//! before `next.call(req)` runs on the way in, work after it runs on the way
+//! out, and *not* calling it rejects the request early. That is how auth and
+//! rate limiting short-circuit without a special case in the dispatcher.
+//!
+//! [`Layer`]: layer::Layer
+//!
+//! ## What lives here
+//!
+//! | Module | Defines | Spring analogue |
+//! |---|---|---|
+//! | [`request`] | [`Request`], [`FromRequest`], [`HttpVersion`] | `HttpServletRequest`, argument resolvers |
+//! | [`response`] | [`Response`], [`IntoResponse`] | `HttpServletResponse`, `HttpMessageConverter` |
+//! | [`fields`] | [`Headers`], [`QueryParams`] | `HttpHeaders` |
+//! | [`layer`] | [`Layer`], [`Next`] | `OncePerRequestFilter`, `FilterChain` |
+//! | [`error`] | [`KernwayError`], [`StatusCode`] | `HttpStatus` |
+//! | [`db`] | [`DbPool`], [`Connection`] | `javax.sql.DataSource` |
+//! | [`template`] | [`TemplateEngine`], [`TemplateContext`] | `ViewResolver` |
+//! | [`plugin`] | [`KernwayPlugin`] | `ApplicationContextInitializer` |
+//!
+//! [`Request`]: request::Request
+//! [`FromRequest`]: request::FromRequest
+//! [`HttpVersion`]: request::HttpVersion
+//! [`Response`]: response::Response
+//! [`IntoResponse`]: response::IntoResponse
+//! [`Headers`]: fields::Headers
+//! [`QueryParams`]: fields::QueryParams
+//! [`Next`]: layer::Next
+//! [`KernwayError`]: error::KernwayError
+//! [`StatusCode`]: error::StatusCode
+//! [`DbPool`]: db::DbPool
+//! [`Connection`]: db::Connection
+//! [`TemplateContext`]: template::TemplateContext
+//! [`KernwayPlugin`]: plugin::KernwayPlugin
+//!
+//! ## Example
+//!
+//! ```
+//! use kernway_core::error::StatusCode;
+//! use kernway_core::request::{HttpVersion, Request};
+//!
+//! let mut req = Request::new("GET", "/users/42");
+//! req.headers.insert("accept", "application/json");
+//! req.query.insert("verbose", "true");
+//!
+//! // Header names are case-insensitive; query names are not.
+//! assert_eq!(req.headers.get("Accept"), Some("application/json"));
+//! assert_eq!(req.query.get("verbose"), Some("true"));
+//! assert_eq!(req.query.get("Verbose"), None);
+//!
+//! // HTTP/1.1 keeps the connection alive unless told otherwise.
+//! assert_eq!(req.version, HttpVersion::Http11);
+//! assert!(StatusCode::OK.is_success());
+//! ```
+//!
+//! ## A note on the field types
+//!
+//! [`Headers`] and [`QueryParams`] are not `HashMap`s. Both store their entries
+//! in a single backing buffer of offsets, because a request carries a handful of
+//! short fields and one allocation beats a dozen. See `benches/` for the
+//! measurements behind that choice.
 
 #![forbid(unsafe_code)]
-#![allow(missing_docs)] // v0.1 — complete documentation planned for v1.0
 
 pub mod error;
 pub mod fields;

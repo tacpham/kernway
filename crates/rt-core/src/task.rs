@@ -11,11 +11,11 @@
 //!
 //! So the split is:
 //!
-//! - [`Task`] — holds the future, lives in an `Rc` inside the owning shard's
+//! - `Task` — holds the future, lives in an `Rc` inside the owning shard's
 //!   slab, and **never leaves its thread**. The future therefore does not need
 //!   to be `Send`, which is the whole point of thread-per-core.
-//! - [`WakeHandle`] — the waker payload: an `Arc` carrying only a [`TaskId`]
-//!   plus a handle to the shard's [`Shared`] queue. Sound to move and wake
+//! - `WakeHandle` — the waker payload: an `Arc` carrying only a [`TaskId`]
+//!   plus a handle to the shard's `Shared` queue. Sound to move and wake
 //!   across threads; waking just enqueues the id and unparks the reactor.
 
 use std::cell::RefCell;

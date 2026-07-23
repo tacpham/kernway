@@ -4,7 +4,7 @@
 //!
 //! Compared with v0.1:
 //!   v0.1: manual construction (UserService { repo: ctx.get()? })
-//!   v0.2: auto-wiring (#[derive(Component)] + #[inject] + ctx.build::<T>())
+//!   v0.2: auto-wiring (`#[derive(Component)]` + `#[inject]` + `ctx.build::<T>()`)
 
 use di_core::AppContext;
 use di_macro::Component;

@@ -10,9 +10,13 @@ pub enum Ttl {
 }
 
 impl Ttl {
+    /// Expire after `n` seconds.
     pub fn seconds(n: u64) -> Self { Self::Seconds(n) }
+    /// Expire after `n` minutes.
     pub fn minutes(n: u64) -> Self { Self::Seconds(n * 60) }
+    /// Expire after `n` hours.
     pub fn hours(n: u64) -> Self { Self::Seconds(n * 3600) }
+    /// Never expire — the entry leaves only by eviction or `clear`.
     pub fn never() -> Self { Self::Forever }
 
     /// Convert to Duration. Returns None for Forever.

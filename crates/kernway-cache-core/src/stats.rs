@@ -1,8 +1,11 @@
 /// Cache performance statistics.
 #[derive(Debug, Clone, Default)]
 pub struct CacheStats {
+    /// Lookups answered from the cache.
     pub hits: u64,
+    /// Lookups that found nothing, or found an expired entry.
     pub misses: u64,
+    /// Non-expired entries currently held.
     pub entries: usize,
 }
 
