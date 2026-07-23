@@ -2,7 +2,7 @@
 //!
 //! # Why the waker is not backed by `Rc<Task>`
 //!
-//! `docs/internal/modules/rt-core.md` sketches `make_waker(task: Rc<Task>)`.
+//! `docs/design/modules/rt-core.md` sketches `make_waker(task: Rc<Task>)`.
 //! That sketch is unsound: [`Waker`] is `Send + Sync`, so a future may hand its
 //! waker to a timer thread, a `spawn_blocking` worker, or any other thread and
 //! have `wake()` called there. An `Rc` refcount touched from two threads is a

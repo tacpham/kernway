@@ -99,7 +99,7 @@ kernway-orm-core  (spec — ORM traits, stable from v0.6) ← the JPA equivalent
 | Hibernate (impl) | `kernway-orm-diesel` (impl) |
 | Swap impl via `pom.xml` | Swap impl via `Cargo.toml` |
 
-See: `docs/internal/modules/kernway-orm-core.md`
+See: `docs/design/modules/kernway-orm-core.md`
 
 ---
 

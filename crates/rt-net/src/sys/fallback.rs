@@ -1,7 +1,7 @@
 //! Non-Unix platforms — currently Windows.
 //!
 //! Windows has no `SO_REUSEPORT`. The plan in
-//! `docs/internal/modules/rt-net.md` is a single shared listener whose accepts
+//! `docs/design/modules/rt-net.md` is a single shared listener whose accepts
 //! are dispatched by IOCP; until that is written, binding falls back to one
 //! ordinary listener and [`bootstrap_shards`](crate::bootstrap_shards) drops to
 //! a single shard rather than pretending to scale.

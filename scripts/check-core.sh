@@ -5,7 +5,7 @@
 # that can actually prove it:
 #
 #   solid    cargo test + clippy (pedantic) + miri (UB in hand-written unsafe)
-#   generic  crate dependency rules from docs/internal/ARCHITECTURE.md
+#   generic  crate dependency rules from docs/design/ARCHITECTURE.md
 #   fast     criterion benches, compared against the committed baseline
 #
 # Advisory by design: it reports, it never blocks. Exit code is always 0 unless
@@ -113,7 +113,7 @@ else
 fi
 
 # --- generic: the crate-independence rules -------------------------------
-# From docs/internal/ARCHITECTURE.md. These are the edges that, once added, are
+# From docs/design/ARCHITECTURE.md. These are the edges that, once added, are
 # very hard to remove — so they are checked mechanically rather than by review.
 forbidden_dep() { # crate, dependency, why
   if grep -qE "^\s*$2\s*=" "crates/$1/Cargo.toml" 2>/dev/null; then

@@ -3,7 +3,7 @@
 //! Windows *can* do this via `SetThreadAffinityMask`, but that needs a
 //! `windows-sys` dependency and a machine to verify it on, so it is deliberately
 //! left unimplemented rather than shipped untested. Tracked for v0.2 alongside
-//! the IOCP shard bootstrap (`docs/internal/modules/rt-net.md`).
+//! the IOCP shard bootstrap (`docs/design/modules/rt-net.md`).
 
 use std::io;
 
