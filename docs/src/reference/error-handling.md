@@ -45,17 +45,17 @@ pub enum PaymentError {
     CardDeclined,
 }
 
-// --- App-level error: gom tất cả lại (giống base class trong Java) ---
+// --- App-level error: gathers them all (like a base class in Java) ---
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error(transparent)]
-    User(#[from] UserError),        // UserError → AppError tự động qua ?
+    User(#[from] UserError),        // UserError → AppError automatically via ?
 
     #[error(transparent)]
-    Payment(#[from] PaymentError),  // PaymentError → AppError tự động qua ?
+    Payment(#[from] PaymentError),  // PaymentError → AppError automatically via ?
 
     #[error(transparent)]
-    Db(#[from] DbError),            // DbError → AppError tự động qua ?
+    Db(#[from] DbError),            // DbError → AppError automatically via ?
 
     #[error("forbidden")]
     Forbidden,
@@ -75,12 +75,12 @@ pub enum AppError {
 // src/service/user_service.rs
 impl UserService {
     pub async fn create(&self, req: CreateUserReq) -> Result<User, AppError> {
-        // DbError tự động → AppError::Db qua ?
+        // DbError → AppError::Db automatically via ?
         if self.repo.email_exists(&req.email).await? {
             return Err(UserError::DuplicateEmail(req.email).into());
         }
 
-        // DbError tự động → AppError::Db qua ?
+        // DbError → AppError::Db automatically via ?
         let user = self.repo.insert(req).await?;
         Ok(user)
     }
@@ -105,7 +105,7 @@ impl UserRepository {
 ```rust
 // src/exception/handlers.rs
 
-// Bắt AppError — handler mặc định cho toàn app
+// Catches AppError — the app-wide default handler
 #[exception_handler]
 async fn handle_app_error(err: AppError) -> impl IntoResponse {
     match err {
@@ -124,7 +124,7 @@ async fn handle_app_error(err: AppError) -> impl IntoResponse {
 ### Specific handlers — higher priority than global
 
 ```rust
-// Handler cho UserError — thắng AppError handler khi lỗi là UserError
+// Handler for UserError — beats the AppError handler when the error is a UserError
 #[exception_handler]
 async fn handle_user_error(err: UserError) -> impl IntoResponse {
     match err {
@@ -143,7 +143,7 @@ async fn handle_user_error(err: UserError) -> impl IntoResponse {
     }
 }
 
-// Handler scoped — chỉ áp dụng trong PaymentController
+// Scoped handler — applies only inside PaymentController
 #[exception_handler(scope = PaymentController)]
 async fn handle_payment_error(err: PaymentError) -> impl IntoResponse {
     match err {
@@ -166,7 +166,7 @@ async fn handle_payment_error(err: PaymentError) -> impl IntoResponse {
 ### Final catch-all — never expose the stack trace
 
 ```rust
-// Bắt bất kỳ error nào không được handle ở trên
+// Catches any error not handled above
 #[exception_handler]
 async fn handle_unknown(err: Box<dyn std::error::Error>) -> impl IntoResponse {
     log::error!("unhandled error type: {err:?}");
@@ -179,16 +179,16 @@ async fn handle_unknown(err: Box<dyn std::error::Error>) -> impl IntoResponse {
 ## Handler Priority
 
 ```
-Cao nhất ──────────────────────────────────────────────────────── Thấp nhất
+Highest ───────────────────────────────────────────────────────────── Lowest
 
 scope=Controller  >  scope="module"  >  specific type  >  parent type  >  catch-all
 
-Ví dụ khi PaymentError xảy ra trong PaymentController:
+Example — a PaymentError raised inside PaymentController:
 
-  1. #[exception_handler(scope = PaymentController)] cho PaymentError  ← CHẠY CÁI NÀY
-  2. #[exception_handler] cho PaymentError
-  3. #[exception_handler] cho AppError (vì PaymentError → AppError qua From)
-  4. #[exception_handler] cho Box<dyn Error>
+  1. #[exception_handler(scope = PaymentController)] for PaymentError  ← THIS ONE RUNS
+  2. #[exception_handler] for PaymentError
+  3. #[exception_handler] for AppError (since PaymentError → AppError via From)
+  4. #[exception_handler] for Box<dyn Error>
 ```
 
 ---
@@ -198,7 +198,7 @@ Ví dụ khi PaymentError xảy ra trong PaymentController:
 Kernway returns errors using the RFC 7807 Problem Details standard:
 
 ```rust
-// src/exception/mod.rs — helper function dùng chung
+// src/exception/mod.rs — shared helper function
 pub fn error_body(code: &str, message: impl Into<String>) -> serde_json::Value {
     json!({
         "type":    format!("https://my-app.com/errors/{}", code.to_lowercase()),
@@ -238,7 +238,7 @@ Sample response:
   }
 }
 
-// 500 Internal (không lộ detail)
+// 500 Internal (leaks no detail)
 {
   "type":    "https://my-app.com/errors/internal",
   "code":    "INTERNAL",
@@ -257,7 +257,7 @@ src/
     ├── user_error.rs   // UserError enum
     ├── payment_error.rs // PaymentError enum
     ├── db_error.rs     // DbError enum
-    └── handlers.rs     // tất cả #[exception_handler]
+    └── handlers.rs     // every #[exception_handler]
 ```
 
 ---
@@ -277,7 +277,7 @@ pub struct CreateUserReq {
 }
 
 #[route(POST, "/users")]
-#[validated]  // ← tự động bắt validation error, trả 422 + RFC 7807
+#[validated]  // ← catches validation errors automatically, returns 422 + RFC 7807
 async fn create_user(
     body: Validated<Json<CreateUserReq>>,
     ctrl: &UserController,
@@ -301,15 +301,15 @@ Custom log level per error type:
 
 ```rust
 #[exception_handler]
-#[log_level(error)]    // log ở ERROR level (default cho 5xx)
+#[log_level(error)]    // logs at ERROR level (the default for 5xx)
 async fn handle_db(err: DbError) -> impl IntoResponse { ... }
 
 #[exception_handler]
-#[log_level(warn)]     // log ở WARN (hợp lý hơn cho 4xx)
+#[log_level(warn)]     // logs at WARN (a better fit for 4xx)
 async fn handle_user(err: UserError) -> impl IntoResponse { ... }
 
 #[exception_handler]
-#[log_level(none)]     // không log (ví dụ: validation error — quá nhiều, không cần)
+#[log_level(none)]     // no logging (e.g. validation errors — too many, not worth it)
 async fn handle_validation(err: ValidationError) -> impl IntoResponse { ... }
 ```
 
@@ -318,20 +318,20 @@ async fn handle_validation(err: ValidationError) -> impl IntoResponse { ... }
 ## Quick Summary
 
 ```rust
-// 1. Định nghĩa errors trong src/exception/
+// 1. Define the errors in src/exception/
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error(transparent)] User(#[from] UserError),
     #[error(transparent)] Db(#[from] DbError),
 }
 
-// 2. Dùng ? trong service/repository — tự convert
-let user = repo.find(id).await?;   // DbError → AppError tự động
+// 2. Use ? in services/repositories — conversion is automatic
+let user = repo.find(id).await?;   // DbError → AppError automatically
 
-// 3. Handler bắt và trả HTTP response
+// 3. A handler catches it and returns the HTTP response
 #[exception_handler]
 async fn handle(err: AppError) -> impl IntoResponse { ... }
 
-// 4. Không cần try/catch — Rust Result + ? là đủ
-// 5. Compiler báo lỗi nếu quên handle 1 variant — không bao giờ miss error
+// 4. No try/catch needed — Rust's Result + ? is enough
+// 5. The compiler flags an unhandled variant — you never miss an error
 ```

@@ -58,15 +58,15 @@ Kernway **does not need this** — the return type decides automatically:
 #[controller("/users")]
 struct UserController { }
 
-// Trả JSON → REST behavior (như @RestController)
+// Return JSON → REST behavior (like @RestController)
 #[route(GET, "/{id}")]
 async fn get_user(...) -> Json<User> { ... }
 
-// Trả template → MVC behavior (như @Controller)
+// Return a template → MVC behavior (like @Controller)
 #[route(GET, "/{id}/profile")]
 async fn profile(...) -> Template { ... }
 
-// Mix tự do trong cùng controller — không cần thêm annotation
+// Mix them freely in one controller — no extra annotation needed
 ```
 
 ---
@@ -125,13 +125,13 @@ async fn create_user(ctrl: &UserController, body: Validated<Json<CreateUserReq>>
 **Kernway:** `Result<T, E>` + `?` operator → caught by `#[exception_handler]`
 
 ```rust
-// Không có throw — dùng Result
+// No throw — use Result
 async fn find_user(id: u64) -> Result<User, AppError> {
     let user = repo.find(id).await?;  // ? = throw trong Spring
     Ok(user)
 }
 
-// Không có try-catch — dùng #[exception_handler]
+// No try-catch — use #[exception_handler]
 #[exception_handler]
 async fn handle_error(err: AppError) -> impl IntoResponse {
     match err {
@@ -209,16 +209,16 @@ level = "INFO"
 ## Dependency Injection — Similar, but compile-time
 
 ```rust
-// Spring: DI tại runtime, lỗi khi start app
-// Kernway: DI tại compile-time, lỗi khi build
+// Spring: DI at runtime, failures surface when the app starts
+// Kernway: DI at compile time, failures surface at build
 
 #[component]
 struct OrderService {
-    #[inject] user_service: Arc<UserService>,     // phải có #[component]
-    #[inject] payment_service: Arc<PaymentService>, // phải có #[component]
+    #[inject] user_service: Arc<UserService>,     // must carry #[component]
+    #[inject] payment_service: Arc<PaymentService>, // must carry #[component]
 }
 
-// Nếu UserService chưa có #[component] → compile error:
+// If UserService has no #[component] yet → compile error:
 // error[kernway]: bean `UserService` not found
 // help: add #[component] to struct UserService
 ```

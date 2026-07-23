@@ -299,7 +299,7 @@ mod tests {
     fn non_ascii_values_survive_intact() {
         // Names are ASCII by RFC 9110 §5.1, but values reach us as UTF-8.
         let mut h = Headers::new();
-        h.insert("x-name", "Phạm");
-        assert_eq!(h.get("x-name"), Some("Phạm"));
+        h.insert("x-name", "Grüße-日本");
+        assert_eq!(h.get("x-name"), Some("Grüße-日本"));
     }
 }

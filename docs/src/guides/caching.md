@@ -28,13 +28,13 @@ pub struct UserService {
 }
 
 impl UserService {
-    // Tự động: check cache → nếu miss → gọi hàm → lưu vào cache
+    // Automatic: check the cache → on a miss, call the function → store the result
     #[cacheable(key = "user:{id}", ttl = 300)]
     pub async fn find_user(&self, id: u64) -> Result<Option<User>, AppError> {
         self.repo.find_by_id(&id).await.map_err(Into::into)
     }
 
-    // Xóa cache khi update
+    // Drop the cache entry on update
     #[cache_evict(key = "user:{user.id}")]
     pub async fn update_user(&self, user: User) -> Result<User, AppError> {
         self.repo.save(user).await.map_err(Into::into)
@@ -63,7 +63,7 @@ impl ProductService {
 
         let product = self.repo.find_by_id(&id).await?;
         if let Some(ref p) = product {
-            self.cache.set(&key, p, Some(600)).await?;   // TTL 10 phút
+            self.cache.set(&key, p, Some(600)).await?;   // TTL 10 minutes
         }
         Ok(product)
     }
@@ -75,10 +75,10 @@ impl ProductService {
 ## Multi-key (batch)
 
 ```rust
-// Lấy nhiều keys 1 lần — hiệu quả hơn N lần get
+// Fetch many keys at once — cheaper than N separate gets
 let users = cache.mget::<User>(&["user:1", "user:2", "user:3"]).await?;
 
-// Set nhiều keys
+// Set many keys
 cache.mset(&[("user:1", &u1), ("user:2", &u2)], Some(300)).await?;
 ```
 
@@ -90,7 +90,7 @@ cache.mset(&[("user:1", &u1), ("user:2", &u2)], Some(300)).await?;
 // Atomic increment
 let views = cache.increment("post:42:views", 1).await?;
 
-// Rate limiting (built-in Redis Lua — atomic, không race condition)
+// Rate limiting (built-in Redis Lua — atomic, no race condition)
 let allowed = cache.rate_limit("ip:1.2.3.4", 100, 60).await?;
 if !allowed {
     return Err(AppError::TooManyRequests);
@@ -102,7 +102,7 @@ if !allowed {
 ## Distributed lock
 
 ```rust
-// Chạy job chỉ 1 instance trong cluster
+// Run the job on exactly one instance in the cluster
 let lock = cache.acquire_lock("cron:daily-report", Duration::from_secs(60)).await?;
 match lock {
     Some(guard) => {
@@ -110,7 +110,7 @@ match lock {
         guard.release().await?;
     }
     None => {
-        // Có instance khác đang chạy — skip
+        // Another instance is already running it — skip
     }
 }
 ```
@@ -123,7 +123,7 @@ match lock {
 // Publisher
 cache.publish("events.order.created", &order_event).await?;
 
-// Subscriber (chạy background listener)
+// Subscriber (runs a background listener)
 cache.subscribe("events.order.*", |event: OrderEvent| async move {
     send_notification(event).await?;
     Ok(())

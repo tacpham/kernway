@@ -22,21 +22,21 @@ Kernway follows these same 4 categories.
 ## Tool — mdBook
 
 ```
-mdBook: công cụ viết docs của Rust ecosystem
-- The Rust Book dùng mdBook
-- Cargo Book dùng mdBook
-- Async Book dùng mdBook
-- Tích hợp search tự động
-- Sinh từ Markdown
-- Deploy dễ: GitHub Pages / Netlify
+mdBook: the Rust ecosystem's documentation tool
+- The Rust Book uses mdBook
+- The Cargo Book uses mdBook
+- The Async Book uses mdBook
+- Search built in
+- Generated from Markdown
+- Easy to deploy: GitHub Pages / Netlify
 ```
 
 ```bash
 # Setup
 cargo install mdbook
 mdbook init kernway-docs
-mdbook serve   # preview tại localhost:3000
-mdbook build   # sinh HTML ra book/
+mdbook serve   # preview at localhost:3000
+mdbook build   # emit HTML into book/
 ```
 
 ---
@@ -44,36 +44,36 @@ mdbook build   # sinh HTML ra book/
 ## Docs site directory structure
 
 ```
-kernway-docs/                  ← repo riêng: github.com/kernway/kernway-docs
+kernway-docs/                  ← its own repo: github.com/kernway/kernway-docs
 ├── book.toml                  ← mdBook config
 ├── src/
-│   ├── SUMMARY.md             ← mục lục — quan trọng nhất
+│   ├── SUMMARY.md             ← table of contents — the most important file
 │   │
 │   ├── getting-started/
 │   │   ├── README.md          ← Overview
-│   │   ├── installation.md    ← cài đặt Rust + kernway-cli
-│   │   ├── first-app.md       ← Hello World trong 5 phút
-│   │   ├── project-structure.md ← layout thư mục chuẩn
-│   │   └── for-spring-developers.md     ← Spring developer: đọc cái này trước
+│   │   ├── installation.md    ← installing Rust + kernway-cli
+│   │   ├── first-app.md       ← Hello World in 5 minutes
+│   │   ├── project-structure.md ← the standard directory layout
+│   │   └── for-spring-developers.md     ← Spring developers: read this first
 │   │
-│   ├── guides/                ← mỗi guide = 1 use-case hoàn chỉnh
+│   ├── guides/                ← one guide = one complete use case
 │   │   ├── README.md
-│   │   ├── rest-api.md        ← Build REST API với CRUD
-│   │   ├── database.md        ← Kết nối DB, query, transaction
-│   │   ├── authentication.md  ← JWT auth từ đầu đến cuối
-│   │   ├── validation.md      ← Validate request, custom validator
-│   │   ├── error-handling.md  ← Định nghĩa error, handler, RFC 7807
-│   │   ├── logging.md         ← Setup log, format, file rotation
-│   │   ├── testing.md         ← Unit test, integration test, mock
+│   │   ├── rest-api.md        ← Building a REST API with CRUD
+│   │   ├── database.md        ← DB connection, queries, transactions
+│   │   ├── authentication.md  ← JWT auth end to end
+│   │   ├── validation.md      ← Request validation, custom validators
+│   │   ├── error-handling.md  ← Defining errors, handlers, RFC 7807
+│   │   ├── logging.md         ← Log setup, formats, file rotation
+│   │   ├── testing.md         ← Unit tests, integration tests, mocks
 │   │   ├── hot-reload.md      ← kernway dev + hot reload workflow
-│   │   ├── templates.md       ← Server-side rendering với kernleaf
-│   │   ├── websocket.md       ← Real-time với WebSocket
+│   │   ├── templates.md       ← Server-side rendering with kernleaf
+│   │   ├── websocket.md       ← Real-time with WebSocket
 │   │   ├── deployment.md      ← Docker, Kubernetes, musl static binary
-│   │   └── openapi.md         ← Tự động sinh Swagger UI
+│   │   └── openapi.md         ← Auto-generated Swagger UI
 │   │
-│   ├── reference/             ← tra cứu đầy đủ
+│   ├── reference/             ← the complete lookup
 │   │   ├── README.md
-│   │   ├── annotations.md     ← mọi annotation, tham số, ví dụ
+│   │   ├── annotations.md     ← every annotation, parameter, example
 │   │   ├── di-system.md       ← DI, scopes, lifecycle, override
 │   │   ├── routing.md         ← route syntax, path params, extractors
 │   │   ├── response-types.md  ← Json, Html, Template, redirect...
@@ -94,7 +94,7 @@ kernway-docs/                  ← repo riêng: github.com/kernway/kernway-docs
 │   │   └── spring-to-kernway.md ← annotation map, pattern map, pitfalls
 │   │
 │   └── api/
-│       └── README.md          ← link tới docs.rs/kernway (auto-generated)
+│       └── README.md          ← links to docs.rs/kernway (auto-generated)
 │
 └── theme/                     ← custom CSS, logo
 ```
@@ -164,11 +164,11 @@ kernway-docs/                  ← repo riêng: github.com/kernway/kernway-docs
 ### v0.3 (must exist before release)
 
 ```
-PHẢI có:
+MUST exist:
   getting-started/installation.md
   getting-started/first-app.md
   getting-started/project-structure.md
-  getting-started/for-spring-developers.md      ← target audience của Kernway
+  getting-started/for-spring-developers.md      ← Kernway's target audience
   guides/rest-api.md
   guides/error-handling.md
   guides/logging.md
@@ -195,7 +195,7 @@ PHẢI có:
   guides/templates.md
   guides/websocket.md
   guides/openapi.md
-  reference/* (còn lại)
+  reference/* (the rest)
 ```
 
 ---
@@ -203,33 +203,33 @@ PHẢI có:
 ## Writing standard — every page must include
 
 ```markdown
-# Tên tính năng
+# Feature name
 
-> 1 dòng mô tả mục đích.
+> One line stating its purpose.
 
-## Trước khi bắt đầu
+## Before you start
 
-Cần có: (prerequisites)
+Prerequisites.
 
-## Ví dụ nhanh
+## Quick example
 
-(code snippet nhỏ nhất có thể chạy được)
+(the smallest snippet that actually runs)
 
-## Giải thích chi tiết
+## Detailed explanation
 
-(từng phần, từng tùy chọn)
+(part by part, option by option)
 
-## Ví dụ đầy đủ
+## Full example
 
 (complete working example)
 
-## So sánh với Spring
+## Compared with Spring
 
-(nếu có tính năng tương đương)
+(when an equivalent feature exists)
 
-## Xem thêm
+## See also
 
-(links tới related pages)
+(links to related pages)
 ```
 
 ---
@@ -267,7 +267,7 @@ github.com/kernway/kernway-examples ← example projects
 
 kernway.dev/                        ← landing page
 kernway.dev/docs/                   ← mdBook docs
-docs.rs/kernway                     ← API reference (auto từ rustdoc)
+docs.rs/kernway                     ← API reference (generated from rustdoc)
 ```
 
 ---

@@ -81,7 +81,7 @@ impl<T: Entity + for<'r> sqlx::FromRow<'r, DB::Row>> Repository<T> for SqlxRepos
 
     async fn save(&self, entity: T) -> Result<T, OrmError> {
         // Upsert: INSERT ... ON CONFLICT DO UPDATE
-        // SQL tự sinh từ T::columns() metadata
+        // SQL generated from T::columns() metadata
         let sql = build_upsert_sql::<T>();
         sqlx::query_as::<_, T>(&sql)
             .bind_entity(&entity)           // macro-generated
@@ -142,23 +142,23 @@ kernway = { version = "0.5", features = ["orm-mongo"] }
 ### Entity with MongoDB
 
 ```rust
-// #[id] map sang _id field của MongoDB
-#[entity(collection = "users")]   // collection thay vì table
+// #[id] maps onto MongoDB's _id field
+#[entity(collection = "users")]   // collection instead of table
 pub struct User {
-    #[id]                          // map sang _id: ObjectId
+    #[id]                          // maps onto _id: ObjectId
     pub id: ObjectId,
 
     #[column]
     pub name: String,
 
-    #[column(index = true)]        // tạo MongoDB index
+    #[column(index = true)]        // creates a MongoDB index
     pub email: String,
 
-    // Embedded document (MongoDB-only, không có trong SQL)
+    // Embedded document (MongoDB-only, no SQL equivalent)
     #[embedded]
     pub address: Address,
 
-    // Reference (tương đương FK)
+    // Reference (the equivalent of an FK)
     #[ref_one(collection = "posts")]
     pub posts: Vec<ObjectId>,
 }
@@ -192,16 +192,16 @@ impl<T: Entity + Serialize + DeserializeOwned> Repository<T> for MongoRepository
 ### QueryBuilder<T> → BSON filter
 
 ```rust
-// User code (giống nhau với SQL):
+// User code (identical to the SQL case):
 repo.query()
     .filter(|u| u.email == email)
     .order_by_desc(|u| u.created_at)
     .fetch_page(0, 20)
     .await
 
-// Bên trong MongoQueryBuilder, filter() thêm vào BSON doc:
+// Inside MongoQueryBuilder, filter() appends to a BSON doc:
 // { "email": "test@example.com" }
-// Kết quả cuối: collection.find(filter_doc, find_options).await
+// Final result: collection.find(filter_doc, find_options).await
 ```
 
 ### .with() → $lookup aggregation
@@ -250,7 +250,7 @@ The `kernway-orm-core` spec does not expose SQL dialect details, so the driver h
 > There is no pure-Rust Oracle driver — Oracle Corp has not provided one.
 
 ```toml
-kernway-orm-oracle = "1.0"   # community crate, không built-in
+kernway-orm-oracle = "1.0"   # community crate, not built in
 ```
 
 ```toml
@@ -355,7 +355,7 @@ impl UserService {
 
         let user = self.repo.find_by_id(&id).await?;
         if let Some(ref u) = user {
-            self.cache.set(&key, u, Some(300)).await?;   // TTL 5 phút
+            self.cache.set(&key, u, Some(300)).await?;   // TTL 5 minutes
         }
         Ok(user)
     }
@@ -365,7 +365,7 @@ impl UserService {
 ### `#[cacheable]` annotation
 
 ```rust
-// Tự động cache-aside, không cần viết thủ công:
+// Cache-aside applied automatically — no need to write it by hand:
 impl UserService {
     #[cacheable(key = "user:{id}", ttl = 300)]
     pub async fn find_user(&self, id: u64) -> Result<Option<User>, AppError> {
@@ -400,7 +400,7 @@ let allowed = cache.rate_limit("ip:1.2.3.4", limit: 100, window_secs: 60).await?
 ## Summary: user code stays the same when swapping databases
 
 ```rust
-// src/service/user_service.rs — CODE NÀY KHÔNG ĐỔI dù dùng bất kỳ DB nào
+// src/service/user_service.rs — THIS CODE DOES NOT CHANGE, whichever DB you use
 
 #[component]
 pub struct UserService {
@@ -420,7 +420,7 @@ pub async fn find_active_users(page: u64) -> Result<Page<User>, AppError> {
 Only `Cargo.toml` changes:
 
 ```toml
-# PostgreSQL → MySQL → MongoDB — business logic KHÔNG thay đổi
+# PostgreSQL → MySQL → MongoDB — the business logic DOES NOT change
 kernway = { version = "0.4", features = ["orm-sqlx", "db-mysql"] }
 # kernway = { version = "0.5", features = ["orm-mongo"] }
 # kernway = { version = "0.6", features = ["orm-mssql"] }

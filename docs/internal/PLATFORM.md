@@ -79,7 +79,7 @@ pub fn pin_current_thread_to_core(core_id: usize) -> io::Result<()> {
     sys_impl::pin_current_thread_to_core(core_id)
 }
 
-// 3 implementations — compiler chọn đúng cái
+// Three implementations — the compiler picks the right one
 // rt-core/src/sys/linux.rs
 // rt-core/src/sys/macos.rs
 // rt-core/src/sys/windows.rs
@@ -98,8 +98,8 @@ let num_cores = std::thread::available_parallelism()
     .map(|n| n.get())
     .unwrap_or(1);
 
-// Trong Docker với --cpus=2: trả về 2 (đúng)
-// Trên bare metal 16 cores: trả về 16 (đúng)
+// In Docker with --cpus=2: returns 2 (correct)
+// On bare metal with 16 cores: returns 16 (correct)
 ```
 
 ---

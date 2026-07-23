@@ -63,11 +63,11 @@ async fn get_user(&self, Path(id): Path<u64>) -> impl IntoResponse {
 ### `#[default_impl]` — Framework default (can be overridden)
 
 ```rust
-// Dùng cho DEFAULT implementations của framework
-// User có thể override bằng cách define #[component] impl cùng trait
+// Used for the framework's DEFAULT implementations.
+// A user overrides one by defining a #[component] impl of the same trait.
 
 #[component]
-#[default_impl]   // ← bắt buộc cho mọi framework default
+#[default_impl]   // ← required on every framework default
 struct DefaultErrorHandler;
 impl ErrorHandler for DefaultErrorHandler { ... }
 
@@ -77,24 +77,24 @@ impl KernwayComponent for DefaultErrorHandler {
         ctx.register_default(DefaultErrorHandler);  // is_default = true
     }
 }
-// → Nếu user đã có #[component] impl ErrorHandler → bean này bị bỏ qua tự động
+// → If the user already has a #[component] impl of ErrorHandler, this bean is skipped automatically
 ```
 
 ### `#[primary]` — Resolve conflict
 
 ```rust
-// Khi có 2 #[component] cùng implement 1 trait → compile error
-// Giải quyết bằng #[primary]
+// Two #[component]s implementing the same trait → compile error.
+// Resolve it with #[primary].
 
 #[component]
-#[primary]   // ← cái này thắng
+#[primary]   // ← this one wins
 struct JwtAuth;
 impl AuthExtractor for JwtAuth { ... }
 
 #[component]
 struct ApiKeyAuth;
 impl AuthExtractor for ApiKeyAuth { ... }
-// Không có #[primary] trên cả 2 → compile error:
+// Neither carries #[primary] → compile error:
 // error[kernway]: multiple beans implement `AuthExtractor`
 // help: add #[primary] to the one that should be used by default
 ```
@@ -125,5 +125,5 @@ async fn handle_not_found(_err: NotFoundError) -> impl IntoResponse {
 ```toml
 # di-macro/Cargo.toml
 syn = { version = "2", features = ["derive", "parsing", "proc-macro"] }
-# NOT features = ["full"] — giảm compile time
+# NOT features = ["full"] — keeps compile time down
 ```

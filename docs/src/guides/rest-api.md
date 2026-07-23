@@ -51,7 +51,7 @@ use crate::exception::{AppError, UserError};
 
 #[component]
 pub struct UserService {
-    // Sau khi có DB: #[inject] repo: Arc<UserRepository>
+    // Once a DB is wired up: #[inject] repo: Arc<UserRepository>
     store: std::sync::Mutex<Vec<User>>,
 }
 
@@ -116,19 +116,19 @@ pub struct UserController {
     #[inject] service: Arc<UserService>,
 }
 
-// GET /users — danh sách
+// GET /users — list
 #[route(GET, "/")]
 async fn list_users(ctrl: &UserController) -> Json<Vec<User>> {
     Json(ctrl.service.find_all().await)
 }
 
-// GET /users/{id} — chi tiết
+// GET /users/{id} — detail
 #[route(GET, "/{id}")]
 async fn get_user(ctrl: &UserController, id: Path<u64>) -> Result<Json<User>, AppError> {
     Ok(Json(ctrl.service.find_by_id(*id).await?))
 }
 
-// POST /users — tạo mới
+// POST /users — create
 #[route(POST, "/")]
 #[validated]
 async fn create_user(
@@ -139,7 +139,7 @@ async fn create_user(
     Ok((StatusCode::CREATED, Json(user)))
 }
 
-// PUT /users/{id} — cập nhật
+// PUT /users/{id} — update
 #[route(PUT, "/{id}")]
 async fn update_user(
     ctrl: &UserController,
@@ -149,7 +149,7 @@ async fn update_user(
     Ok(Json(ctrl.service.update(*id, body.into_inner()).await?))
 }
 
-// DELETE /users/{id} — xóa
+// DELETE /users/{id} — delete
 #[route(DELETE, "/{id}")]
 async fn delete_user(ctrl: &UserController, id: Path<u64>) -> Result<StatusCode, AppError> {
     ctrl.service.delete(*id).await?;
@@ -224,17 +224,17 @@ kernway dev
 ```
 
 ```bash
-# Tạo user
+# Create a user
 curl -X POST http://localhost:8080/users \
   -H "Content-Type: application/json" \
   -d '{"name":"Alice","email":"alice@example.com","password":"secret123"}'
 # {"id":1,"name":"Alice","email":"alice@example.com"}
 
-# Danh sách
+# List
 curl http://localhost:8080/users
 # [{"id":1,"name":"Alice","email":"alice@example.com"}]
 
-# Chi tiết
+# Detail
 curl http://localhost:8080/users/1
 # {"id":1,"name":"Alice","email":"alice@example.com"}
 
@@ -248,7 +248,7 @@ curl -X POST http://localhost:8080/users \
 curl http://localhost:8080/users/999
 # {"error":"user 999 not found"}
 
-# Xóa
+# Delete
 curl -X DELETE http://localhost:8080/users/1
 # 204 No Content
 ```

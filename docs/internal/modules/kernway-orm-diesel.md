@@ -18,7 +18,7 @@ r2d2             = "0.8"
 # Cargo.toml
 [dependencies]
 kernway = { version = "0.4", features = ["orm-diesel", "db-postgres"] }
-# hoặc: "db-mysql" / "db-sqlite"
+# or: "db-mysql" / "db-sqlite"
 ```
 
 ```toml
@@ -66,7 +66,7 @@ impl<T: Entity + Queryable + Insertable> Repository<T> for DieselRepository<T> {
         }).await
     }
 
-    // ... các methods còn lại
+    // ... the remaining methods
 }
 
 fn map_diesel_error(e: diesel::result::Error) -> OrmError {
@@ -131,7 +131,7 @@ impl<T: Entity> QueryBuilder<T> for DieselQueryBuilder<T> {
 
 ```rust
 // .with("posts") → JOIN users LEFT JOIN posts ON posts.user_id = users.id
-// KHÔNG phải: load users rồi loop fetch posts từng cái
+// NOT: load users, then loop and fetch posts one at a time
 
 impl<T: Entity> QueryBuilder<T> for DieselQueryBuilder<T> {
     fn with(self: Box<Self>, relation: &'static str) -> Box<dyn QueryBuilder<T>> {
@@ -142,9 +142,9 @@ impl<T: Entity> QueryBuilder<T> for DieselQueryBuilder<T> {
     }
 
     async fn fetch_all(self: Box<Self>) -> Result<Vec<T>, OrmError> {
-        // Build JOIN query từ self.withs
-        // Mỗi with → LEFT JOIN thêm vào query
-        // 1 SQL query duy nhất, không phải N+1
+        // Build the JOIN query from self.withs
+        // Each `with` → one more LEFT JOIN added to the query
+        // A single SQL query, not N+1
     }
 }
 ```
