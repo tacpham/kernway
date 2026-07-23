@@ -29,6 +29,9 @@ impl StatusCode {
     pub const CREATED:               Self = Self(201);
     /// `204 No Content` — success, and deliberately no body.
     pub const NO_CONTENT:            Self = Self(204);
+    /// `304 Not Modified` — the client's cached copy is current; no body sent.
+    /// Answered to a conditional request whose `If-None-Match` matches.
+    pub const NOT_MODIFIED:          Self = Self(304);
     /// `400 Bad Request` — the request was malformed.
     pub const BAD_REQUEST:           Self = Self(400);
     /// `401 Unauthorized` — no or invalid credentials (authentication).

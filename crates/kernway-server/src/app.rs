@@ -409,17 +409,95 @@ fn close(stream: &mut AsyncTcpStream) {
     let _ = stream.shutdown(std::net::Shutdown::Write);
 }
 
+/// What the blocking file lookup decided.
+enum StaticOutcome {
+    /// The client's cached copy is current — send `304` with the validator, no body.
+    NotModified { etag: String },
+    /// Send the file with a `200` and its headers.
+    File { bytes: Vec<u8>, etag: String, mime: &'static str },
+}
+
+impl StaticOutcome {
+    fn into_response(self) -> Response {
+        match self {
+            StaticOutcome::NotModified { etag } => {
+                let mut r = Response::new(StatusCode::NOT_MODIFIED);
+                r.headers.insert("etag".to_string(), etag);
+                r.headers.insert("cache-control".to_string(), "no-cache".to_string());
+                r
+            }
+            StaticOutcome::File { bytes, etag, mime } => {
+                let mut r = Response::new(StatusCode::OK).content_type(mime).body(bytes);
+                r.headers.insert("etag".to_string(), etag);
+                // `no-cache` means "cache, but revalidate every time" — the browser
+                // re-asks with If-None-Match and gets a 304 when nothing changed.
+                // The right default for files that can change; `immutable` for
+                // content-hashed assets is later, and needs to know the asset is
+                // hashed.
+                r.headers.insert("cache-control".to_string(), "no-cache".to_string());
+                // The extension-derived type is authoritative; stop the browser sniffing.
+                r.headers.insert("x-content-type-options".to_string(), "nosniff".to_string());
+                r
+            }
+        }
+    }
+}
+
+/// Resolve, verify, stat, and (unless the cache is current) read a static file.
+/// Runs entirely on the blocking pool. `None` means "not served here" — the
+/// caller falls through to the router, which 404s.
+///
+/// The symlink re-check is here rather than in `kernway-static` because it needs
+/// I/O: `resolve` guarantees *lexical* containment, but a file inside the root
+/// can be a symlink pointing outside it, and only `canonicalize` sees that.
+fn load_static(root: &std::path::Path, path: std::path::PathBuf, if_none_match: Option<&str>) -> Option<StaticOutcome> {
+    // Resolve symlinks and `.`/`..` for real, then require the result to stay
+    // under the canonical root. A file that links outside the root fails here —
+    // this is the defence lexical checks cannot provide. `canonicalize` also
+    // errors for a missing file, which is simply a miss.
+    let canon = std::fs::canonicalize(&path).ok()?;
+    let canon_root = std::fs::canonicalize(root).ok()?;
+    if !canon.starts_with(&canon_root) {
+        return None;
+    }
+
+    let meta = std::fs::metadata(&canon).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+
+    let mtime_nanos = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let etag = kernway_static::etag(meta.len(), mtime_nanos);
+
+    // Conditional request: if the client's validator still matches, answer 304
+    // and never read the body — the whole point of caching.
+    if let Some(inm) = if_none_match {
+        if kernway_static::etag_matches(inm, &etag) {
+            return Some(StaticOutcome::NotModified { etag });
+        }
+    }
+
+    let bytes = std::fs::read(&canon).ok()?;
+    Some(StaticOutcome::File { bytes, etag, mime: mime_for(&canon) })
+}
+
 /// Try to answer a request from the static file root.
 ///
 /// Returns `Some` only for a GET the router does not claim, whose path resolves
-/// to a readable file. Everything else — no root configured, a non-GET method, a
-/// route that owns the path, a rejected path, or a missing file — is `None`, and
-/// the caller falls through to the router.
+/// to a readable file under the root. Everything else — no root, a non-GET
+/// method, a route that owns the path, a rejected or escaping path, a missing
+/// file — is `None`, and the caller falls through to the router.
 ///
-/// The file read runs on the blocking pool via [`rt_core::spawn_blocking`], so
-/// it never stalls the shard ([KEP-0000 §4]). This is the M1 slice: whole-file
-/// read into memory, GET only. Streaming (`Body::File`), HEAD, `Range`, ETag,
-/// and the symlink re-check are M2 — see the kernway-server charter.
+/// All I/O (canonicalize, stat, read) runs on the blocking pool via
+/// [`rt_core::spawn_blocking`], so it never stalls the shard ([KEP-0000 §4]).
+/// M2a: conditional GET with `ETag`/`If-None-Match` → 304, `Cache-Control`, and
+/// the symlink re-check. Still to come (M2b): HEAD, `Range`, streaming, and
+/// precompressed variants — see the kernway-server charter.
 ///
 /// [KEP-0000 §4]: https://github.com/tacpham/kernway/blob/main/docs/kep/0000-principles.md
 async fn try_static(
@@ -438,23 +516,19 @@ async fn try_static(
         return None;
     }
     // Reject hostile or malformed paths before any I/O. A rejection is a miss —
-    // indistinguishable from "no such file", so a 404 either way reveals nothing
-    // about what is or is not on disk.
+    // indistinguishable from "no such file", so a 404 either way reveals nothing.
     let path = sf.resolve(&request.path).ok()?;
+    let root = sf.root().to_path_buf();
+    let if_none_match = request.headers.get("if-none-match").map(str::to_string);
 
-    // `spawn_blocking` yields `None` if the read panicked; `std::fs::read` yields
-    // `Err` for a missing or unreadable file. Both fall through to the router.
-    let read = rt_core::spawn_blocking(move || std::fs::read(&path).map(|bytes| (bytes, path))).await;
-    let (bytes, path) = read?.ok()?;
+    // `spawn_blocking` yields `None` if the closure panicked; `load_static`
+    // yields `None` for any miss. Both fall through to the router.
+    let outcome = rt_core::spawn_blocking(move || {
+        load_static(&root, path, if_none_match.as_deref())
+    })
+    .await??;
 
-    let mut response = Response::new(StatusCode::OK)
-        .content_type(mime_for(&path))
-        .body(bytes);
-    // The extension-derived type is authoritative; stop the browser sniffing.
-    response
-        .headers
-        .insert("x-content-type-options".to_string(), "nosniff".to_string());
-    Some(response)
+    Some(outcome.into_response())
 }
 
 /// Run the middleware chain and the matched route.
@@ -889,5 +963,90 @@ mod keep_alive_tests {
             Parsed::Complete { request, .. } => assert_eq!(request.version, HttpVersion::Http10),
             Parsed::Incomplete => panic!("expected a complete request"),
         }
+    }
+}
+
+#[cfg(test)]
+mod static_file_tests {
+    use super::*;
+    use std::fs;
+
+    /// A fresh, empty temp directory unique to this test and process.
+    fn tmpdir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("kw-static-{}-{}-{}", tag, std::process::id(), line!()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn serves_a_file_with_an_etag_and_mime() {
+        let root = tmpdir("serve");
+        fs::write(root.join("a.txt"), b"hello").unwrap();
+
+        match load_static(&root, root.join("a.txt"), None).expect("should serve") {
+            StaticOutcome::File { bytes, etag, mime } => {
+                assert_eq!(bytes, b"hello");
+                assert!(etag.starts_with('"') && etag.ends_with('"'), "etag quoted: {etag}");
+                assert_eq!(mime, "text/plain; charset=utf-8");
+            }
+            StaticOutcome::NotModified { .. } => panic!("expected a file, got 304"),
+        }
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_matching_etag_yields_304_without_rereading() {
+        let root = tmpdir("cond");
+        fs::write(root.join("a.txt"), b"hello").unwrap();
+
+        let etag = match load_static(&root, root.join("a.txt"), None).unwrap() {
+            StaticOutcome::File { etag, .. } => etag,
+            StaticOutcome::NotModified { .. } => unreachable!(),
+        };
+        match load_static(&root, root.join("a.txt"), Some(&etag)).unwrap() {
+            StaticOutcome::NotModified { etag: e } => assert_eq!(e, etag),
+            StaticOutcome::File { .. } => panic!("a current cache should get 304, not the body"),
+        }
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_stale_etag_serves_the_body() {
+        let root = tmpdir("stale");
+        fs::write(root.join("a.txt"), b"hello").unwrap();
+        assert!(matches!(
+            load_static(&root, root.join("a.txt"), Some("\"stale-0\"")).unwrap(),
+            StaticOutcome::File { .. }
+        ));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_missing_file_is_a_miss() {
+        let root = tmpdir("missing");
+        assert!(load_static(&root, root.join("nope.txt"), None).is_none());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_escaping_the_root_is_rejected() {
+        // The lexical check in `resolve` cannot see this: the path is a plain
+        // name under the root, but the file it names links outside. Only the
+        // canonicalize-and-recheck in `load_static` catches it.
+        let root = tmpdir("symlink");
+        let outside = tmpdir("symlink-out");
+        fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.txt"), root.join("leak.txt")).unwrap();
+
+        assert!(
+            load_static(&root, root.join("leak.txt"), None).is_none(),
+            "a symlink pointing outside the root must not be served, even though its target exists"
+        );
+
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&outside).ok();
     }
 }

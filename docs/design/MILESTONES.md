@@ -124,28 +124,57 @@ is 0.
 
 ---
 
-## M2 — Static files
+## M2a — Conditional GET, caching, symlink defence ✅ (2026-07-24)
 
-**Goal**: drop `index.html`, CSS, and JS into a folder; the image serves them.
+The bulk of "serve files from a folder" arrived in M1. M2a made repeat requests
+cheap and closed the last static security gap — **without** the async-handler
+refactor, because the static read already runs on the blocking pool at the
+connection level, not in a handler.
 
-**Forces us to build**:
+**Built**:
 
-- KEP-0005 decisions landed: async handlers, `Body` enum
-- `Body::File` — the handler names a file, the connection task reads it, so
-  nothing blocks a core
-- Router mount class (prefix match) — `{param}` matches one segment and cannot
-  express `/assets/**`
-- `kernway-static`: MIME by extension, ETag, `If-None-Match` → 304,
-  `Last-Modified`, path traversal defence, dotfile denial, no directory listing
+- `kernway-static`: `etag(len, mtime)` and `etag_matches` (weak comparison,
+  `*`, lists) — pure, 6 new tests
+- `StatusCode::NOT_MODIFIED` (304) + writer status text
+- `kernway-server::load_static`: canonicalize-and-recheck (symlink defence),
+  stat, ETag, `If-None-Match` → 304 without reading the body, `Cache-Control:
+  no-cache`; 5 filesystem tests including a real symlink escape
+
+**Gate — passed:**
+
+```
+GET /                              200, etag: "...", cache-control: no-cache, nosniff
+GET / -H If-None-Match: <etag>     304, 0-byte body        (cache current, body not read)
+GET / -H If-None-Match: "wrong"    200, 1222-byte body     (stale → full send)
+GET /leak.txt  (→ /etc/hosts)      404                     (symlink escaping root, canonicalize catches it)
+```
+
+The symlink case is a live `curl` against a real symlink *and* the automated
+`a_symlink_escaping_the_root_is_rejected` test — the KEP-0000 §3 rule that a
+security claim is a test, so it can never silently regress.
+
+## M2b — Streaming, HEAD, Range
+
+**Goal**: serve a large file without reading it all into memory, and answer
+HEAD and byte-range requests.
+
+**Blocked on a real decision**, which is why it is separate: `Response.body` is
+`Vec<u8>`. Streaming needs a `Body` enum (`Bytes` | `File` | `Stream`), and that
+is a breaking change to `Response` touching every response type in the framework
+— it needs a KEP (0005) before code. HEAD and Range also need the encoder to
+send a `Content-Length` without a body, which it cannot do today.
+
+- KEP-0005: `Body` enum + async handler future (the `!Send` handler)
+- `Body::File` streamed in bounded chunks from the blocking pool
+- HEAD: headers with the file's length, empty body
+- `Range` → `206` + `Content-Range`, with a cap on ranges per request
+- precompressed `.br`/`.gz` selection by `Accept-Encoding`
 
 **Gate**:
 
 ```bash
-curl -I localhost:8080/                      # 200, text/html
-curl -I localhost:8080/assets/app.css        # 200, text/css, ETag present
-curl -I -H 'If-None-Match: "<etag>"' ...     # 304, empty body
-curl -i 'localhost:8080/../../etc/passwd'    # 404 — and the encoded variants too
-curl -i localhost:8080/.env                  # 404
+curl -I localhost:8080/big.bin               # 200, content-length set, no body
+curl -r 0-99 localhost:8080/big.bin          # 206, content-range, 100 bytes
 ```
 
 The traversal cases are part of the gate, not a later hardening pass. A static

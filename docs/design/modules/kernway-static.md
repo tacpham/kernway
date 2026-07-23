@@ -28,8 +28,9 @@ As of 2026-07-24. Landed in the M1 slice.
 | Traversal / dotfile / illegal-byte rejection | ✅ | 21 unit tests |
 | Index file for directory requests | ✅ | `/` and `/dir/` → `index.html` |
 | MIME by extension | ✅ | hand-written table, ~18 types |
-| Symlink re-check at open time | ❌ | needs I/O — belongs with the read in `kernway-server`. M2. |
-| Precompressed variants (`.br`/`.gz`) | ❌ | M2 |
+| ETag + `If-None-Match` matching | ✅ M2a | `etag()` + `etag_matches()`, pure; the 304 is decided in the server |
+| Symlink re-check at open time | ✅ M2a | done in `kernway-server::load_static` (needs `canonicalize`, which is I/O) |
+| Precompressed variants (`.br`/`.gz`) | ❌ | M2b |
 
 **Today**: `StaticFiles::new(root).resolve(url_path)` returns a safe `PathBuf` or
 a typed `Rejected`. `mime_for(path)` names the type.
