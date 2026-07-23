@@ -35,6 +35,8 @@ pub mod stream;
 pub mod sys;
 
 pub use listener::AsyncTcpListener;
-pub use shard::{bootstrap_shards, run_shards, ShardConfig};
+pub use shard::{
+    bootstrap_shards, run_shards, run_shards_with_shutdown, ShardConfig, DEFAULT_DRAIN_TIMEOUT,
+};
 pub use stream::AsyncTcpStream;
 pub use sys::{balances_reuseport, supports_reuseport};
