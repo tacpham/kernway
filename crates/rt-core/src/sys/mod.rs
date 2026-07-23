@@ -1,6 +1,6 @@
 //! Platform layer.
 //!
-//! **Rule** (`docs/internal/modules/rt-core.md`): `#[cfg(target_os = …)]` appears
+//! **Rule** (`docs/design/modules/rt-core.md`): `#[cfg(target_os = …)]` appears
 //! in this module and nowhere else in the crate.
 
 use std::io;

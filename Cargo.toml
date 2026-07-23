@@ -78,7 +78,7 @@ futures-core = "0.3"
 
 # Runtime — I/O readiness (epoll/kqueue/IOCP) and the platform layer.
 # `mio` is the only third-party primitive rt-core builds on; everything above it
-# (Task, Waker, Executor, Reactor) is hand-written — see docs/internal/modules/rt-core.md.
+# (Task, Waker, Executor, Reactor) is hand-written — see docs/design/modules/rt-core.md.
 mio  = { version = "1", features = ["os-poll", "net"] }
 libc = "0.2"
 
