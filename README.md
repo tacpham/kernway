@@ -1,6 +1,14 @@
 # Kernway
 
-**A Spring Boot-inspired Rust web framework — lightweight, standards-compliant, zero async runtime.**
+**A Spring Boot-inspired Rust web framework — its own async runtime, thread-per-core, standards-compliant.**
+
+> **Status: 0.1, pre-release.** The DI container, routing, HTTP/1.1, and the
+> sharded async transport work and are benchmarked
+> ([docs/design/BENCHMARKS.md](docs/design/BENCHMARKS.md)). Async handlers,
+> static-file serving, templates, and htmx are planned, not built — see the
+> [milestones](docs/design/MILESTONES.md). This README describes where the
+> project is going; sections below are marked when they describe a target rather
+> than today.
 
 [![Rust](https://img.shields.io/badge/rust-1.78%2B-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
@@ -16,9 +24,16 @@
 | ORM spec (JPA-like) | ✅ JPA/Hibernate | ❌ | ✅ kernway-orm-core |
 | Cache abstraction | ✅ `@Cacheable` | ❌ | ✅ `#[cacheable]` |
 | OpenAPI generation | ✅ SpringDoc | plugin | ✅ built-in |
-| Zero async runtime | ❌ (needs JVM) | ❌ (tokio) | ✅ pure std |
+| Own async runtime | ❌ (JVM) | ❌ (tokio) | ✅ (`rt-core`) |
+| Thread-per-core scheduling | ❌ | optional | ✅ default |
 | Cross-platform | ✅ (JVM) | ✅ | ✅ |
 | Native binary | ❌ | ✅ | ✅ |
+
+> Kernway ships its own async runtime (`rt-core`: reactor, executor, waker,
+> timers) rather than depending on tokio. It is not "no async" — it is async on a
+> thread-per-core scheduler, where a task stays on the core that accepted it.
+> The one third-party primitive underneath is `mio`, for portable
+> epoll/kqueue/IOCP.
 
 ---
 
@@ -187,6 +202,31 @@ that way — start with `di-core`, `kernway-core`, or `kernway-orm-core`.
 written down as [KEPs](docs/kep/) — Kernway Enhancement Proposals, modelled on
 Rust's RFC process. Each one records what was rejected and what the choice costs,
 not only what was chosen.
+
+---
+
+## Performance
+
+Measured on an Apple M2 Max, macOS, release build. Full table and reproduction
+steps in [docs/design/BENCHMARKS.md](docs/design/BENCHMARKS.md).
+
+| What | Measured |
+|---|---|
+| Static route match | **41 ns — flat from 4 to 102 routes** (O(1)) |
+| DI bean lookup (`#[inject]`) | 4.2 ns |
+| `TypeId` hasher vs SipHash | 5.8× faster |
+| Parse a browser GET (8 headers) | 705 ns |
+| Encode a small JSON response | 44 ns |
+| Spawn a task | ~65 ns at 1000 tasks |
+
+The static-route figure is the one that matters: routing does not get slower as
+the application grows, because a route with no `{param}` is a hash lookup, not a
+scan.
+
+**Not yet measured**, and so not claimed: requests/sec, p99 latency, or any
+comparison against another framework's throughput. Those need a load test that
+does not exist yet — the table above is in-process micro-benchmarks only, and the
+[benchmarks doc](docs/design/BENCHMARKS.md) says so explicitly.
 
 ---
 

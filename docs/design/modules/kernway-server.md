@@ -337,14 +337,23 @@ entries, so review is not the only thing preventing them.
 
 ## Speed
 
-| Path | Runs | Current | Budget | Bench |
+Measured figures come from [BENCHMARKS.md](../BENCHMARKS.md); do not restate a
+number here that is not quoted from there.
+
+| Path | Runs | Measured | Budget | Bench |
 |---|---|---|---|---|
-| `Router::find`, static route | every request | one hash lookup | O(1), must not grow with route count | `benches/` (exists) |
-| `Router::find`, dynamic route | every request with a param | linear over dynamic routes only | — | `benches/` (exists) |
+| `Router::find`, static route | every request | **41 ns, flat from 4 to 102 routes** | O(1), must not grow with route count | ✅ `route/static_hit` |
+| `Router::find`, dynamic route | every request with a param | 331 ns @ 4, 2.17 µs @ 102 | — | ✅ `route/param_hit` |
+| `Router::find`, miss | every unmatched request | 80 ns @ 4, 1.87 µs @ 102 | should collapse with a mount tree | ✅ `route/miss` |
 | Mount match | every static-asset request | — | O(log n) or better on mount count | ❌ to write |
 | Template render, cached IR | every page request | — | no disk I/O, no re-parse | ❌ to write |
 | Model → `Value` conversion | every render | — | to measure; suspected hot | ❌ to write |
 | Static file, cache hit (304) | every repeat asset request | — | no file read at all | ❌ to write |
+
+The static-route row is the one to defend. It is flat across route count today,
+and it is measured — the split router keeps a hash lookup off the linear scan, so
+every ordinary path (`/`, `/health`, assets, pages) stays at ~41 ns no matter how
+large the application grows. Any change to routing has to preserve that shape.
 
 **Allocation policy on the hot path**: the router is already at zero allocations
 for a matched static route, and one `HashMap` only for a route that actually has

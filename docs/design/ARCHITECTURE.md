@@ -320,15 +320,25 @@ NO shared task queue.
 NO global lock on the hot path.
 ```
 
-**Why is this better than work-stealing (tokio)?**
+**What thread-per-core gives, and what it costs.**
 
-| | Work-stealing (tokio) | Thread-per-core (Kernway) |
-|---|---|---|
-| Task migration | Can happen at any time | Never |
-| CPU cache | Can be invalidated | Always warm |
-| Lock contention | Global task queue with locks | None |
-| p99 latency | Unpredictable spikes | Consistent |
-| p999 latency | Worse | Better (20-50%) |
+Stated as properties of the model, not as a verdict on any other runtime. Each
+row is verifiable by reading the code; none claims a competitor is worse.
+
+| Property | Consequence |
+|---|---|
+| A task is pinned to its core for life | No migration, so no cross-core cache invalidation of its working set |
+| Each core owns its executor and queue | No shared queue, so no lock on the request hot path — see the measured 41 ns static route in [BENCHMARKS.md](BENCHMARKS.md) |
+| The future never crosses threads | It need not be `Send`; request state is a plain `Rc`, not a synchronised container |
+| One core does one thing at a time | A blocking call stalls that core — the cost side of the trade, and why nothing on the request path may block ([KEP-0000 §4](../kep/0000-principles.md#4-stable--never-block-never-surprise)) |
+| No work stealing | A genuinely uneven workload is not rebalanced — the case where a work-stealing scheduler wins |
+
+**Whether this lowers tail latency under load is not yet measured.** The
+mechanism — no migration, no lock contention — is real and is why databases like
+ScyllaDB adopt it. The *magnitude* on Kernway is unverified: there is no p99
+number here, and there will not be one until `examples/echo-server` is load-tested.
+An earlier draft of this document claimed "20–50% better p999"; that figure came
+from the literature, not from Kernway, and has been removed as unmeasured.
 
 **Connection distribution per platform:**
 
