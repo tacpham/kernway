@@ -6,12 +6,13 @@ edition.workspace    = true
 license.workspace    = true
 
 [dependencies]
-kernway-core = { workspace = true }
-kernway-http = { workspace = true }
-rt-net       = { workspace = true }
-rt-core      = { workspace = true }
-di-core      = { workspace = true }
-thiserror    = { workspace = true }
+kernway-core   = { workspace = true }
+kernway-http   = { workspace = true }
+kernway-static = { workspace = true }
+rt-net         = { workspace = true }
+rt-core        = { workspace = true }
+di-core        = { workspace = true }
+thiserror      = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

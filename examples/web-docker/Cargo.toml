@@ -1,0 +1,18 @@
+[package]
+name    = "web-docker"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "web-docker"
+path = "src/main.rs"
+
+# M1 deliberately depends on the crates directly rather than the meta-crate:
+# the meta-crate does not yet re-export KernwayApp. Making it do so — so this
+# becomes `kernway = { features = [...] }` — is the meta-crate charter's Phase 1.
+[dependencies]
+kernway-core   = { workspace = true }
+kernway-server = { workspace = true }
+kernway-web    = { path = "../../crates/kernway-web" }
+di-core        = { path = "../../crates/di-core" }
+serde_json     = { workspace = true }

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kernway — it runs</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <h1>Kernway</h1>
+    <p class="lead">This page is a static file, served from <code>public/</code> by a Kernway binary running in Docker.</p>
+
+    <section>
+      <h2>What just happened</h2>
+      <ol>
+        <li>The browser requested <code>/</code>.</li>
+        <li>No route matched, so the request fell through to the static file layer.</li>
+        <li><code>/</code> resolved to <code>public/index.html</code> — this file.</li>
+        <li>The file was read on the blocking pool, so no core was stalled.</li>
+      </ol>
+    </section>
+
+    <section>
+      <h2>Also live</h2>
+      <ul>
+        <li><a href="/api/ping">/api/ping</a> — a JSON route (the router wins over static)</li>
+        <li><a href="/health">/health</a> — liveness</li>
+        <li><a href="/ready">/ready</a> — readiness</li>
+      </ul>
+    </section>
+
+    <p class="foot">M1 walking skeleton · <a href="/style.css">/style.css</a> proves a second asset loads.</p>
+  </main>
+</body>
+</html>

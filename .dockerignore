@@ -1,0 +1,8 @@
+# Keep the build context to source only. target/ alone can be many GB and would
+# be copied into the builder for nothing — cargo rebuilds inside the image.
+target/
+.git/
+**/*.md
+.idea/
+.claude/
+.codegraph/

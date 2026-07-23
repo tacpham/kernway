@@ -1,0 +1,20 @@
+[package]
+name        = "kernway-static"
+description = "Kernway static file resolution — path safety and MIME, no I/O"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+homepage.workspace   = true
+
+# Zero dependencies, by design (KEP-0000 §1). This crate is pure logic —
+# it turns a request path into a safe filesystem path and names a MIME type.
+# The actual file read is async I/O, and lives in kernway-server.
+[dependencies]
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
