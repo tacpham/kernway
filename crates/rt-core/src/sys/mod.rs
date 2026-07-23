@@ -20,6 +20,9 @@ mod fallback;
 #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
 use fallback as imp;
 
+mod signal;
+pub use signal::on_interrupt;
+
 /// Pin the calling thread to `core`, so a shard's tasks, its reactor, and its
 /// socket buffers stay on one CPU's caches.
 ///

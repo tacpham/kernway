@@ -15,6 +15,7 @@ use std::time::Duration;
 use di_core::AppContext;
 use kernway_core::{error::StatusCode, request::Request, response::Response};
 use kernway_http::{encode_response, encode_response_with, parse_bytes, Connection, Parsed};
+use rt_core::Shutdown;
 use rt_net::{AsyncTcpStream, ShardConfig};
 
 use crate::{middleware::Middleware, router::Router};
@@ -58,12 +59,13 @@ fn apply_middleware(
 
 /// App builder — fluent API similar to Spring Boot.
 pub struct AppBuilder {
-    addr:        String,
-    router:      Router,
-    context:     AppContext,
-    middlewares: Vec<Arc<dyn Middleware>>,
-    shards:      Option<usize>,
-    keep_alive:  KeepAliveConfig,
+    addr:         String,
+    router:       Router,
+    context:      AppContext,
+    middlewares:  Vec<Arc<dyn Middleware>>,
+    shards:       Option<usize>,
+    keep_alive:   KeepAliveConfig,
+    drain:        Duration,
 }
 
 impl AppBuilder {
@@ -77,6 +79,7 @@ impl AppBuilder {
             middlewares: Vec::new(),
             shards: None,
             keep_alive: KeepAliveConfig::default(),
+            drain: rt_net::DEFAULT_DRAIN_TIMEOUT,
         }
     }
 
@@ -95,6 +98,15 @@ impl AppBuilder {
     /// Tune persistent connections (idle timeout, request cap, on/off).
     pub fn keep_alive(mut self, keep_alive: KeepAliveConfig) -> Self {
         self.keep_alive = keep_alive;
+        self
+    }
+
+    /// How long in-flight requests get to finish after shutdown is signalled.
+    ///
+    /// Keep it below the grace period your orchestrator allows (Kubernetes
+    /// gives 30s before `SIGKILL`), or the drain is cut off by a kill anyway.
+    pub fn drain_timeout(mut self, timeout: Duration) -> Self {
+        self.drain = timeout;
         self
     }
 
@@ -146,6 +158,8 @@ impl AppBuilder {
             addr: self.addr,
             shards: self.shards,
             keep_alive: self.keep_alive,
+            drain: self.drain,
+            shutdown: Shutdown::new(),
             router: Arc::new(self.router),
             context: Arc::new(self.context),
             middlewares: Arc::new(self.middlewares),
@@ -164,9 +178,11 @@ pub struct KernwayApp {
     addr:        String,
     shards:      Option<usize>,
     keep_alive:  KeepAliveConfig,
-    router:      Arc<Router>,
-    context:     Arc<AppContext>,
-    middlewares: Arc<Vec<Arc<dyn Middleware>>>,
+    drain:       Duration,
+    shutdown:     Shutdown,
+    router:       Arc<Router>,
+    context:      Arc<AppContext>,
+    middlewares:  Arc<Vec<Arc<dyn Middleware>>>,
 }
 
 impl KernwayApp {
@@ -175,17 +191,54 @@ impl KernwayApp {
         AppBuilder::new()
     }
 
-    /// Start the server — blocks until the process is stopped.
+    /// A handle that stops this server.
     ///
-    /// Returns an error if the address cannot be parsed or bound; a failure on
-    /// one connection never takes the server down.
+    /// Take it *before* [`run`](Self::run), which consumes the app: an admin
+    /// endpoint, a test harness, or a supervisor thread triggers it, and every
+    /// shard drains and returns.
+    ///
+    /// ```no_run
+    /// # use kernway_server::KernwayApp;
+    /// let app = KernwayApp::builder().build();
+    /// let stop = app.shutdown_handle();
+    /// std::thread::spawn(move || stop.trigger());
+    /// app.run().unwrap();
+    /// ```
+    pub fn shutdown_handle(&self) -> Shutdown {
+        self.shutdown.clone()
+    }
+
+    /// Start the server, stopping on Ctrl+C (`SIGINT`) or `SIGTERM`.
+    ///
+    /// Returns once every shard has drained. An error means the address could
+    /// not be parsed or bound; a failure on one connection never takes the
+    /// server down.
+    ///
+    /// On a platform with no interrupt support the server still runs — it just
+    /// has to be stopped through [`shutdown_handle`](Self::shutdown_handle) or
+    /// by killing the process, and says so on stderr rather than pretending the
+    /// handler was installed.
     pub fn run(self) -> io::Result<()> {
+        let shutdown = self.shutdown.clone();
+        if let Err(e) = rt_core::on_interrupt(move || shutdown.trigger()) {
+            eprintln!("kernway: Ctrl+C will not shut down gracefully ({e})");
+        }
+        self.run_until_shutdown()
+    }
+
+    /// Like [`run`](Self::run), but without installing any signal handler —
+    /// only [`shutdown_handle`](Self::shutdown_handle) stops it.
+    ///
+    /// This is what an app that already owns its own signal handling wants, and
+    /// what tests want: installing a process-wide handler from a test would
+    /// change how the whole test binary responds to Ctrl+C.
+    pub fn run_until_shutdown(self) -> io::Result<()> {
         let addr: SocketAddr = self
             .addr
             .parse()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("bad address {}: {e}", self.addr)))?;
 
-        let mut config = ShardConfig::new(addr);
+        let mut config = ShardConfig::new(addr).drain_timeout(self.drain);
         if let Some(shards) = self.shards {
             config = config.shards(shards);
         }
@@ -197,15 +250,22 @@ impl KernwayApp {
         let context = Arc::clone(&self.context);
         let middlewares = Arc::clone(&self.middlewares);
         let keep_alive = self.keep_alive;
+        let shutdown = self.shutdown.clone();
 
-        rt_net::run_shards(config, move |stream| {
+        let result = rt_net::run_shards_with_shutdown(config, self.shutdown, move |stream| {
             let router = Arc::clone(&router);
             let context = Arc::clone(&context);
             let middlewares = Arc::clone(&middlewares);
+            let shutdown = shutdown.clone();
             async move {
-                serve_connection(stream, router, context, middlewares, keep_alive).await;
+                serve_connection(stream, router, context, middlewares, keep_alive, shutdown).await;
             }
-        })
+        });
+
+        if result.is_ok() {
+            println!("👋  Kernway stopped");
+        }
+        result
     }
 }
 
@@ -224,6 +284,7 @@ async fn serve_connection(
     context: Arc<AppContext>,
     middlewares: Arc<Vec<Arc<dyn Middleware>>>,
     keep_alive: KeepAliveConfig,
+    shutdown: Shutdown,
 ) {
     let mut buf: Vec<u8> = Vec::with_capacity(READ_CHUNK);
     let mut chunk = vec![0u8; READ_CHUNK];
@@ -245,7 +306,30 @@ async fn serve_connection(
             }
             // The idle timer covers waiting for the *first* byte of a request as
             // well as a stalled one mid-way, which is what a slowloris does.
-            let read = rt_core::timeout(keep_alive.idle_timeout, stream.read(&mut chunk)).await;
+            let read = rt_core::timeout(keep_alive.idle_timeout, stream.read(&mut chunk));
+            // A *kept-alive* connection sitting idle is the common case at
+            // shutdown: it holds no request, so waiting out its idle timeout
+            // would spend the whole drain budget on a client with nothing to
+            // say. Racing the signal closes it at once.
+            //
+            // Two cases are deliberately excluded:
+            //
+            // - a non-empty buffer — a half-read request is work in flight, and
+            //   finishing it is the point of draining;
+            // - `served == 0` — a connection accepted moments before the signal,
+            //   whose first request is still on the wire. Closing it would turn
+            //   a request the client already sent into a connection reset, which
+            //   is the one failure a graceful shutdown is supposed to prevent.
+            //   It gets the normal idle timeout; the shard's drain deadline is
+            //   the outer bound if it never speaks.
+            let read = if buf.is_empty() && served > 0 {
+                match rt_core::until_shutdown(&shutdown, read).await {
+                    Some(read) => read,
+                    None => return close(&mut stream),
+                }
+            } else {
+                read.await
+            };
             match read {
                 // Timed out, EOF, or a broken connection: nothing left to serve.
                 Err(_) | Ok(Ok(0)) | Ok(Err(_)) => return close(&mut stream),
@@ -256,7 +340,13 @@ async fn serve_connection(
         // --- Answer it ---
         served += 1;
         let client_wants_more = request.wants_keep_alive();
-        let persist = keep_alive.enabled && client_wants_more && served < keep_alive.max_requests;
+        // A server on its way out answers this request and says so, rather than
+        // inviting the client to send another down a connection about to close
+        // — the race that turns a rolling restart into stray 502s.
+        let persist = keep_alive.enabled
+            && client_wants_more
+            && served < keep_alive.max_requests
+            && !shutdown.is_triggered();
 
         let response = handle(request, &router, &context, &middlewares);
         let connection = if persist { Connection::KeepAlive } else { Connection::Close };
@@ -417,7 +507,7 @@ mod tests {
         let middlewares: Arc<Vec<Arc<dyn Middleware>>> = Arc::new(Vec::new());
         ex.block_on(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_connection(stream, router, context, middlewares, keep_alive).await;
+            serve_connection(stream, router, context, middlewares, keep_alive, Shutdown::new()).await;
         })
         .unwrap();
 
@@ -486,6 +576,17 @@ mod keep_alive_tests {
         keep_alive: KeepAliveConfig,
         client: impl FnOnce(std::net::TcpStream) -> T + Send + 'static,
     ) -> T {
+        with_server_shutdown(keep_alive, Shutdown::new(), |sock, _shutdown| client(sock))
+    }
+
+    /// As above, but the client closure also gets the shutdown handle — so a
+    /// test can stop the server from the client's side, mid-connection, the way
+    /// a real signal arrives while a connection is open.
+    fn with_server_shutdown<T: Send + 'static>(
+        keep_alive: KeepAliveConfig,
+        shutdown: Shutdown,
+        client: impl FnOnce(std::net::TcpStream, Shutdown) -> T + Send + 'static,
+    ) -> T {
         let ex = rt_core::Executor::new().unwrap();
         let (mut listener, addr) = ex
             .block_on(async {
@@ -495,14 +596,17 @@ mod keep_alive_tests {
             })
             .unwrap();
 
-        let handle = std::thread::spawn(move || client(std::net::TcpStream::connect(addr).unwrap()));
+        let for_client = shutdown.clone();
+        let handle = std::thread::spawn(move || {
+            client(std::net::TcpStream::connect(addr).unwrap(), for_client)
+        });
 
         let router = Arc::new(ping_router());
         let context = Arc::new(AppContext::new());
         let middlewares: Arc<Vec<Arc<dyn Middleware>>> = Arc::new(Vec::new());
         ex.block_on(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_connection(stream, router, context, middlewares, keep_alive).await;
+            serve_connection(stream, router, context, middlewares, keep_alive, shutdown).await;
         })
         .unwrap();
 
@@ -631,6 +735,68 @@ mod keep_alive_tests {
             got
         });
         assert!(response.contains("connection: close"), "got {response:?}");
+    }
+
+    #[test]
+    fn an_idle_kept_alive_connection_closes_as_soon_as_shutdown_is_signalled() {
+        // The common shape at shutdown: a browser holding a connection open with
+        // nothing to send. Waiting out its idle timeout would spend the whole
+        // drain budget on a client that has no work in flight at all.
+        let keep_alive = KeepAliveConfig {
+            idle_timeout: Duration::from_secs(30),
+            ..Default::default()
+        };
+        let (response, waited) = with_server_shutdown(keep_alive, Shutdown::new(), |mut sock, shutdown| {
+            sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+            let first = read_one(&mut sock);
+            let started = Instant::now();
+            shutdown.trigger();
+            let mut rest = String::new();
+            sock.read_to_string(&mut rest).unwrap(); // returns on EOF
+            (first, started.elapsed())
+        });
+
+        assert!(response.contains("connection: keep-alive"));
+        assert!(
+            waited < Duration::from_secs(5),
+            "the connection sat out its 30s idle timeout instead of closing: {waited:?}"
+        );
+    }
+
+    #[test]
+    fn a_request_arriving_during_shutdown_is_answered_and_the_connection_closed() {
+        // Answering and announcing `close` is what keeps a rolling restart from
+        // producing stray errors: the client is told not to reuse this socket
+        // instead of discovering it the hard way on its next request.
+        let shutdown = Shutdown::new();
+        shutdown.trigger();
+        let response = with_server_shutdown(KeepAliveConfig::default(), shutdown, |mut sock, _| {
+            sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+            let mut got = String::new();
+            sock.read_to_string(&mut got).unwrap();
+            got
+        });
+        assert!(response.contains("HTTP/1.1 200 OK"), "got {response:?}");
+        assert!(response.ends_with("ok"), "the request was dropped: {response:?}");
+        assert!(response.contains("connection: close"), "got {response:?}");
+    }
+
+    #[test]
+    fn a_half_sent_request_is_still_finished_after_the_signal() {
+        // Shutdown must not cut a request that is mid-flight on the wire —
+        // that is precisely the in-flight work the drain exists to protect.
+        let shutdown = Shutdown::new();
+        let response = with_server_shutdown(KeepAliveConfig::default(), shutdown, |mut sock, shutdown| {
+            sock.write_all(b"GET /n HTTP/1.1\r\nHo").unwrap();
+            sock.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(30)); // the server is now mid-request
+            shutdown.trigger();
+            sock.write_all(b"st: x\r\n\r\n").unwrap();
+            let mut got = String::new();
+            sock.read_to_string(&mut got).unwrap();
+            got
+        });
+        assert!(response.ends_with("ok"), "the half-read request was abandoned: {response:?}");
     }
 
     #[test]
