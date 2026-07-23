@@ -105,7 +105,7 @@ As of 2026-07-23.
 | Keep-alive, pipelining | ✅ | RFC 9112 §9.3, idle timeout, request cap |
 | Graceful shutdown / drain | ✅ | Verified under a real `SIGTERM` from `docker stop`: drained and exited in 0.18s (M1) |
 | Panic isolation | ✅ | `catch_unwind` per request → 500, core survives |
-| **Static file serving** | 🚧 M1 | GET only, whole-file read on the blocking pool via `.static_files(root)`. Traversal/dotfile rejected. HEAD, Range, ETag, streaming are M2. |
+| **Static file serving** | 🚧 M2a | GET, whole-file read on the blocking pool via `.static_files(root)`. Traversal/dotfile/symlink rejected; ETag + `If-None-Match` → 304; `Cache-Control`. HEAD, Range, streaming are M2b. |
 | **Async handlers** | ❌ | Handlers are `Fn(...) -> Response`, blocking. Static files sidestep this (the read is on the blocking pool, not in a handler). |
 | **Response body streaming** | ❌ | `body: Vec<u8>` — whole file in memory. M2. |
 | **View / template pipeline** | ❌ | Deliberately out of scope — it lives in a renderer crate, not here |
@@ -128,9 +128,9 @@ will here — that belongs to a renderer crate.
 | RFC 9112 §9.3 | Connection persistence, keep-alive defaults | full — HTTP/1.0 closes, 1.1 persists |
 | RFC 9112 §3 | Request line parsing | full (in `kernway-http`) |
 | RFC 9110 §5.1 | Case-insensitive header names | full |
-| RFC 9110 §8.7 | Conditional requests — `ETag`, `If-None-Match` | ❌ not started — needed for static |
-| RFC 9110 §14 | Range requests — `206`, `Content-Range` | ❌ not started — needed for static |
-| RFC 9111 | Caching — `Cache-Control`, `immutable` | ❌ not started — needed for static |
+| RFC 9110 §8.8.3, §13.1.2 | Conditional requests — `ETag`, `If-None-Match` → 304 | ✅ M2a — `static_file_tests` + `kernway-static::etag_matches` tests |
+| RFC 9110 §14 | Range requests — `206`, `Content-Range` | ❌ M2b |
+| RFC 9111 | Caching — `Cache-Control` | partial — `no-cache` (revalidate) sent; `immutable` for hashed assets is later |
 | RFC 6265 | Cookies | ❌ not started |
 | IANA media types | `Content-Type` by extension | partial — curated table in `kernway-static::mime_for`, ~18 types |
 
@@ -487,7 +487,7 @@ that a third-party crate cannot also use, that is a design bug in the hook.
 | **Dotfile exposure** — `.env`, `.git/` | any segment starting `.` denied as a class | ✅ tested |
 | **MIME sniffing** | `Content-Type` from extension only, plus `X-Content-Type-Options: nosniff` | ✅ tested (M1 live: header present) |
 | **Directory listing** | no listing exists — a directory request serves its index or 404s | ✅ by construction |
-| **Symlink escape** from the static root | a file inside the root linking outside is *not* caught by lexical checks; needs canonicalize-and-recheck at open time | ❌ **M2 — do not serve untrusted symlinked roots until then** |
+| **Symlink escape** from the static root | `canonicalize` the resolved path and require it to stay under the canonical root, at open time on the blocking pool | ✅ M2a — `a_symlink_escaping_the_root_is_rejected` + live `/etc/hosts` symlink → 404 |
 | **Range amplification** DoS | cap the number of ranges per request | ❌ |
 | **XSS via template** | auto-escape by default; raw output is a differently-named syntax | ❌ |
 | **XSS via context confusion** | context-aware escaping — HTML body, attribute, URL, and JS need different rules. `<a href="${url}">` with `javascript:` is still XSS after HTML escaping. | ❌ |

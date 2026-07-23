@@ -164,6 +164,39 @@ pub fn mime_for(path: &Path) -> &'static str {
     }
 }
 
+/// Build an `ETag` for a file from its length and modification time.
+///
+/// A validator, not a hash: `"{len:x}-{mtime:x}"`, the same shape nginx uses.
+/// Two different contents at the same size and mtime would collide, which in
+/// practice does not happen for files a server hands out — and the cost of
+/// hashing every file on every request would. The value includes the quotes, so
+/// it is ready to place in an `ETag` header verbatim.
+///
+/// `mtime_nanos` is nanoseconds since the Unix epoch; a backend that cannot read
+/// an mtime passes 0, and the ETag then varies by size alone.
+pub fn etag(len: u64, mtime_nanos: u128) -> String {
+    format!("\"{len:x}-{mtime_nanos:x}\"")
+}
+
+/// Whether an `If-None-Match` header value matches `etag`.
+///
+/// Handles the three shapes a client sends: `*` (matches anything), a
+/// comma-separated list, and a weak validator `W/"..."`. Comparison is weak per
+/// RFC 9110 §13.1.2 — the `W/` prefix is ignored on both sides — which is the
+/// correct rule for `If-None-Match`. `etag` is expected to be the value
+/// [`etag`] produced (strong, quoted).
+pub fn etag_matches(if_none_match: &str, etag: &str) -> bool {
+    let inm = if_none_match.trim();
+    if inm == "*" {
+        return true;
+    }
+    let want = etag.strip_prefix("W/").unwrap_or(etag);
+    inm.split(',').any(|candidate| {
+        let c = candidate.trim();
+        c.strip_prefix("W/").unwrap_or(c) == want
+    })
+}
+
 /// Percent-decode a URL path segment string.
 ///
 /// `%2e` → `.`, `%2F` → `/`, and so on. A decoded `/` is left in the string so
@@ -338,5 +371,43 @@ mod tests {
     #[test]
     fn extension_matching_is_case_insensitive() {
         assert_eq!(mime_for(Path::new("PHOTO.JPG")), "image/jpeg");
+    }
+
+    // --- etag --------------------------------------------------------------
+
+    #[test]
+    fn etag_is_quoted_and_hex() {
+        assert_eq!(etag(255, 16), "\"ff-10\"");
+    }
+
+    #[test]
+    fn etag_changes_with_length_or_mtime() {
+        assert_ne!(etag(100, 1), etag(101, 1));
+        assert_ne!(etag(100, 1), etag(100, 2));
+    }
+
+    #[test]
+    fn if_none_match_exact() {
+        let e = etag(100, 5);
+        assert!(etag_matches(&e, &e));
+        assert!(!etag_matches("\"deadbeef-0\"", &e));
+    }
+
+    #[test]
+    fn if_none_match_star_matches_anything() {
+        assert!(etag_matches("*", &etag(1, 1)));
+    }
+
+    #[test]
+    fn if_none_match_list() {
+        let e = etag(100, 5);
+        let header = format!("\"other-1\", {e}, \"another-2\"");
+        assert!(etag_matches(&header, &e));
+    }
+
+    #[test]
+    fn if_none_match_ignores_weak_prefix() {
+        let e = etag(100, 5);
+        assert!(etag_matches(&format!("W/{e}"), &e));
     }
 }
