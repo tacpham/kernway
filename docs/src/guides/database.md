@@ -16,7 +16,7 @@ kernway = { version = "0.4", features = ["orm-diesel", "db-mysql"] }
 # SQLite (official)
 kernway = { version = "0.4", features = ["orm-diesel", "db-sqlite"] }
 
-# Đổi sang sqlx (community) — code KHÔNG thay đổi
+# Switch to sqlx (community) — the code does NOT change
 kernway-orm-sqlx = "0.4"
 ```
 
@@ -71,7 +71,7 @@ pub struct User {
 // src/repository/user_repository.rs
 use kernway::prelude::*;
 
-// #[repository] tự sinh: find_by_id, find_by_email, find_by_active,
+// #[repository] generates: find_by_id, find_by_email, find_by_active,
 // find_by_email_and_active, exists_by_email, count, save, delete_by_id...
 #[repository(User)]
 pub struct UserRepository;
@@ -86,12 +86,12 @@ pub struct UserService {
 }
 
 impl UserService {
-    // Auto-generated — không cần viết thêm gì
+    // Auto-generated — nothing more to write
     pub async fn find_by_email(&self, email: &str) -> Result<Option<User>, OrmError> {
         self.repo.find_by_email(email).await
     }
 
-    // Lambda query — như LINQ
+    // Lambda query — much like LINQ
     pub async fn find_active_users(&self, page: u64) -> Result<Page<User>, OrmError> {
         self.repo.query()
             .filter(|u| u.active == true)
@@ -100,11 +100,11 @@ impl UserService {
             .await
     }
 
-    // Eager load — tránh N+1
+    // Eager load — avoids N+1
     pub async fn find_with_posts(&self, id: u64) -> Result<Option<User>, OrmError> {
         self.repo.query()
             .filter(|u| u.id == id)
-            .with("posts")       // JOIN users + posts — 1 query duy nhất
+            .with("posts")       // JOIN users + posts — a single query
             .fetch_one()
             .await
     }
@@ -131,7 +131,7 @@ impl UserService {
 ## Custom query
 
 ```rust
-// SQL trực tiếp khi cần — vẫn type-safe
+// Raw SQL when you need it — still type-safe
 let users = query!(
     "SELECT * FROM users WHERE email LIKE ? AND active = ?",
     "%@gmail.com", true
@@ -143,13 +143,13 @@ let users = query!(
 ## Migration
 
 ```bash
-kernway db migrate           # chạy pending migrations
-kernway db new add_users     # tạo migration mới
+kernway db migrate           # run pending migrations
+kernway db new add_users     # create a new migration
 kernway db status
 ```
 
 ```rust
-// Tự động migrate khi start
+// Migrate automatically at startup
 KernwayApp::builder()
     .migrate_on_start(true)
     .build()
@@ -162,13 +162,13 @@ KernwayApp::builder()
 ## Swap databases — change one line in Cargo.toml
 
 ```toml
-# Đang dùng diesel PostgreSQL:
+# Currently on diesel + PostgreSQL:
 kernway = { version = "0.4", features = ["orm-diesel", "db-postgres"] }
 
-# Đổi sang MySQL — code KHÔNG thay đổi:
+# Switch to MySQL — the code does NOT change:
 kernway = { version = "0.4", features = ["orm-diesel", "db-mysql"] }
 
-# Đổi sang community sqlx — code KHÔNG thay đổi:
+# Switch to the community sqlx driver — the code does NOT change:
 kernway-orm-sqlx = "0.4"
 ```
 
@@ -183,7 +183,7 @@ kernway-orm-sqlx = "0.4"
 ## Multiple Databases
 
 ```rust
-// Dùng qualifier để phân biệt nhiều pool
+// Use a qualifier to tell several pools apart
 #[component]
 #[qualifier("primary")]
 struct PrimaryPool;
@@ -194,7 +194,7 @@ impl DbPool for PrimaryPool { /* postgres */ }
 struct AnalyticsPool;
 impl DbPool for AnalyticsPool { /* clickhouse */ }
 
-// Inject đúng pool
+// Inject the right pool
 #[repository(Report)]
 #[qualifier("analytics")]
 pub struct ReportRepository;

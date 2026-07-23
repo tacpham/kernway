@@ -19,12 +19,12 @@ Zero-overhead context propagation thanks to the thread-per-core architecture.
 Tokio (work-stealing):
   Request → Thread A → log "start" [MDC: requestId=abc]
            → Task migrate → Thread B → log "done" [MDC: LOST]
-  Fix: phải copy MDC context mỗi lần migrate → overhead
+  Fix: copy the MDC context on every migration → overhead
 
 Kernway (thread-per-core):
   Request → Thread 2 → log "start" [MDC: requestId=abc]
-           → KHÔNG migrate → Thread 2 → log "done" [MDC: requestId=abc] ✓
-  Zero copy, zero overhead — hoạt động như Spring MDC
+           → NO migration → Thread 2 → log "done" [MDC: requestId=abc] ✓
+  Zero copy, zero overhead — behaves exactly like Spring MDC
 ```
 
 ---
@@ -32,7 +32,7 @@ Kernway (thread-per-core):
 ## Default — No setup required
 
 ```rust
-// Không cần thêm gì — logging hoạt động ngay
+// Nothing to add — logging works out of the box
 #[kernway::main]
 async fn main() {
     KernwayApp::builder()
@@ -72,10 +72,10 @@ skip_paths = ["/health", "/ready", "/metrics"]
 ```
 
 ```toml
-# config/application-dev.toml — override cho dev
+# config/application-dev.toml — dev overrides
 [log]
 level  = "DEBUG"
-format = "pretty"     # màu sắc, dễ đọc
+format = "pretty"     # colored, easy to read
 
 [log.output.file]
 enabled = false
@@ -85,10 +85,10 @@ enabled = false
 # config/application-prod.toml — production
 [log]
 level  = "INFO"
-format = "json"       # structured, dễ parse bởi ELK/Datadog
+format = "json"       # structured, easy for ELK/Datadog to parse
 
 [log.modules]
-"my_app::repository" = "DEBUG"   # verbose hơn cho DB layer
+"my_app::repository" = "DEBUG"   # more verbose for the DB layer
 
 [log.output.file]
 enabled  = true
@@ -102,7 +102,7 @@ compress  = true
 
 **Priority** (high → low):
 ```
-Code (.plugin(LogPlugin::...))    ← override mọi thứ
+Code (.plugin(LogPlugin::...))    ← overrides everything
   ↓
 config/application-{profile}.toml
   ↓
@@ -116,7 +116,7 @@ Built-in defaults
 ## Code-based setup (optional — when overrides are needed)
 
 ```rust
-// Chỉ dùng khi cần điều khiển phức tạp hơn config file cho phép
+// Only needed when you want more control than the config file allows
 KernwayApp::builder()
     .plugin(LogPlugin::builder()
         .level(Level::WARN)            // override config file
@@ -157,7 +157,7 @@ struct DatadogFormat;
 
 impl LogFormatter for DatadogFormat {
     fn format(&self, record: &LogRecord) -> String {
-        // Toàn quyền format — trả về String
+        // Full control over the format — just return a String
         serde_json::json!({
             "dd.trace_id": record.trace_id,
             "dd.span_id":  record.span_id,
@@ -169,12 +169,12 @@ impl LogFormatter for DatadogFormat {
     }
 
     fn format_access(&self, record: &AccessRecord) -> Option<String> {
-        // None = dùng default access log format
+        // None = use the default access log format
         None
     }
 }
 
-// Đăng ký — thắng config file format
+// Register it — this beats the format set in the config file
 KernwayApp::builder()
     .plugin(LogPlugin::with_formatter(DatadogFormat))
 ```
@@ -203,7 +203,7 @@ KernwayApp::builder()
 
 ```rust
 #[component]
-#[logged]                   // inject `self.log: Logger` tự động
+#[logged]                   // injects `self.log: Logger` automatically
 struct UserService {
     #[inject] repo: Arc<UserRepository>,
 }
@@ -241,7 +241,7 @@ async fn handler(...) -> impl IntoResponse {
 ### Method 3 — Get the logger from context
 
 ```rust
-let logger = Logger::current();   // lấy logger của request hiện tại
+let logger = Logger::current();   // the current request's logger
 logger.info("custom message");
 ```
 
@@ -265,9 +265,9 @@ level = "INFO"
 
 # Per-module level override
 [log.modules]
-"my_app::repository" = "DEBUG"    # verbose cho repository layer
+"my_app::repository" = "DEBUG"    # verbose for the repository layer
 "my_app::controller" = "INFO"
-"kernway"            = "WARN"     # ít verbose hơn cho framework internals
+"kernway"            = "WARN"     # less verbose for framework internals
 ```
 
 ---
@@ -294,7 +294,7 @@ The framework automatically attaches this data to **every log line** in the requ
 Add custom fields to the context:
 
 ```rust
-// Trong auth layer — thêm user info vào mọi log sau đó
+// In the auth layer — attach user info to every subsequent log
 RequestContext::current().set("tenant_id", tenant.id);
 RequestContext::current().set("user_role", user.role);
 ```
@@ -305,7 +305,7 @@ RequestContext::current().set("user_role", user.role);
 
 ```rust
 impl OrderService {
-    #[traced]   // tự động log start/end/duration/error
+    #[traced]   // logs start/end/duration/error automatically
     async fn process(&self, order_id: u64) -> Result<Order> {
         // AUTO LOG:
         // INFO  process{order_id=99} started
@@ -313,10 +313,10 @@ impl OrderService {
         // ERROR process{order_id=99} failed error="PaymentError" duration_ms=12
     }
 
-    #[traced(level = "DEBUG")]   // chỉ log ở DEBUG level
+    #[traced(level = "DEBUG")]   // only logs at DEBUG level
     async fn internal_calc(&self) -> f64 { ... }
 
-    #[traced(skip(password))]    // không log field nhạy cảm
+    #[traced(skip(password))]    // never logs the sensitive field
     async fn login(&self, username: &str, password: &str) -> Result<Token> { ... }
 }
 ```
@@ -337,7 +337,7 @@ Config:
 [log.access]
 enabled    = true
 level      = "INFO"
-skip_paths = ["/health", "/ready", "/metrics"]  # không log health checks
+skip_paths = ["/health", "/ready", "/metrics"]  # don't log health checks
 ```
 
 ---
@@ -379,24 +379,24 @@ format = "json"      # json | pretty | compact
 # config/application.toml
 
 [log.output]
-console = true                    # stdout (mặc định true)
+console = true                    # stdout (default: true)
 
 [log.output.file]
 enabled  = true
-path     = "logs/app.log"         # đường dẫn file
+path     = "logs/app.log"         # file path
 
 [log.output.file.rotation]
 strategy  = "daily"               # daily | size | hourly
-max_size  = "100MB"               # dùng với strategy = "size"
-max_files = 30                    # giữ tối đa 30 file
-compress  = true                  # gzip các file cũ
-pattern   = "logs/app.%Y-%m-%d.log"  # tên file theo ngày
+max_size  = "100MB"               # used with strategy = "size"
+max_files = 30                    # keep at most 30 files
+compress  = true                  # gzip the older files
+pattern   = "logs/app.%Y-%m-%d.log"  # file name by date
 ```
 
 Result:
 ```
 logs/
-├── app.log              ← file hiện tại
+├── app.log              ← current file
 ├── app.2024-01-14.log.gz
 ├── app.2024-01-13.log.gz
 └── app.2024-01-12.log.gz
@@ -429,7 +429,7 @@ skip_paths = ["/health", "/ready", "/metrics"]
 # Console output
 [log.output]
 console = true
-color   = false          # true chỉ khi pretty format
+color   = false          # only set true with the pretty format
 
 # File output
 [log.output.file]
@@ -453,19 +453,19 @@ fields = ["password", "token", "secret", "credit_card"]
 ## Profile-based Config
 
 ```toml
-# config/application-dev.toml — override cho dev
+# config/application-dev.toml — dev overrides
 [log]
 level  = "DEBUG"
-format = "pretty"        # dễ đọc hơn khi dev
+format = "pretty"        # easier to read while developing
 
 [log.output.file]
-enabled = false          # không ghi file khi dev
+enabled = false          # don't write files during development
 ```
 
 ```toml
 # config/application-prod.toml — production
 [log]
-level  = "WARN"          # ít verbose hơn
+level  = "WARN"          # less verbose
 format = "json"
 
 [log.output.file]
@@ -474,7 +474,7 @@ path    = "/var/log/my-app/app.log"
 
 [log.output.file.rotation]
 strategy  = "daily"
-max_files = 90           # giữ 90 ngày
+max_files = 90           # keep 90 days
 compress  = true
 ```
 
@@ -491,7 +491,7 @@ service  = "my-app"
 ```
 
 ```rust
-// #[traced] tự động propagate trace context qua HTTP headers:
+// #[traced] propagates the trace context through HTTP headers automatically:
 // traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
 // (W3C Trace Context spec)
 ```
@@ -505,11 +505,11 @@ service  = "my-app"
 struct DatadogLogger { /* ... */ }
 impl LogBackend for DatadogLogger {
     fn write(&self, record: &LogRecord) {
-        // gửi lên Datadog
+        // ship it to Datadog
     }
 }
 
-// Đăng ký
+// Register it
 KernwayApp::builder()
     .plugin(LogPlugin::with_backend(DatadogLogger::new(api_key)))
 ```

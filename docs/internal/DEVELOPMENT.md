@@ -54,11 +54,11 @@ Target: **clean build < 20s**, incremental rebuild < 3s.
 ### Structure for reducing build time
 
 ```toml
-# Không làm:
-syn = { version = "2", features = ["full"] }   # parse toàn bộ Rust AST
+# Don't:
+syn = { version = "2", features = ["full"] }   # parses the entire Rust AST
 
-# Làm đúng:
-syn = { version = "2", features = ["derive"] } # chỉ những gì cần
+# Do:
+syn = { version = "2", features = ["derive"] } # only what is needed
 ```
 
 **Rule for di-macro and other macro crates:**
@@ -71,10 +71,10 @@ syn = { version = "2", features = ["derive"] } # chỉ những gì cần
 - Register handlers through trait objects, not generics
 
 ```rust
-// Không làm (compile N copies):
+// Don't (compiles N copies):
 fn handle<H: Handler>(&mut self, handler: H) { ... }
 
-// Làm đúng (1 copy, vtable dispatch):
+// Do (one copy, vtable dispatch):
 fn handle(&mut self, handler: Box<dyn Handler>) { ... }
 ```
 
@@ -87,12 +87,12 @@ fn handle(&mut self, handler: Box<dyn Handler>) { ... }
 # Cargo.toml workspace root
 [profile.dev]
 opt-level = 0
-debug = 1    # không phải 2 — giảm debug info size
+debug = 1    # not 2 — keeps debug info smaller
 split-debuginfo = "unpacked"
 
 [profile.release]
 opt-level = 3
-lto = "thin"     # không phải "fat" — nhanh hơn, kết quả tốt gần bằng
+lto = "thin"     # not "fat" — faster, and nearly as good
 codegen-units = 1
 strip = "symbols"
 ```
@@ -106,18 +106,18 @@ Kernway uses AI (Claude) to generate code. These rules help the AI produce corre
 ### Patterns the AI should follow
 
 ```rust
-// 1. Platform code luôn trong sys/ — không #[cfg] trong business logic
+// 1. Platform code always lives in sys/ — no #[cfg] in business logic
 #[cfg(target_os = "linux")]
 pub fn pin_thread(core: usize) -> io::Result<()> { /* ... */ }
-// → Trong sys/linux.rs, không phải reactor.rs
+// → In sys/linux.rs, not reactor.rs
 
 // 2. Trait objects cho extensibility
 pub struct Router {
     routes: Vec<(Method, String, Box<dyn Handler>)>,
 }
-// → Box<dyn Handler> không phải Vec<(Method, String, fn(Request) -> Response)>
+// → Box<dyn Handler>, not Vec<(Method, String, fn(Request) -> Response)>
 
-// 3. Error types cụ thể
+// 3. Concrete error types
 #[derive(Debug, thiserror::Error)]
 pub enum RouterError {
     #[error("route not found: {0}")]
@@ -125,9 +125,9 @@ pub enum RouterError {
     #[error("method not allowed")]
     MethodNotAllowed,
 }
-// → Không phải Box<dyn Error> hay String
+// → Not Box<dyn Error> or String
 
-// 4. Doc comment với RFC reference
+// 4. Doc comments carry an RFC reference
 /// Parse HTTP request line.
 ///
 /// Implements RFC 9112 §3: Request Line
@@ -199,7 +199,7 @@ strip = "symbols"
 ## Testing Strategy
 
 ```rust
-// Unit test — không cần mạng
+// Unit test — no network needed
 #[test]
 fn router_finds_correct_handler() { /* ... */ }
 
@@ -229,9 +229,9 @@ async fn test_service_with_mock_repo() {
 Run benchmarks:
 
 ```bash
-cargo bench                    # tất cả benchmarks
-cargo bench -- router          # chỉ router
-cargo bench -- http_parse      # chỉ HTTP parser
+cargo bench                    # all benchmarks
+cargo bench -- router          # router only
+cargo bench -- http_parse      # HTTP parser only
 ```
 
 Compare against:

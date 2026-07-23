@@ -7,11 +7,11 @@
 ## 5-Level Overview
 
 ```
-Cấp 1 — Request Error     Request đó fail   App không hay biết      ✅ Tự xử lý
-Cấp 2 — Handler Panic     HTTP 500           Core thread tiếp tục    ✅ catch_unwind
-Cấp 3 — Core Crash        ~10ms downtime     Supervisor restart       ✅ Auto-recover
-Cấp 4 — Startup Error     App không start    Phát hiện sớm           ⚠️  Fix & restart
-Cấp 5 — Fatal             App dừng           OOM / all cores down     ❌ Docker restart
+Level 1 — Request Error   That request fails  App never notices     ✅ Self-handled
+Level 2 — Handler Panic   HTTP 500            Core thread continues ✅ catch_unwind
+Level 3 — Core Crash      ~10ms downtime      Supervisor restart    ✅ Auto-recover
+Level 4 — Startup Error   App will not start  Caught early          ⚠️  Fix & restart
+Level 5 — Fatal           App stops           OOM / all cores down  ❌ Docker restart
 ```
 
 ---
@@ -21,7 +21,7 @@ Cấp 5 — Fatal             App dừng           OOM / all cores down     ❌ 
 **Impact**: Only that request gets an error. The app is unaffected. Zero impact.
 
 ```rust
-// Lỗi bình thường qua Result — #[exception_handler] bắt và trả HTTP response
+// Ordinary errors travel through Result — #[exception_handler] catches them and returns the HTTP response
 #[route(GET, "/users/{id}")]
 async fn get_user(Path(id): Path<u64>, ctrl: &UserController) -> Result<Json<User>, AppError> {
     let user = ctrl.service.find(id).await?;  // Err → exception_handler
@@ -57,7 +57,7 @@ async fn handle_app_error(err: AppError) -> impl IntoResponse {
 **Kernway solution**: `catch_unwind` wraps each task in the executor:
 
 ```rust
-// rt-core/src/executor.rs — PHẢI implement đúng như này
+// rt-core/src/executor.rs — MUST be implemented exactly like this
 impl Executor {
     fn poll_task(&self, task: Rc<Task>) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -67,7 +67,7 @@ impl Executor {
         match result {
             Ok(_) => {}
             Err(panic_payload) => {
-                // 1. Log panic với stack trace
+                // 1. Log the panic with a stack trace
                 let msg = panic_message(&panic_payload);
                 log::error!(
                     "handler panic: {msg}",
@@ -75,10 +75,10 @@ impl Executor {
                     path       = task.path(),
                 );
 
-                // 2. Trả 500 cho request đó
+                // 2. Return 500 for that request
                 task.send_error_response(StatusCode::INTERNAL_SERVER_ERROR);
 
-                // 3. Core thread tiếp tục — không crash
+                // 3. The core thread carries on — no crash
             }
         }
     }
@@ -87,15 +87,15 @@ impl Executor {
 
 **Behavior**:
 ```
-Request A: GET /users/1   → đang xử lý bình thường
+Request A: GET /users/1   → being handled normally
 Request B: GET /users/2   → handler panic!
-Request C: GET /users/3   → đang xử lý bình thường
+Request C: GET /users/3   → being handled normally
 
-Kết quả:
+Result:
   Request A → 200 OK
-  Request B → 500 Internal Server Error  (panic được bắt)
+  Request B → 500 Internal Server Error  (the panic was caught)
   Request C → 200 OK
-  Core thread → tiếp tục chạy, không bị ảnh hưởng
+  Core thread → keeps running, unaffected
 ```
 
 **Spring comparison**: The JVM catches exceptions in the servlet container, and the thread returns to the pool. Similar behavior — but Kernway does this at the runtime layer and does not depend on the servlet container.
@@ -132,11 +132,11 @@ impl Supervisor {
                         core_id = i,
                     );
 
-                    // Đợi một chút trước khi restart
-                    // (tránh restart loop nếu là bug liên tục)
+                    // Wait a moment before restarting
+                    // (avoids a restart loop when the bug is persistent)
                     std::thread::sleep(Duration::from_millis(100));
 
-                    // Spawn core mới
+                    // Spawn a fresh core
                     self.cores[i] = spawn_core(i);
 
                     log::info!("Core {i} restarted successfully");
@@ -152,20 +152,20 @@ impl Supervisor {
 **Restart storm protection** — if a core keeps crashing:
 
 ```
-Lần 1 crash → restart sau 100ms
-Lần 2 crash → restart sau 500ms
-Lần 3 crash → restart sau 2s
-Lần 4 crash → restart sau 10s + alert log
-Lần 5 crash → KHÔNG restart, log CRITICAL, giảm capacity
+Crash 1 → restart after 100ms
+Crash 2 → restart after 500ms
+Crash 3 → restart after 2s
+Crash 4 → restart after 10s + alert log
+Crash 5 → NO restart, log CRITICAL, reduce capacity
 ```
 
 **Config**:
 ```toml
 [supervisor]
-restart_delay_ms = 100          # delay trước lần restart đầu
-max_restart_attempts = 5        # sau đây không restart nữa
+restart_delay_ms = 100          # delay before the first restart
+max_restart_attempts = 5        # no restarts beyond this
 backoff = "exponential"         # linear | exponential
-alert_threshold = 3             # log CRITICAL sau N lần crash
+alert_threshold = 3             # log CRITICAL after N crashes
 ```
 
 **Spring comparison**: Spring has no supervisor mechanism. If the JVM thread pool is saturated, the whole app can hang. In Kernway, each core is isolated, so one core crashing does not affect the others.
@@ -188,25 +188,25 @@ The app **does not start** — early detection is better than crashing while ser
 ```toml
 # config/application.toml
 [startup]
-fail_fast = true              # false = warn và tiếp tục (không khuyến nghị)
+fail_fast = true              # false = warn and continue (not recommended)
 
 [db]
 startup_check     = "retry"   # fail_fast | retry | skip
 retry_attempts    = 5
 retry_delay_secs  = 2
-migrate_on_start  = true      # chạy pending migrations trước khi accept traffic
+migrate_on_start  = true      # run pending migrations before accepting traffic
 ```
 
 **Startup sequence**:
 ```
-1. Parse config → fail nếu lỗi
-2. Validate env vars → fail nếu thiếu required
-3. Bootstrap DI graph → fail nếu circular dep (đã bắt compile-time)
-4. Connect DB pool → retry theo config
-5. Run migrations → fail nếu migration error
-6. Bind port → fail nếu bị chiếm
+1. Parse config → fail on error
+2. Validate env vars → fail if a required one is missing
+3. Bootstrap DI graph → fail on a circular dep (already caught at compile time)
+4. Connect DB pool → retry per config
+5. Run migrations → fail on a migration error
+6. Bind port → fail if it is already taken
 7. Start supervisor + cores
-8. Ready — bắt đầu accept traffic
+8. Ready — start accepting traffic
 ```
 
 **Spring comparison**: Spring is similar — `ApplicationContext` fails fast at startup. Kernway is better here because circular dependencies are compile errors, not runtime errors.
@@ -228,13 +228,13 @@ Situations that cannot be recovered from:
 **Graceful shutdown** (SIGTERM):
 
 ```
-SIGTERM nhận được
+SIGTERM received
 │
 ├── Stop accepting new connections
 ├── Log: "Graceful shutdown initiated, draining requests..."
 ├── Wait for in-flight requests to complete
 │   ├── Timeout: 30s (configurable)
-│   └── Sau timeout: force close còn lại
+│   └── After the timeout: force-close the rest
 ├── Flush log buffers
 ├── Close DB connections
 └── Exit 0
@@ -242,9 +242,9 @@ SIGTERM nhận được
 
 ```toml
 [shutdown]
-timeout_secs     = 30     # đợi tối đa 30s cho in-flight requests
+timeout_secs     = 30     # wait at most 30s for in-flight requests
 force_close_secs = 35     # force kill sau 35s
-drain_log        = true   # flush log buffer trước khi exit
+drain_log        = true   # flush the log buffer before exiting
 ```
 
 **Docker/Kubernetes**:
@@ -252,8 +252,8 @@ drain_log        = true   # flush log buffer trước khi exit
 # docker-compose.yml
 services:
   my-app:
-    stop_grace_period: 35s   # phải > shutdown.timeout_secs
-    restart: unless-stopped  # auto restart nếu crash
+    stop_grace_period: 35s   # must be > shutdown.timeout_secs
+    restart: unless-stopped  # auto restart on crash
 ```
 
 **Spring comparison**: Spring Boot has `server.shutdown=graceful`. Kernway is equivalent, but draining happens at the runtime level and does not depend on the servlet container.
@@ -263,7 +263,7 @@ services:
 ## Circuit Breaker — Automatically Opens on Downstream Failure
 
 ```rust
-// Tránh cascade failure khi DB / external service lỗi liên tục
+// Avoids cascading failure when the DB / an external service keeps failing
 #[component]
 struct PaymentService {
     #[inject] gateway: Arc<PaymentGateway>,
@@ -271,8 +271,8 @@ struct PaymentService {
 
 impl PaymentService {
     #[circuit_breaker(
-        failure_threshold  = 5,     // mở circuit sau 5 lỗi liên tiếp
-        timeout_secs       = 60,    // thử lại sau 60s
+        failure_threshold  = 5,     // open the circuit after 5 consecutive failures
+        timeout_secs       = 60,    // retry after 60s
         fallback           = "payment_fallback"
     )]
     async fn charge(&self, amount: f64) -> Result<Receipt> {
@@ -280,7 +280,7 @@ impl PaymentService {
     }
 
     async fn payment_fallback(&self, amount: f64) -> Result<Receipt> {
-        // Queue lại để xử lý sau
+        // Queue it for later processing
         Err(AppError::ServiceUnavailable("payment gateway down"))
     }
 }
@@ -293,12 +293,12 @@ impl PaymentService {
 ## Health Check Endpoints
 
 ```
-GET /health  → 200 OK nếu app đang chạy (liveness)
-GET /ready   → 200 OK nếu app sẵn sàng nhận traffic (readiness)
+GET /health  → 200 OK while the app is running (liveness)
+GET /ready   → 200 OK once the app can accept traffic (readiness)
 ```
 
 ```json
-// GET /ready — chi tiết
+// GET /ready — the details
 {
   "status": "UP",
   "components": {
@@ -309,7 +309,7 @@ GET /ready   → 200 OK nếu app sẵn sàng nhận traffic (readiness)
   }
 }
 
-// Khi 1 core crashed chưa kịp restart:
+// While a core has crashed and not yet restarted:
 {
   "status": "DEGRADED",
   "components": {

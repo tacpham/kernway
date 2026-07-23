@@ -68,22 +68,22 @@ These differences require some JPA features to be redesigned — they cannot be 
 @OneToMany(fetch = FetchType.LAZY)
 private List<Post> posts;
 
-// Truy cập field → Hibernate tự động chạy thêm 1 query (proxy)
+// Touching the field → Hibernate silently fires another query (proxy)
 user.getPosts();   // SELECT * FROM posts WHERE user_id = ?
 ```
 
 **kernway-orm-core:**
 ```rust
-// Lazy loading KHÔNG THỂ — Rust không có bytecode proxy
+// Lazy loading is IMPOSSIBLE — Rust has no bytecode proxies
 
-// Phải khai báo rõ khi nào cần load:
+// You must say explicitly when you want the relation loaded:
 repo.query()
     .filter(|u| u.id == id)
     .with("posts")       // → LEFT JOIN posts ON posts.user_id = users.id
     .fetch_one()
     .await
 
-// Hoặc nếu không cần posts, không load → không có N+1 problem
+// Or, if you don't need posts, don't load them → no N+1 problem at all
 let user = repo.find_by_id(&id).await?;   // posts = Vec::new() (empty)
 ```
 
@@ -114,14 +114,14 @@ public class PaypalPayment extends Payment { ... }
 
 **kernway-orm-core:**
 ```rust
-// Rust không có class inheritance → dùng enum variants
+// Rust has no class inheritance → use enum variants
 
 #[entity(table = "payments")]
 pub struct Payment {
     #[id] pub id: u64,
     pub amount: Decimal,
 
-    // Discriminator column tự xử lý bởi enum
+    // The discriminator column is handled by the enum itself
     #[column(name = "type")]
     pub kind: PaymentKind,
 }
@@ -132,7 +132,7 @@ pub enum PaymentKind {
     Paypal { email: String },
     BankTransfer { iban: String },
 }
-// → lưu dưới dạng JSON column hoặc separate table tùy config
+// → stored as a JSON column or a separate table, depending on config
 ```
 
 **Explanation**: A Rust enum with data fields is a natural fit for the `SINGLE_TABLE` strategy.  
@@ -157,8 +157,8 @@ em.clear();
 
 **kernway-orm-core:**
 ```rust
-// Không có EntityManager — Repository<T> thay thế hoàn toàn
-// DI inject trực tiếp repository
+// No EntityManager — Repository<T> replaces it entirely
+// DI injects the repository directly
 
 #[inject] repo: Arc<UserRepository>,
 
@@ -183,14 +183,14 @@ List<User> findByDomain(@Param("domain") String domain);
 
 **kernway-orm-core:**
 ```rust
-// Option 1: Lambda (type-safe, không SQL injection)
+// Option 1: Lambda (type-safe, no SQL injection)
 repo.query()
     .filter(|u| u.email.ends_with("@gmail.com") && u.active == true)
     .order_by_desc(|u| u.created_at)
     .fetch_all()
     .await
 
-// Option 2: Raw SQL macro (khi cần complex query)
+// Option 2: Raw SQL macro (when the query gets complex)
 #[repository(User)]
 impl UserRepository {
     #[query("SELECT * FROM users WHERE email LIKE $1 AND active = true ORDER BY created_at DESC")]
@@ -207,14 +207,14 @@ impl UserRepository {
 **JPA:**
 ```java
 @Entity
-@Cacheable   // Hibernate L2 cache tích hợp
+@Cacheable   // Hibernate's built-in L2 cache
 public class User { ... }
 ```
 
 **kernway-orm-core:**
 ```rust
-// kernway-orm không có built-in L2 cache
-// Dùng kernway-cache riêng (tường minh hơn)
+// kernway-orm has no built-in L2 cache.
+// Use kernway-cache separately — more explicit.
 
 #[cacheable(key = "user:{id}", ttl = 300)]
 pub async fn find_user(&self, id: u64) -> Result<Option<User>, AppError> {

@@ -88,7 +88,7 @@ ApplicationContext    →  trait KernwayPlugin     →  KernleafPlugin, DbPlugin
 ### `kernway-core` — spec only, no implementation
 
 ```rust
-// kernway-core CHỨA — đây là tất cả, không có gì thêm:
+// kernway-core CONTAINS this — all of it, and nothing more:
 
 pub trait IntoResponse: Send {
     fn into_response(self) -> Response;
@@ -114,9 +114,9 @@ pub trait KernwayPlugin: Send + Sync {
     fn register(&self, app: &mut AppBuilder);
 }
 
-// kernway-core KHÔNG CHỨA: serde, serde_json, diesel, rustls,
-//                           bất kỳ implementation nào.
-// Compile time của kernway-core: < 1s
+// kernway-core does NOT contain serde, serde_json, diesel, rustls,
+//                           or any implementation at all.
+// kernway-core compile time: < 1s
 ```
 
 ### Implementation layer — Kernway's own + Community's
@@ -131,7 +131,7 @@ kernway-core  (spec — stable forever)
 │   ├── kernleaf       → KernleafEngine impl TemplateEngine
 │   └── kernway-aop    → TransactionLayer impl Layer
 │
-└── [Community implementations — ai cũng build được]
+└── [Community implementations — anyone can build one]
     ├── kernway-mongodb  → MongoPool impl DbPool
     ├── kernway-redis    → RedisPool impl DbPool
     ├── kernway-tera     → TeraAdapter impl TemplateEngine
@@ -142,25 +142,25 @@ kernway-core  (spec — stable forever)
 ### Practical consequences
 
 ```rust
-// User muốn dùng MongoDB thay PostgreSQL:
-// Chỉ thay 1 dòng trong main.rs, KHÔNG đụng đến Repository code
+// Say a user wants MongoDB instead of PostgreSQL:
+// Change one line in main.rs — the Repository code is untouched
 
-// TRƯỚC:
+// BEFORE:
 .db(PostgresPool::new(env!("DATABASE_URL")))
 
 // SAU:
 .db(MongoPool::new(env!("MONGO_URL")))
 
-// Repository code — KHÔNG THAY ĐỔI GÌ:
+// Repository code — COMPLETELY UNCHANGED:
 #[component]
 struct UserRepository {
-    #[inject] pool: Arc<dyn DbPool>,  // ← trait object, không phải concrete type
+    #[inject] pool: Arc<dyn DbPool>,  // ← a trait object, not a concrete type
 }
 ```
 
 ```rust
-// Community muốn build kernway-xml:
-// Chỉ cần implement 1 trait — không cần fork kernway, không cần PR vào core
+// Say the community wants to build kernway-xml:
+// Implement one trait — no fork of kernway, no PR into the core
 
 pub struct Xml<T>(pub T);
 
@@ -172,7 +172,7 @@ impl<T: Serialize> IntoResponse for Xml<T> {
     }
 }
 
-// Sau đó dùng ngay trong handler:
+// Then use it straight away in a handler:
 #[route(GET, "/{id}")]
 async fn get_user(...) -> Xml<User> { ... }
 ```
@@ -237,14 +237,14 @@ struct CreateUserRequest {
 
 #[route(POST, "/users")]
 async fn create_user(body: Json<Validated<CreateUserRequest>>) -> Result<Json<User>, ValidationError> {
-    // body đã được validate, nếu fail → tự động trả RFC 7807 Problem Details
+    // body is already validated; on failure it returns RFC 7807 Problem Details automatically
 }
 ```
 
 **Observability (v0.4) — Production monitoring:**
 ```rust
-// Tích hợp tracing crate (de facto standard Rust)
-// Tự động instrument mọi request
+// Integrates the tracing crate (Rust's de facto standard)
+// Instruments every request automatically
 KernwayApp::builder()
     .tracing(TracingConfig::json_stdout())   // structured logging
     .metrics(MetricsConfig::prometheus("/metrics"))  // Prometheus endpoint
@@ -329,8 +329,8 @@ async fn get_user(
     id: Path<u64>,
     /// User ID to fetch
 ) -> Json<UserResponse> { ... }
-// → /openapi.json tự động generated
-// → /swagger-ui tự động available
+// → /openapi.json generated automatically
+// → /swagger-ui available automatically
 ```
 
 ---
@@ -350,16 +350,16 @@ async fn get_user(
 
 
 ```rust
-// Template engine: thay kernleaf bằng Tera — 1 dòng
+// Template engine: swap kernleaf for Tera — one line
 .plugin(TeraAdapter::new("templates/**/*"))
 
-// Database: thay Postgres bằng MySQL — 1 dòng
+// Database: swap Postgres for MySQL — one line
 .db(MySqlPool::new(env!("DATABASE_URL")))
 
-// Response type mới (CSV) — implement 1 trait, không cần hỏi Kernway
+// A new response type (CSV) — implement one trait, no need to ask Kernway
 impl<T: ToCsv> IntoResponse for CsvResponse<T> { /* ... */ }
 
-// Middleware mới (custom auth) — implement 1 trait
+// New middleware (custom auth) — implement one trait
 impl Layer for MyAuthLayer { /* ... */ }
 ```
 
@@ -384,10 +384,10 @@ Like Spring Boot, a Kernway app has a clear layered structure:
     │
     ├── config/
     │   ├── mod.rs
-    │   ├── app_config.rs          # #[configuration] — cấu hình app (port, db url, ...)
+    │   ├── app_config.rs          # #[configuration] — app config (port, db url, ...)
     │   └── security_config.rs     # #[configuration] — JWT secret, CORS, roles
     │
-    ├── controller/                # HTTP layer — nhận request, trả response
+    ├── controller/                # HTTP layer — takes requests, returns responses
     │   ├── mod.rs
     │   ├── user_controller.rs     # #[controller("/users")] #[route]
     │   └── auth_controller.rs     # #[controller("/auth")]
@@ -399,8 +399,8 @@ Like Spring Boot, a Kernway app has a clear layered structure:
     │
     ├── repository/                # Data access layer
     │   ├── mod.rs
-    │   ├── user_repository.rs     # #[component] — DB queries (dùng spawn_blocking + diesel)
-    │   └── traits.rs              # trait UserRepo — để mock trong test
+    │   ├── user_repository.rs     # #[component] — DB queries (uses spawn_blocking + diesel)
+    │   └── traits.rs              # trait UserRepo — so tests can mock it
     │
     ├── model/                     # Domain entities + DTOs
     │   ├── mod.rs
@@ -509,9 +509,9 @@ async fn main() {
 
 **Targets:**
 ```
-cargo build (clean, dev profile):  15-20s  ← cạnh tranh được với Axum
-cargo check:                        3-5s   ← vòng lặp code hằng ngày
-incremental build (1 file thay đổi): 1-3s
+cargo build (clean, dev profile):  15-20s  ← competitive with Axum
+cargo check:                        3-5s   ← the everyday edit loop
+incremental build (one file changed): 1-3s
 ```
 
 **Required techniques:**
@@ -527,15 +527,15 @@ incremental build (1 file thay đổi): 1-3s
 
 **Required rules when writing proc macros:**
 ```toml
-# di-macro/Cargo.toml — CHỈ enable features cần thiết
+# di-macro/Cargo.toml — enable ONLY the features actually needed
 syn = { version = "2", default-features = false, features = ["derive", "parsing", "printing"] }
-# KHÔNG dùng features = ["full"] trừ khi thực sự cần parse function body
+# Do NOT use features = ["full"] unless you genuinely need to parse function bodies
 ```
 
 **`cargo-hakari` setup** (add it to the workspace once there are at least 3 crates):
 ```toml
-# workspace-hack/Cargo.toml — tự động generate bởi cargo hakari
-# Tránh compile cùng dependency nhiều lần với feature set khác nhau
+# workspace-hack/Cargo.toml — generated automatically by cargo hakari
+# Avoids compiling the same dependency repeatedly under different feature sets
 ```
 
 ---
@@ -549,12 +549,12 @@ syn = { version = "2", default-features = false, features = ["derive", "parsing"
 ```
 kernway executor (async, thread-per-core)
   │
-  │ spawn_blocking(|| diesel_query())  ← non-blocking đối với executor
+  │ spawn_blocking(|| diesel_query())  ← non-blocking from the executor's view
   ↓
 blocking thread pool (4 × cpu_count threads)
-  │  chạy sync diesel + r2d2 connection pool
+  │  runs sync diesel + an r2d2 connection pool
   │
-  channel → waker → executor nhận result
+  channel → waker → executor receives the result
 ```
 
 **Planned API (`kernway-db` crate, v0.3+):**
@@ -573,7 +573,7 @@ impl DatabaseConfig {
     }
 }
 
-// Dùng trong repository
+// Used inside a repository
 #[component]
 pub struct UserRepository {
     #[inject] pool: Arc<DbPool>,
@@ -629,7 +629,7 @@ struct UserService {
 }
 
 fn main() {
-    let ctx = AppContext::build(); // compile-time error nếu thiếu bean
+    let ctx = AppContext::build(); // compile-time error when a bean is missing
     let svc = ctx.get::<UserService>();
 }
 ```
@@ -738,25 +738,25 @@ KernwayApp::builder()
 
 ```
 Mode 1 — Compiled-in (default, v0.3+):
-  cargo build --release → 1 binary duy nhất
-  Dùng cho production
+  cargo build --release → a single binary
+  Use this for production
 
 Mode 2 — Plugin (v0.5+):
-  kernway-server (pre-compiled, download 1 lần)
-  + your-app.so  (chỉ cái này rebuild mỗi khi code thay đổi, ~2-5s)
-  Dùng cho development với hot reload
+  kernway-server (pre-compiled, downloaded once)
+  + your-app.so  (only this rebuilds on each change, ~2-5s)
+  Use this for development with hot reload
 ```
 
 **Hot reload workflow:**
 
 ```bash
-# Cài CLI 1 lần
+# Install the CLI once
 cargo install kernway-cli
 
-# Trong project của bạn — thay crate-type thành cdylib
+# In your project — switch crate-type to cdylib
 # Cargo.toml: crate-type = ["cdylib"]
 
-# Chạy dev server với hot reload
+# Run the dev server with hot reload
 kernway dev
 ```
 
@@ -768,7 +768,7 @@ kernway dev
 [11:32:10] Building...
 [11:32:13] ✅ Built in 2.8s — reloading
 [11:32:13] 🔄 App reloaded (0 in-flight requests drained)
-           ^ server không restart, connection không bị drop
+           ^ the server never restarts, and connections are never dropped
 ```
 
 **Graceful hot reload mechanism:**
@@ -825,36 +825,36 @@ When Request A completes:
 #### Mandatory rules when coding each module
 
 ```
-1. Đọc spec TRƯỚC khi viết code
-   → http-proto: đọc RFC 9112 trước khi viết HTTP parser
-   → tls-adapter: đọc RFC 8446 trước khi integrate rustls
+1. Read the spec BEFORE writing code
+   → http-proto: read RFC 9112 before writing the HTTP parser
+   → tls-adapter: read RFC 8446 before integrating rustls
 
-2. Mỗi RFC section liên quan = ít nhất 1 test case
-   → RFC 9112 §4: request line parsing → test case riêng
-   → RFC 9112 §6: chunked transfer → test case riêng
+2. Every relevant RFC section = at least one test case
+   → RFC 9112 §4: request line parsing → its own test case
+   → RFC 9112 §6: chunked transfer → its own test case
 
-3. Edge case trong spec = phải xử lý, không được bỏ qua
-   → "SHOULD" trong RFC = document lý do nếu không implement
-   → "MUST" trong RFC = bắt buộc implement, không có ngoại lệ
+3. An edge case in the spec = must be handled, never skipped
+   → "SHOULD" in an RFC = document the reason when not implemented
+   → "MUST" in an RFC = implement it, no exceptions
 
-4. Security spec (OWASP, TLS RFC) = ưu tiên cao nhất
-   → Không release module nào có known security spec violation
+4. Security specs (OWASP, TLS RFCs) = the highest priority
+   → Never release a module with a known security spec violation
 ```
 
 #### Rust ecosystem de facto specs — must align
 
 ```rust
-// Mọi error type PHẢI implement std::error::Error (Rust std spec)
-// Mọi serializable type PHẢI support serde (de facto spec, ~200M downloads)
-// Mọi async type PHẢI dùng std::future::Future (không tự định nghĩa Future)
-// kernway-core traits PHẢI build on top của std traits, không replace chúng
+// Every error type MUST implement std::error::Error (Rust std spec)
+// Every serializable type MUST support serde (de facto spec, ~200M downloads)
+// Every async type MUST use std::future::Future (never define your own Future)
+// kernway-core traits MUST build on top of std traits, never replace them
 
-// ĐÚNG:
+// RIGHT:
 pub trait KernwayError: std::error::Error + Send + Sync { ... }
 impl<T: serde::Serialize> IntoResponse for Json<T> { ... }
 
-// SAI:
-pub trait KernwayError { fn message(&self) -> &str; } // bỏ qua std::error::Error
+// WRONG:
+pub trait KernwayError { fn message(&self) -> &str; } // ignores std::error::Error
 ```
 
 ---
@@ -919,24 +919,24 @@ Core 1: socket_1.accept()   kernel  Core 1: shared_socket.accept_async() ─┤ 
 Core 2: socket_2.accept()  ──────►  Core 2: shared_socket.accept_async() ─┤ distributes
 Core 3: socket_3.accept()  balance  Core 3: shared_socket.accept_async() ─┘
 
-Kết quả: GIỐNG NHAU từ góc nhìn application
-  → Mỗi thread nhận connection và xử lý hoàn toàn độc lập
-  → Không cross-core task migration
-  → Cache locality benefit đầy đủ
-  → Performance difference thực tế: < 2% (Kestrel benchmarks)
+Result: IDENTICAL from the application's point of view
+  → Each thread accepts and handles connections entirely independently
+  → No cross-core task migration
+  → The full cache-locality benefit
+  → Measured performance difference: < 2% (Kestrel benchmarks)
 ```
 
 ```rust
 // rt-core/src/sys/mod.rs — unified interface
 pub fn create_acceptor(addr: SocketAddr, threads: usize) -> Acceptor {
-    // Linux/macOS: tạo N sockets với SO_REUSEPORT
-    // Windows: tạo 1 socket, N threads gọi accept
-    // → Cùng Acceptor API, khác implementation bên trong
+    // Linux/macOS: create N sockets with SO_REUSEPORT
+    // Windows: create one socket, N threads calling accept
+    // → The same Acceptor API, a different implementation underneath
     sys_impl::create_acceptor(addr, threads)
 }
 
 pub fn worker_count() -> usize {
-    // Container-aware trên mọi platform (handles cgroups)
+    // Container-aware on every platform (handles cgroups)
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
 }
 ```
@@ -946,14 +946,14 @@ pub fn worker_count() -> usize {
 Thread-per-core provides **two independent benefits**:
 
 ```
-Lợi ích 1: CPU cache locality
-  → Yêu cầu CPU pinning + SO_REUSEPORT/same-socket-same-thread
-  → Linux: ✅ đầy đủ | macOS: ~80% | Windows: ~90%
+Benefit 1: CPU cache locality
+  → Requires CPU pinning + SO_REUSEPORT / same-socket-same-thread
+  → Linux: ✅ full | macOS: ~80% | Windows: ~90%
 
-Lợi ích 2: Zero cross-core lock contention (QUAN TRỌNG HƠN)
-  → Chỉ cần: mỗi thread có executor riêng, không share task queue
-  → Linux/macOS/Windows: ✅ 100% — do independent executor design
-  → Đây là lý do Glommio, Monoio, Seastar outperform tokio work-stealing
+Benefit 2: Zero cross-core lock contention (THE MORE IMPORTANT ONE)
+  → All it needs: each thread owns its executor and shares no task queue
+  → Linux/macOS/Windows: ✅ 100% — a consequence of the independent executor design
+  → This is why Glommio, Monoio, and Seastar outperform tokio's work-stealing
 ```
 
 Node.js cluster, Kestrel, and Nginx all follow the same principle — and all are production-grade on Windows. Kernway can do the same.
@@ -992,16 +992,16 @@ kernway/
 │   ├── http2-proto/            # Phase 3 / v0.5: HTTP/2 HPACK + multiplexing
 │   ├── kernway-db/             # v0.3+: PostgresPool/MySqlPool/SqlitePool implement DbPool
 │   ├── kernleaf/               # v0.6: KernleafEngine implement TemplateEngine (kw:text, kw:if, kw:each)
-│   ├── kernway-abi/            # v0.5: stable ABI definitions cho Dynamic .so plugin
+│   ├── kernway-abi/            # v0.5: stable ABI definitions for the dynamic .so plugin
 │   ├── kernway-server/         # v0.5: standalone pre-compiled binary (hot reload host)
 │   ├── kernway-cli/            # v0.5: `kernway dev` hot reload + `kernway build`
-│   └── kernway/                # Meta-crate: re-export tất cả, `use kernway::prelude::*`
+│   └── kernway/                # Meta-crate: re-exports everything, `use kernway::prelude::*`
 ├── examples/
 │   ├── echo-server/            # v0.2: benchmark baseline
 │   ├── hello-world/            # v0.3: minimal REST API (compiled-in mode)
 │   ├── todo-app/               # v0.3-v0.4: CRUD + auth + error handling
-│   └── todo-app-plugin/        # v0.5: same app nhưng dùng cdylib + hot reload
-└── benches/                    # so sánh với tokio/hyper (dev-dependencies only)
+│   └── todo-app-plugin/        # v0.5: the same app, but as a cdylib + hot reload
+└── benches/                    # comparisons against tokio/hyper (dev-dependencies only)
 ```
 
 **Crate → release milestone mapping**:

@@ -26,18 +26,18 @@
 ### `Entity`
 
 ```rust
-/// Marker trait cho ORM-managed struct.
-/// Tương đương @Entity trong JPA.
+/// Marker trait for an ORM-managed struct.
+/// Equivalent to @Entity in JPA.
 pub trait Entity: Send + Sync + Sized + 'static {
     type Id: Send + Sync + Clone + Eq + std::hash::Hash;
 
-    /// Tên bảng trong database.
+    /// The table name in the database.
     fn table_name() -> &'static str;
 
-    /// Lấy primary key của entity.
+    /// The entity's primary key.
     fn id(&self) -> &Self::Id;
 
-    /// Metadata của tất cả columns.
+    /// Metadata for every column.
     fn columns() -> &'static [ColumnDef];
 }
 ```
@@ -45,8 +45,8 @@ pub trait Entity: Send + Sync + Sized + 'static {
 ### `Repository<T>`
 
 ```rust
-/// CRUD operations cho một Entity type.
-/// Tương đương JpaRepository<T, ID> trong Spring Data JPA.
+/// CRUD operations for a single Entity type.
+/// Equivalent to JpaRepository<T, ID> in Spring Data JPA.
 pub trait Repository<T: Entity>: Send + Sync {
     // --- Read ---
     async fn find_by_id(&self, id: &T::Id)
@@ -86,7 +86,7 @@ pub trait Repository<T: Entity>: Send + Sync {
 
 ```rust
 /// Fluent query API.
-/// Tương đương CriteriaBuilder + TypedQuery trong JPA.
+/// Equivalent to CriteriaBuilder + TypedQuery in JPA.
 pub trait QueryBuilder<T: Entity>: Send {
     /// Filter — WHERE clause.
     fn filter(self: Box<Self>, predicate: Box<dyn EntityPredicate<T>>)
@@ -108,7 +108,7 @@ pub trait QueryBuilder<T: Entity>: Send {
     fn offset(self: Box<Self>, n: u64)
         -> Box<dyn QueryBuilder<T>>;
 
-    /// Eager load relationship — tránh N+1.
+    /// Eager-load a relationship — avoids N+1.
     fn with(self: Box<Self>, relation: &'static str)
         -> Box<dyn QueryBuilder<T>>;
 
@@ -131,8 +131,8 @@ pub trait QueryBuilder<T: Entity>: Send {
 
 ```rust
 /// Transaction context.
-/// Tương đương EntityTransaction / @Transactional trong JPA.
-/// Kernway's #[transactional] sử dụng trait này.
+/// Equivalent to EntityTransaction / @Transactional in JPA.
+/// Kernway's #[transactional] is built on this trait.
 pub trait OrmTransaction: Send {
     async fn commit(self) -> Result<(), OrmError>;
     async fn rollback(self) -> Result<(), OrmError>;
@@ -147,11 +147,11 @@ pub trait OrmTransaction: Send {
 ### `#[entity]`
 
 ```rust
-/// Map struct sang database table.
-/// Tương đương @Entity + @Table trong JPA.
+/// Maps a struct onto a database table.
+/// Equivalent to @Entity + @Table in JPA.
 ///
-/// Tham số:
-///   table = "table_name"   — tên bảng (mặc định: snake_case của struct name)
+/// Parameters:
+///   table = "table_name"   — the table name (default: snake_case of the struct name)
 ///
 /// Generated:
 ///   impl Entity for MyStruct { ... }
@@ -162,11 +162,11 @@ pub fn entity(args: TokenStream, input: TokenStream) -> TokenStream { ... }
 ### Field annotations
 
 ```rust
-#[id]                          // PRIMARY KEY — bắt buộc có 1 field
+#[id]                          // PRIMARY KEY — exactly one field must have it
 #[id(strategy = "auto")]       // AUTO_INCREMENT / SERIAL
-#[id(strategy = "uuid")]       // UUID v4 tự sinh
+#[id(strategy = "uuid")]       // auto-generated UUID v4
 
-#[column]                      // map field → column (tên mặc định = field name)
+#[column]                      // maps field → column (default name = field name)
 #[column(name = "col_name")]   // custom column name
 #[column(nullable = false)]    // NOT NULL
 #[column(unique)]              // UNIQUE constraint
@@ -181,10 +181,10 @@ pub fn entity(args: TokenStream, input: TokenStream) -> TokenStream { ... }
 ### `#[repository]`
 
 ```rust
-/// Sinh CRUD methods + method-name query generation.
-/// Tương đương @Repository + extends JpaRepository<T, ID> trong Spring Data.
+/// Generates CRUD methods plus method-name query derivation.
+/// Equivalent to @Repository + extends JpaRepository<T, ID> in Spring Data.
 ///
-/// Auto-generated methods từ field names:
+/// Methods auto-generated from field names:
 ///   find_by_{field}(val)
 ///   find_by_{field}_and_{field}(val1, val2)
 ///   find_by_{field}_or_{field}(val1, val2)

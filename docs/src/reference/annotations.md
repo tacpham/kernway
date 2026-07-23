@@ -11,22 +11,22 @@
 Spring has to distinguish between `@Controller` (template) vs `@RestController` (JSON) vs `@ResponseBody` (per-method):
 
 ```java
-// Spring — phải chọn đúng annotation, mix thì phức tạp
+// Spring — you must pick the right annotation; mixing them gets messy
 @Controller                       // template mode
 public class UserController {
     @GetMapping("/{id}")
-    @ResponseBody                 // ← thêm annotation để trả JSON trong @Controller
+    @ResponseBody                 // ← extra annotation just to return JSON from a @Controller
     public User getUser() { }
 
     @GetMapping("/profile")
-    public String profile() { }   // trả view name
+    public String profile() { }   // returns a view name
 }
 ```
 
 Kernway — **the return type decides, with no extra annotation needed**:
 
 ```rust
-#[controller("/users")]           // một annotation duy nhất, không phân biệt REST hay MVC
+#[controller("/users")]           // one annotation — no REST vs MVC distinction
 struct UserController { }
 
 #[route(GET, "/{id}")]
@@ -37,7 +37,7 @@ async fn profile() -> Template { }         // → HTML  (MVC)
 
 #[route(GET, "/export")]
 async fn export() -> Csv<Vec<User>> { }    // → CSV   (custom)
-// Mix tự do trong cùng controller — không cần thêm annotation nào
+// Mix them freely in one controller — no extra annotation required
 ```
 
 | | Spring | Kernway |
@@ -167,7 +167,7 @@ struct OrderService {
 
 ```rust
 #[component]
-#[primary]  // ← thắng khi có conflict
+#[primary]  // ← wins when there is a conflict
 struct JwtAuthExtractor;
 impl AuthExtractor for JwtAuthExtractor { ... }
 ```
@@ -179,7 +179,7 @@ impl AuthExtractor for JwtAuthExtractor { ... }
 #### `#[default_impl]`
 
 ```rust
-// Chỉ dùng trong kernway framework — không phải user code
+// Framework-internal only — not for user code
 #[component]
 #[default_impl]
 struct DefaultErrorHandler;
@@ -203,7 +203,7 @@ impl DbPool for PostgresPool { ... }
 struct ClickhousePool;
 impl DbPool for ClickhousePool { ... }
 
-// Inject theo tên
+// Inject by name
 #[component]
 struct ReportService {
     #[inject]
@@ -247,7 +247,7 @@ impl UserService {
         // auto commit on Ok, rollback on Err
     }
 
-    // Tùy chỉnh:
+    // Customisation:
     #[transactional(isolation = "READ_COMMITTED", propagation = "REQUIRES_NEW")]
     async fn transfer(&self, from: u64, to: u64, amount: f64) -> Result<()> { ... }
 }
@@ -269,7 +269,7 @@ async fn delete_user(...) { ... }
 #[require_role("ADMIN", "MANAGER")]        // any of these roles
 async fn view_reports(...) { ... }
 
-// Có thể đặt trên controller (apply cho tất cả routes)
+// Can be placed on the controller (applies to every route)
 #[controller("/admin")]
 #[require_role("ADMIN")]
 struct AdminController { ... }
@@ -285,7 +285,7 @@ struct AdminController { ... }
 #[route(POST, "/users")]
 #[validated]
 async fn create_user(body: Validated<Json<CreateUserReq>>) -> impl IntoResponse {
-    // body.0 đã pass validation
+    // body.0 has already passed validation
 }
 ```
 
@@ -296,11 +296,11 @@ async fn create_user(body: Validated<Json<CreateUserReq>>) -> impl IntoResponse 
 #### `#[exception_handler]` + scope
 
 ```rust
-// Global — áp dụng toàn app
+// Global — applies app-wide
 #[exception_handler]
 async fn handle_app_error(err: AppError) -> impl IntoResponse { ... }
 
-// Scoped theo controller — thắng global
+// Scoped to a controller — beats the global one
 #[exception_handler(scope = UserController)]
 async fn handle_user_error(err: UserError) -> impl IntoResponse { ... }
 
@@ -317,10 +317,10 @@ Priority: controller-scope > module-scope > global
 
 ```rust
 impl UserService {
-    #[cached(key = "user:{id}", ttl = 300)]  // 5 phút
+    #[cached(key = "user:{id}", ttl = 300)]  // 5 minutes
     async fn find_by_id(&self, id: u64) -> Result<User> { ... }
 
-    #[cache_evict(key = "user:{id}")]        // xóa cache khi update
+    #[cache_evict(key = "user:{id}")]        // drops the cache entry on update
     async fn update(&self, id: u64, ...) -> Result<User> { ... }
 }
 ```
@@ -353,7 +353,7 @@ async fn slow_operation(&self) -> Result<Data> { ... }
 
 ```rust
 #[route(POST, "/auth/login")]
-#[rate_limit(per_ip = 5, window_secs = 60)]  // 5 lần/phút per IP
+#[rate_limit(per_ip = 5, window_secs = 60)]  // 5 requests/minute per IP
 async fn login(...) { ... }
 ```
 
@@ -363,7 +363,7 @@ async fn login(...) { ... }
 #### `#[traced]`
 
 ```rust
-#[traced]  // tạo span cho distributed tracing
+#[traced]  // creates a span for distributed tracing
 async fn process_order(&self, order_id: u64) -> Result<Order> { ... }
 ```
 
@@ -393,7 +393,7 @@ struct AppConfig {
     #[env("PORT", default = "8080")]
     port: u16,
 
-    #[env("DATABASE_URL")]          // required — panic nếu không có
+    #[env("DATABASE_URL")]          // required — panics if unset
     database_url: String,
 
     #[env("JWT_SECRET")]
@@ -411,18 +411,18 @@ struct AppConfig {
 
 ```rust
 #[component]
-#[profile("dev")]               // chỉ active trong profile dev
+#[profile("dev")]               // only active in the dev profile
 struct DevMailSender;
 impl MailSender for DevMailSender {
     async fn send(&self, mail: Mail) {
-        println!("[DEV] Would send: {:?}", mail);  // log, không gửi thật
+        println!("[DEV] Would send: {:?}", mail);  // logs only, sends nothing
     }
 }
 
 #[component]
 #[profile("prod")]
 struct SmtpMailSender;
-impl MailSender for SmtpMailSender { /* gửi thật */ }
+impl MailSender for SmtpMailSender { /* really sends */ }
 ```
 
 - The bean is registered only in the specified profile
@@ -533,24 +533,24 @@ async fn create_user(body: Validated<Json<CreateUserReq>>) -> impl IntoResponse 
 #### `kernway::define_annotation!`
 
 ```rust
-// Định nghĩa annotation gộp nhiều annotation
+// Define one annotation that bundles several others
 kernway::define_annotation! {
     /// Controller cho API v1: authenticated, validated, returns JSON
     pub annotation ApiV1Controller {
-        #[controller]           // nhận path argument
+        #[controller]           // takes the path argument
         #[require_role("USER")]
         #[validated]
         #[traced]
     }
 }
 
-// Dùng như annotation thường
+// Use it like any other annotation
 #[ApiV1Controller("/users")]
 struct UserController {
     #[inject] service: Arc<UserService>,
 }
 
-// Expand thành:
+// Expands to:
 // #[controller("/users")]
 // #[require_role("USER")]
 // #[validated]

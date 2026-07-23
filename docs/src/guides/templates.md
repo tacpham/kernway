@@ -16,7 +16,7 @@ A Thymeleaf-inspired server-side template engine. Attribute-based syntax. Automa
 <!DOCTYPE html>
 <html>
 <body>
-    <!-- Text output — HTML-escaped mặc định (XSS safe) -->
+    <!-- Text output — HTML-escaped by default (XSS safe) -->
     <h1 kw:text="${user.name}">Placeholder Name</h1>
 
     <!-- Attribute binding -->
@@ -34,14 +34,14 @@ A Thymeleaf-inspired server-side template engine. Attribute-based syntax. Automa
     <!-- Security: only show to specific roles -->
     <a kw:authorize="hasRole('ADMIN')" href="/admin">Admin</a>
 
-    <!-- Raw HTML — explicit unsafe, tên rõ ràng -->
+    <!-- Raw HTML — explicitly unsafe, and the name says so -->
     <div kw:utext="${trustedHtmlContent}">content</div>
 
     <!-- Expression -->
     <p kw:text="'Hello, ' + user.name + '!'">Hello, Name!</p>
     <p kw:text="${items.size()} + ' items'">0 items</p>
 
-    <!-- CSRF token tự động trong form POST -->
+    <!-- CSRF token injected automatically into POST forms -->
     <form method="POST" action="/profile">
         <!-- kernleaf injects hidden field: <input type="hidden" name="_csrf" value="..."> -->
         <button type="submit">Save</button>
@@ -53,7 +53,7 @@ A Thymeleaf-inspired server-side template engine. Attribute-based syntax. Automa
 ## Template Context
 
 ```rust
-// Derive macro — compile-time field access, không dùng runtime reflection
+// Derive macro — compile-time field access, no runtime reflection
 #[derive(TemplateContext)]
 struct ProfileContext {
     user: User,
@@ -77,7 +77,7 @@ async fn profile(Path(id): Path<u64>, service: Arc<UserService>) -> impl IntoRes
 ## Configuration
 
 ```rust
-// 1 dòng để enable:
+// One line to enable:
 KernwayApp::builder()
     .plugin(KernleafPlugin::default())
 

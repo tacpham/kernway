@@ -41,7 +41,7 @@ ApplicationContext      →     trait KernwayPlugin
 ### kernway-core — spec only
 
 ```rust
-// Đây là TẤT CẢ những gì kernway-core chứa:
+// This is EVERYTHING kernway-core contains:
 
 pub trait IntoResponse: Send {
     fn into_response(self) -> Response;
@@ -62,15 +62,15 @@ pub trait KernwayPlugin: Send + Sync {
     fn register(&self, app: &mut AppBuilder);
 }
 
-// kernway-core KHÔNG import: serde, serde_json, diesel, rustls, hay bất kỳ implementation nào
-// Compile time của kernway-core: < 1s
+// kernway-core does NOT import serde, serde_json, diesel, rustls, or any implementation
+// kernway-core compile time: < 1s
 ```
 
 ### Implementation layers
 
 ```
 kernway-core      (spec — HTTP traits, stable sau v1.0)
-kernway-orm-core  (spec — ORM traits, stable sau v0.6) ← tương đương JPA
+kernway-orm-core  (spec — ORM traits, stable from v0.6) ← the JPA equivalent
 │
 ├── [Kernway reference implementations]
 │   ├── kernway-web          Json<T>/Html<T> → IntoResponse; Path<T>/Query<T> → FromRequest
@@ -79,7 +79,7 @@ kernway-orm-core  (spec — ORM traits, stable sau v0.6) ← tương đương JP
 │   ├── kernleaf             KernleafEngine → TemplateEngine
 │   └── kernway-aop          TransactionLayer/RateLimitLayer → Layer
 │
-└── [Community có thể build thêm — không cần fork kernway]
+└── [The community can add more — no need to fork kernway]
     ├── kernway-orm-sqlx     Repository<T> → sqlx native async
     ├── kernway-orm-mongodb  Repository<T> → MongoDB
     ├── kernway-mongodb      MongoPool → DbPool
@@ -207,9 +207,9 @@ This is why Spring is loved — users are not locked into any framework decision
 **Step 1**: The framework registers a default implementation with `#[default_impl]`:
 
 ```rust
-// Trong kernway crate — default, tự động đăng ký
+// Inside the kernway crate — a default, registered automatically
 #[component]
-#[default_impl]  // ← "chỉ dùng nếu user CHƯA cung cấp impl trait này"
+#[default_impl]  // ← "use this only if the user has NOT supplied an impl of this trait"
 struct DefaultErrorHandler;
 impl ErrorHandler for DefaultErrorHandler {
     fn handle(&self, err: AppError) -> Response {
@@ -223,7 +223,7 @@ impl ErrorHandler for DefaultErrorHandler {
 **Step 3**: If the user wants to override it → define a struct + trait impl, and the framework automatically uses the user's version:
 
 ```rust
-// Trong user app — override, thắng DefaultErrorHandler
+// In the user's app — an override that beats DefaultErrorHandler
 #[component]
 struct MyErrorHandler;
 impl ErrorHandler for MyErrorHandler {
@@ -232,19 +232,19 @@ impl ErrorHandler for MyErrorHandler {
             .json(json!({ "error": err.message(), "trace_id": err.trace_id() }))
     }
 }
-// di-macro detect: đã có ErrorHandler impl → bỏ #[default_impl] bean
-// Kiểm tra tại COMPILE TIME — không phải runtime
+// di-macro sees an existing ErrorHandler impl → drops the #[default_impl] bean
+// Checked at COMPILE TIME — not at runtime
 ```
 
 ### `#[primary]` — when multiple impls exist
 
 ```rust
-// Nếu có 2 impl cùng trait → compile error (không im lặng như Spring):
+// Two impls of the same trait → compile error (not a silent pick, as in Spring):
 // error: multiple beans found for trait `AuthExtractor`
 // help: add #[primary] to one of them, or use #[qualifier("name")]
 
 #[component]
-#[primary]   // ← cái này thắng
+#[primary]   // ← this one wins
 struct JwtAuth;
 impl AuthExtractor for JwtAuth { ... }
 
@@ -257,13 +257,13 @@ impl AuthExtractor for ApiKeyAuth { ... }
 
 ```rust
 KernwayApp::builder()
-    // Override bất kỳ default nào tại đây:
+    // Override any default here:
     .error_handler(MyErrorHandler)
     .auth(JwtAuthLayer::new(secret))
     .json_serializer(SimdJsonSerializer)
     .request_id(|| Snowflake::next().to_string())
-    .layer(MyLoggingLayer)                         // thêm middleware
-    .layer_before::<CorsLayer>(MyRateLimitLayer)   // chèn vào vị trí cụ thể
+    .layer(MyLoggingLayer)                         // add middleware
+    .layer_before::<CorsLayer>(MyRateLimitLayer)   // insert at a specific position
     .build()
 ```
 
@@ -308,16 +308,16 @@ Every item below MUST have a default + MUST be overridable:
 ## Thread-per-core Architecture
 
 ```
-Mỗi OS thread = 1 CPU core = 1 Reactor + 1 Executor + 1 Task queue
+Each OS thread = 1 CPU core = 1 Reactor + 1 Executor + 1 task queue
 
 Core 0: [Reactor] ←→ [Executor] ←→ [Task A, Task B, Task C...]
 Core 1: [Reactor] ←→ [Executor] ←→ [Task D, Task E, Task F...]
 Core 2: [Reactor] ←→ [Executor] ←→ [Task G, Task H, Task I...]
 Core 3: [Reactor] ←→ [Executor] ←→ [Task J, Task K, Task L...]
 
-KHÔNG có cross-core task migration.
-KHÔNG có shared task queue.
-KHÔNG có global lock trên hot path.
+NO cross-core task migration.
+NO shared task queue.
+NO global lock on the hot path.
 ```
 
 **Why is this better than work-stealing (tokio)?**
@@ -342,16 +342,16 @@ Both achieve the same result: each thread accepts connections and handles them f
 ## Plugin System
 
 ```rust
-// Thêm tính năng = implement trait + đăng ký
-// Core không bao giờ thay đổi
+// Adding a feature = implement a trait + register it
+// The core never changes
 
-// Thêm template engine:
+// Add a template engine:
 .plugin(KernleafPlugin::default())
 
-// Đổi database:
+// Swap the database:
 .db(MySqlPool::new(env!("DATABASE_URL")))
 
-// Custom response type — không cần hỏi Kernway team:
+// A custom response type — no need to ask the Kernway team:
 struct CsvResponse<T>(Vec<T>);
 impl<T: ToCsv> IntoResponse for CsvResponse<T> { /* ... */ }
 
@@ -394,7 +394,7 @@ kernway/
 │   ├── kernway-cli/      `kernway dev` + `kernway build`
 │   └── kernway/          Meta-crate: `use kernway::prelude::*`
 ├── docs/
-│   ├── ARCHITECTURE.md   (file này)
+│   ├── ARCHITECTURE.md   (this file)
 │   ├── ROADMAP.md
 │   ├── STANDARDS.md
 │   ├── PLATFORM.md

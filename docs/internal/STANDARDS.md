@@ -122,7 +122,7 @@ struct RegisterRequest {
 #[route(POST, "/users/register")]
 #[validated]
 async fn register(body: Validated<Json<RegisterRequest>>) -> impl IntoResponse {
-    // body.0 đã validated, chỉ chạy tới đây nếu valid
+    // body.0 is validated — this line is only reached when it is valid
 }
 ```
 

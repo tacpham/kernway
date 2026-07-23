@@ -30,13 +30,13 @@ impl AsyncTcpStream {
 ## Shard Bootstrap
 
 ```
-Platform        Strategy                 Đạt được
+Platform        Strategy                 What it buys
 ──────────      ─────────────────────    ──────────────────────────────
-Linux           SO_REUSEPORT             Kernel phân phối connections
-macOS           SO_REUSEPORT             Kernel phân phối connections
+Linux           SO_REUSEPORT             Kernel distributes connections
+macOS           SO_REUSEPORT             Kernel distributes connections
 Windows         Shared socket + IOCP     IOCP dispatch completions
 
-Kết quả: mỗi core nhận connections và xử lý độc lập — không shared queue
+Result: every core accepts and handles connections independently — no shared queue
 ```
 
 ```rust
@@ -57,11 +57,11 @@ pub fn bootstrap_shards(config: ShardConfig) -> Vec<TcpListener> {
 ## Connection Accept Loop
 
 ```rust
-// Mỗi shard chạy trên 1 thread
+// Each shard runs on one thread
 pub async fn accept_loop(listener: TcpListener, reactor: Rc<RefCell<Reactor>>) {
     loop {
         let stream = AsyncTcpListener::from(listener).accept().await?;
-        // Spawn task trong cùng executor — không migrate sang thread khác
+        // Spawn the task on the same executor — never migrates to another thread
         spawn_local(handle_connection(stream));
     }
 }

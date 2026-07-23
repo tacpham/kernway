@@ -51,12 +51,12 @@ struct RegisterRequest {
 #[route(POST, "/users/register")]
 #[validated]
 async fn register(body: Validated<Json<RegisterRequest>>) -> impl IntoResponse {
-    // Chỉ đến đây nếu tất cả fields valid
-    // body.0 là RegisterRequest đã validated
+    // Only reached when every field is valid
+    // body.0 is an already-validated RegisterRequest
     Json(json!({ "status": "ok" }))
 }
 
-// Khi validation thất bại — RFC 7807 Problem Details:
+// When validation fails — RFC 7807 Problem Details:
 // HTTP 400 Bad Request
 // {
 //   "type": "https://kernway.dev/errors/validation",
@@ -71,7 +71,7 @@ async fn register(body: Validated<Json<RegisterRequest>>) -> impl IntoResponse {
 ## Observability
 
 ```rust
-// Tự động với plugin:
+// Automatic once the plugin is added:
 KernwayApp::builder()
     .plugin(TracingPlugin::json_logs())   // structured JSON logs
     .plugin(MetricsPlugin::prometheus())  // /metrics endpoint
@@ -79,11 +79,11 @@ KernwayApp::builder()
     .run()
     .await
 
-// Mỗi request tự động có:
+// Every request automatically gets:
 // - request_id header (UUID v4)
 // - duration_ms log
 // - status_code log
-// - span tracing (tích hợp với Jaeger/Zipkin)
+// - span tracing (integrates with Jaeger/Zipkin)
 ```
 
 **Structured log output:**
@@ -130,7 +130,7 @@ pub struct AppConfig {
 // config/application-dev.toml
 // config/application-prod.toml
 
-// Inject vào bất kỳ component nào:
+// Inject it into any component:
 #[component]
 struct UserService {
     #[inject]
@@ -227,7 +227,7 @@ async fn chat_handler(ws: WebSocket) -> impl IntoResponse {
     <title kw:text="'Profile - ' + user.name">Profile - Name</title>
 </head>
 <body>
-    <!-- kw:authorize kiểm tra role -->
+    <!-- kw:authorize checks the role -->
     <div kw:authorize="hasRole('ADMIN')">
         <a href="/admin">Admin Panel</a>
     </div>
@@ -239,7 +239,7 @@ async fn chat_handler(ws: WebSocket) -> impl IntoResponse {
         <li kw:each="post : ${user.posts}" kw:text="${post.title}">Post title</li>
     </ul>
 
-    <!-- CSRF token tự động inject vào form POST -->
+    <!-- CSRF token injected automatically into POST forms -->
     <form method="POST" action="/profile/update">
         <input type="text" name="name" kw:value="${user.name}">
         <button type="submit">Update</button>
@@ -259,8 +259,8 @@ async fn user_profile(
     Template::new("users/profile", context! { user })
 }
 
-// Security: kw:text auto-escapes HTML — XSS không thể xảy ra qua template
-// Raw HTML chỉ qua kw:utext (explicit unsafe)
+// Security: kw:text auto-escapes HTML — a template cannot introduce XSS
+// Raw HTML only through kw:utext (explicitly unsafe)
 ```
 
 ---
@@ -279,7 +279,7 @@ async fn create_user(body: Validated<Json<CreateUserRequest>>) -> impl IntoRespo
     // ...
 }
 
-// Tự động generate:
+// Generated automatically:
 // GET /openapi.json  → OpenAPI 3.0 spec
 // GET /swagger-ui    → Swagger UI
 // GET /redoc         → ReDoc UI
@@ -293,8 +293,8 @@ async fn create_user(body: Validated<Json<CreateUserRequest>>) -> impl IntoRespo
 # Terminal 1: start development server
 kernway dev
 
-# Terminal 2: edit code và save
-# kernway-server detect .so thay đổi → drain in-flight requests → reload
+# Terminal 2: edit the code and save
+# kernway-server sees the .so change → drains in-flight requests → reloads
 
 # Output:
 # [kernway dev] Watching src/ for changes...
@@ -315,9 +315,9 @@ kernway dev
 
 ```rust
 KernwayApp::builder()
-    .static_files("/assets", "public/assets/")  // serve từ thư mục
+    .static_files("/assets", "public/assets/")  // serve from a directory
     .static_files("/favicon.ico", "public/favicon.ico")
-    // ETag + Cache-Control headers tự động
+    // ETag + Cache-Control headers added automatically
     // Range requests (RFC 7233) cho large files
     .build()
     .run()

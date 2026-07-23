@@ -10,7 +10,7 @@ Kernway logs automatically with sensible defaults — no setup required:
 #[kernway::main]
 async fn main() {
     KernwayApp::builder().build().run().await
-    // Logging đã hoạt động ngay
+    // Logging already works
 }
 ```
 
@@ -114,11 +114,11 @@ async fn handler() -> impl IntoResponse {
 ## Log Levels
 
 ```rust
-self.log.trace("rất chi tiết");    // TRACE — tắt trong production
-self.log.debug("debug info");      // DEBUG — tắt trong production
-self.log.info("bình thường");      // INFO — default
-self.log.warn("bất thường");       // WARN
-self.log.error("lỗi");            // ERROR
+self.log.trace("very fine detail"); // TRACE — off in production
+self.log.debug("debug info");       // DEBUG — off in production
+self.log.info("normal operation");  // INFO — default
+self.log.warn("something is off");  // WARN
+self.log.error("a failure");        // ERROR
 ```
 
 Per-module config:
@@ -126,7 +126,7 @@ Per-module config:
 [log.modules]
 "my_app::repository" = "DEBUG"   # verbose cho DB layer
 "my_app::service"    = "INFO"
-"kernway"            = "WARN"    # ít verbose cho framework
+"kernway"            = "WARN"    # less verbose for the framework
 ```
 
 ---
@@ -137,13 +137,13 @@ Per-module config:
 impl OrderService {
     #[traced]
     async fn process(&self, order_id: u64) -> Result<Order> {
-        // Tự động log:
+        // Logged automatically:
         // INFO  process{order_id=99} started
         // INFO  process{order_id=99} completed duration_ms=45
         // ERROR process{order_id=99} failed error="..." duration_ms=12
     }
 
-    #[traced(skip(password))]    // không log field nhạy cảm
+    #[traced(skip(password))]    // never logs the sensitive field
     async fn login(&self, username: &str, password: &str) -> Result<Token> { }
 }
 ```
@@ -183,7 +183,7 @@ path     = "logs/app.log"
 
 [log.output.file.rotation]
 strategy  = "daily"      # daily | size | hourly
-max_size  = "100MB"      # dùng với strategy = "size"
+max_size  = "100MB"      # used with strategy = "size"
 max_files = 30
 compress  = true
 pattern   = "logs/app.%Y-%m-%d.log"
@@ -192,7 +192,7 @@ pattern   = "logs/app.%Y-%m-%d.log"
 Result:
 ```
 logs/
-├── app.log               ← file hiện tại
+├── app.log               ← current file
 ├── app.2024-01-14.log.gz
 └── app.2024-01-13.log.gz
 ```

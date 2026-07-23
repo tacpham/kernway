@@ -31,21 +31,21 @@ pub struct AppContext {
 
 struct BeanEntry {
     bean: Arc<dyn Any + Send + Sync>,
-    is_default: bool,   // true nếu từ #[default_impl]
-    is_primary: bool,   // true nếu có #[primary]
+    is_default: bool,   // true if it came from #[default_impl]
+    is_primary: bool,   // true if it carries #[primary]
 }
 
 impl AppContext {
     pub fn register<T>(&mut self, bean: T, is_default: bool) {
         let type_id = TypeId::of::<T>();
         match self.beans.get(&type_id) {
-            // Default đã có — user bean thắng, bỏ default
+            // A default already exists — the user bean wins, drop the default
             Some(existing) if existing.is_default => {
                 self.beans.insert(type_id, BeanEntry { bean: Arc::new(bean), is_default: false, .. });
             }
-            // User bean đã có, thêm default — bỏ default
+            // A user bean already exists, a default is being added — drop the default
             Some(_) if is_default => { /* skip */ }
-            // Conflict thật — 2 user beans cùng type
+            // A real conflict — two user beans of the same type
             Some(existing) if !existing.is_default && !is_default => {
                 panic!("compile error: multiple beans for {:?} — add #[primary]", type_id);
             }

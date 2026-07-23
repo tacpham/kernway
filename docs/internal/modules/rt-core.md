@@ -35,7 +35,7 @@ Thread (core N)
 ## Waker Implementation
 
 ```rust
-// Custom Waker không dùng futures crate
+// Custom Waker — no dependency on the futures crate
 static WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
     clone_waker,
     wake_waker,
@@ -58,7 +58,7 @@ pub struct Executor {
 }
 
 impl Executor {
-    /// Main event loop — chạy cho đến khi không còn task nào
+    /// Main event loop — runs until no tasks remain
     pub fn run(&mut self) {
         loop {
             // 1. Drain ready tasks
