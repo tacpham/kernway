@@ -3,7 +3,15 @@ use kernway_core::{request::Request, response::Response};
 /// Sync middleware trait — intercept request/response.
 /// Equivalent to HandlerInterceptor in Spring MVC.
 pub trait Middleware: Send + Sync + 'static {
+    /// Intercept one request/response round trip.
+    ///
+    /// Work before `next(req)` sees the request on the way in; work after it
+    /// sees the response on the way out. Returning without calling `next`
+    /// short-circuits the chain — how auth rejects a request before it reaches
+    /// the handler.
     fn handle(&self, req: &mut Request, next: &dyn Fn(&mut Request) -> Response) -> Response;
+
+    /// Short name used in logs and for conflict reporting.
     fn name(&self) -> &'static str;
 }
 

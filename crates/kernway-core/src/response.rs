@@ -6,8 +6,11 @@ use std::collections::HashMap;
 /// Raw HTTP response — implementation-agnostic.
 #[derive(Debug)]
 pub struct Response {
+    /// Status line code.
     pub status:  StatusCode,
+    /// Response headers, written out verbatim.
     pub headers: HashMap<String, String>,
+    /// Response body. `Content-Length` is derived from its length at write time.
     pub body:    Vec<u8>,
 }
 

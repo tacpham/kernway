@@ -4,11 +4,11 @@
 //!
 //! Demonstrates everything the container can do:
 //!   • register_component in ANY order + refresh() → topological auto-wiring
-//!   • inject by interface  (Arc<dyn Trait> + #[provides])
-//!   • qualifier injection  (#[inject(qualifier = "...")])
-//!   • collection injection (Vec<Arc<dyn Trait>> — all providers)
-//!   • optional injection   (Option<Arc<T>> — None if absent)
-//!   • lifecycle hook       (#[post_construct(method)])
+//!   • inject by interface  (`Arc<dyn Trait>` + `#[provides]`)
+//!   • qualifier injection  (`#[inject(qualifier = "...")]`)
+//!   • collection injection (`Vec<Arc<dyn Trait>>` — all providers)
+//!   • optional injection   (`Option<Arc<T>>` — `None` if absent)
+//!   • lifecycle hook       (`#[post_construct(method)]`)
 //!   • DiError instead of panics
 
 use di_core::{AppContext, DiError};

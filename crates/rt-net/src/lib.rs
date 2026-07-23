@@ -28,7 +28,6 @@
 //! `SO_REUSEPORT` listener per core and gives each its own executor — no shared
 //! accept queue, no cross-thread task migration.
 #![deny(unsafe_op_in_unsafe_fn)]
-#![allow(missing_docs)] // v0.2
 
 pub mod listener;
 pub mod shard;

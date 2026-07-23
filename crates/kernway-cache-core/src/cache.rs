@@ -4,12 +4,17 @@ use std::time::Instant;
 /// A cached value with metadata.
 #[derive(Debug, Clone)]
 pub struct CacheEntry<V> {
+    /// The cached value.
     pub value: V,
+    /// When the entry was stored. Expiry is measured from here, so a re-`put`
+    /// resets the clock.
     pub created_at: Instant,
+    /// How long the entry stays valid.
     pub ttl: Ttl,
 }
 
 impl<V> CacheEntry<V> {
+    /// Wrap a value, stamping it with the current time.
     pub fn new(value: V, ttl: Ttl) -> Self {
         Self { value, created_at: Instant::now(), ttl }
     }
@@ -79,7 +84,9 @@ where
 ///
 /// Equivalent to Spring's `CacheManager`.
 pub trait CacheManager: Send + Sync + 'static {
+    /// Key type shared by every region this manager hands out.
     type K: Send + Sync + 'static;
+    /// Value type shared by every region this manager hands out.
     type V: Clone + Send + Sync + 'static;
 
     /// Get or create a named cache region.

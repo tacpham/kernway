@@ -1,3 +1,14 @@
+//! Derive and attribute macros for `kernway-orm-core`.
+//!
+//! These read a struct at compile time and emit the `Entity` impl the runtime
+//! needs — table name, primary key accessor, and column metadata. Nothing here
+//! reaches a database; the generated code only describes the mapping, and a
+//! backend crate (`kernway-orm-sqlite`, `kernway-orm-memory`, ...) acts on it.
+//!
+//! The emitted code refers to `::kernway_orm_core::` paths only, so this crate
+//! does **not** depend on `kernway-orm-core` itself — that is what lets the ORM
+//! subsystem be used without the rest of the framework.
+
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
@@ -5,6 +16,26 @@ use syn::{
     Meta, MetaNameValue, Token, Type,
 };
 
+/// Maps a struct onto a database table — the JPA `@Entity` + `@Table` equivalent.
+///
+/// # Arguments
+/// - `table = "name"` — table name; defaults to the struct name in snake_case.
+///
+/// # Field attributes
+/// - `#[id]` — the primary key. Exactly one field must carry it.
+/// - `#[column(name = "...")]` — override the column name.
+///
+/// # Generates
+/// `impl Entity for TheStruct`, supplying `table_name`, `id`, and `columns`.
+///
+/// # Example
+/// ```rust,ignore
+/// #[entity(table = "users")]
+/// pub struct User {
+///     #[id] pub id: i64,
+///     #[column] pub email: String,
+/// }
+/// ```
 #[proc_macro_attribute]
 pub fn entity(args: TokenStream, input: TokenStream) -> TokenStream {
     let args = parse_macro_input!(args with Punctuated::<Meta, Token![,]>::parse_terminated);

@@ -31,7 +31,6 @@
 //! Confined to two places, each with a `SAFETY:` note per operation: the
 //! `RawWakerVTable` in [`task`], and the `libc` affinity call in [`sys`].
 #![deny(unsafe_op_in_unsafe_fn)]
-#![allow(missing_docs)] // v0.2
 
 pub mod blocking;
 pub mod executor;

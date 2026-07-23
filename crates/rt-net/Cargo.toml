@@ -16,3 +16,10 @@ mio     = { workspace = true }
 # Platform layer (`sys/`) — SO_REUSEPORT before bind.
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+
+[lints]
+workspace = true
+
+# docs.rs builds with every feature on, so feature-gated items still appear.
+[package.metadata.docs.rs]
+all-features = true

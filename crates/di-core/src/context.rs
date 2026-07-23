@@ -512,7 +512,7 @@ impl AppContext {
     }
 }
 
-/// `AppContext` is the canonical [`Container`]. Methods delegate to the inherent
+/// `AppContext` is the canonical [`Container`](crate::Container). Methods delegate to the inherent
 /// ones via explicit `AppContext::…` paths (inherent, never the trait) so there is
 /// no risk of accidental self-recursion.
 impl crate::container::Container for AppContext {

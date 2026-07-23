@@ -129,6 +129,7 @@ impl MultipartForm {
 
     /// Number of fields.
     pub fn len(&self) -> usize { self.fields.len() }
+    /// Whether the form carried no fields at all.
     pub fn is_empty(&self) -> bool { self.fields.is_empty() }
 }
 

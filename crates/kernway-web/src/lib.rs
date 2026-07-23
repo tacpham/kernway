@@ -65,6 +65,10 @@ impl<T: std::str::FromStr> Path<T>
 where
     T::Err: std::fmt::Display,
 {
+    /// Pull `param` out of the matched route pattern and parse it into `T`.
+    ///
+    /// Fails when the router captured no such placeholder, or when the captured
+    /// text does not parse — both are client errors, so map them to a 400.
     pub fn from_request(req: &Request, param: &str) -> Result<Self, String> {
         let val = req
             .path_params
@@ -89,6 +93,10 @@ impl<T> std::ops::Deref for Path<T> {
 pub struct Query<T>(pub T);
 
 impl<T: DeserializeOwned> Query<T> {
+    /// Deserialize the query string into `T`.
+    ///
+    /// Every value arrives as a string, so `T`'s non-string fields need
+    /// `#[serde(deserialize_with = ...)]` or a string-tolerant type.
     pub fn from_request(req: &Request) -> Result<Self, String> {
         // Built as a `serde_json::Map` rather than serialized to a string and
         // parsed back: the round trip through text was only ever there to reach
@@ -112,12 +120,16 @@ impl<T: DeserializeOwned> Query<T> {
 /// RFC 7807 Problem Details error response.
 #[derive(Serialize)]
 pub struct ProblemDetail {
+    /// HTTP status code, repeated in the body as RFC 7807 §3.1 allows.
     pub status:  u16,
+    /// Short, human-readable summary — stable for a given status.
     pub title:   &'static str,
+    /// Explanation specific to this occurrence.
     pub detail:  String,
 }
 
 impl ProblemDetail {
+    /// Build a `404 Not Found` problem response.
     pub fn not_found(detail: impl Into<String>) -> Response {
         let mut r = Json(ProblemDetail {
             status: 404,
@@ -129,6 +141,7 @@ impl ProblemDetail {
         r
     }
 
+    /// Build a `400 Bad Request` problem response.
     pub fn bad_request(detail: impl Into<String>) -> Response {
         let mut r = Json(ProblemDetail {
             status: 400,
@@ -140,6 +153,9 @@ impl ProblemDetail {
         r
     }
 
+    /// Build a `500 Internal Server Error` problem response.
+    ///
+    /// Keep `detail` free of internal specifics — it reaches the client.
     pub fn internal_error(detail: impl Into<String>) -> Response {
         let mut r = Json(ProblemDetail {
             status: 500,

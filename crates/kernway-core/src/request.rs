@@ -31,12 +31,22 @@ impl std::fmt::Display for HttpVersion {
 /// Raw HTTP request — implementation-agnostic.
 #[derive(Debug)]
 pub struct Request {
+    /// HTTP method, uppercase as it arrived on the wire (`GET`, `POST`, ...).
     pub method:      String,
+    /// Request path, without the query string (`/users/42`).
     pub path:        String,
+    /// Protocol version — decides the default keep-alive behaviour.
     pub version:     HttpVersion,
+    /// Request headers. Names compare case-insensitively, per RFC 9110 §5.1.
     pub headers:     Headers,
+    /// Parsed query string. Names are case-sensitive, unlike headers.
     pub query:       QueryParams,
+    /// Values captured from the route pattern — `/users/{id}` yields `id`.
+    ///
+    /// Populated by the router after a route matches, so it is empty on a
+    /// hand-built `Request`.
     pub path_params: HashMap<String, String>,
+    /// Raw request body. Left empty when the request carries none.
     pub body:        Vec<u8>,
 }
 

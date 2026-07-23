@@ -227,6 +227,11 @@ where
     T: Entity + Serialize + DeserializeOwned,
     T::Id: Default + PartialEq + Serialize + DeserializeOwned,
 {
+    /// Create an empty repository.
+    ///
+    /// Storage is process-local and vanishes with the value — this backend
+    /// exists for tests and for running an app before a real database is wired
+    /// up, not for persistence.
     pub fn new() -> Self {
         Self {
             store: Arc::new(Mutex::new(HashMap::new())),

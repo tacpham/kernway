@@ -15,6 +15,11 @@ struct Route {
     handler: Handler,
 }
 
+/// Method + path routing table.
+///
+/// Routes are matched in registration order within each class, and static
+/// patterns are tried before dynamic ones — an exact path always beats a
+/// placeholder that could also match it.
 pub struct Router {
     routes: Vec<Route>,
     /// Exact path → indices into `routes`, in registration order.
@@ -29,6 +34,7 @@ pub struct Router {
 }
 
 impl Router {
+    /// Create an empty router.
     pub fn new() -> Self {
         Self {
             routes: Vec::new(),

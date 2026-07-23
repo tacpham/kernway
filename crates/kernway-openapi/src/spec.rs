@@ -3,6 +3,10 @@ use serde::Serialize;
 use std::collections::HashMap;
 
 #[derive(Serialize)]
+/// The serializable OpenAPI 3.0 document.
+///
+/// Built from an [`OpenApiRegistry`] rather than
+/// assembled by hand — this type exists to be serialized, not edited.
 pub struct OpenApiSpec {
     openapi: &'static str,
     info:    Info,
@@ -93,6 +97,10 @@ struct Response {
 }
 
 impl OpenApiSpec {
+    /// Fold every registered route into one OpenAPI document.
+    ///
+    /// Routes sharing a path are merged into a single path item keyed by
+    /// method, as the spec requires.
     pub fn build(registry: &OpenApiRegistry) -> Self {
         let mut paths: HashMap<String, PathItem> = HashMap::new();
 

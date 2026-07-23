@@ -1,3 +1,10 @@
+//! Attribute macros for `kernway-cache-core`.
+//!
+//! As of v0.5 these are **marker macros**: they record intent and return the
+//! function unchanged. The AOP rewriting that makes them do the caching lands in
+//! v0.6. Annotating now means the behaviour arrives without a code change —
+//! but until then, a `#[cacheable]` function is not actually cached.
+
 use proc_macro::TokenStream;
 
 /// Marks a function as cacheable.

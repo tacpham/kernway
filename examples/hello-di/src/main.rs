@@ -3,8 +3,8 @@
 //! Run: cargo run -p hello-di
 //!
 //! Demonstrates:
-//!   - #[component] marks beans
-//!   - #[inject] marks dependencies
+//!   - `#[component]` marks beans
+//!   - `#[inject]` marks dependencies
 //!   - AppContext registers and resolves beans
 //!   - User beans override framework defaults
 
@@ -29,7 +29,7 @@ impl UserRepository {
 }
 
 /// Service layer — business logic.
-/// Note: #[inject] on fields will work in v0.2 (auto-wiring).
+/// Note: `#[inject]` on fields will work in v0.2 (auto-wiring).
 /// v0.1 uses manual injection in main().
 #[component]
 pub struct UserService {

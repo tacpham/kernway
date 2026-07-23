@@ -26,5 +26,9 @@ pub trait Connection: Send {
 /// Equivalent to `javax.sql.DataSource` in Java.
 /// `PostgresPool`, `MySqlPool`, and `SqlitePool` all implement this trait.
 pub trait DbPool: Send + Sync + 'static {
+    /// Take a connection from the pool, waiting if none is free.
+    ///
+    /// The connection returns to the pool when the `Box` is dropped, so hold it
+    /// for as short a span as the work allows.
     fn acquire(&self) -> BoxFuture<'_, Result<Box<dyn Connection>, DbError>>;
 }

@@ -23,17 +23,31 @@ pub enum KernwayError {
 pub struct StatusCode(pub u16);
 
 impl StatusCode {
+    /// `200 OK` — the request succeeded.
     pub const OK:                    Self = Self(200);
+    /// `201 Created` — a new resource was created; set `Location` alongside it.
     pub const CREATED:               Self = Self(201);
+    /// `204 No Content` — success, and deliberately no body.
     pub const NO_CONTENT:            Self = Self(204);
+    /// `400 Bad Request` — the request was malformed.
     pub const BAD_REQUEST:           Self = Self(400);
+    /// `401 Unauthorized` — no or invalid credentials (authentication).
     pub const UNAUTHORIZED:          Self = Self(401);
+    /// `403 Forbidden` — authenticated, but not allowed (authorisation).
     pub const FORBIDDEN:             Self = Self(403);
+    /// `404 Not Found` — no route matched, or the resource does not exist.
     pub const NOT_FOUND:             Self = Self(404);
+    /// `405 Method Not Allowed` — the path exists, the method does not.
     pub const METHOD_NOT_ALLOWED:    Self = Self(405);
+    /// `422 Unprocessable Entity` — well-formed but semantically invalid;
+    /// what validation failures return.
     pub const UNPROCESSABLE_ENTITY:  Self = Self(422);
+    /// `429 Too Many Requests` — rate limit exceeded.
     pub const TOO_MANY_REQUESTS:     Self = Self(429);
+    /// `500 Internal Server Error` — an unhandled failure on the server.
     pub const INTERNAL_SERVER_ERROR: Self = Self(500);
+    /// `503 Service Unavailable` — temporarily unable to serve; used while
+    /// draining during shutdown.
     pub const SERVICE_UNAVAILABLE:   Self = Self(503);
 
     /// Is this a 2xx status?
