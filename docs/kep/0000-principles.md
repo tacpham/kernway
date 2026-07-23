@@ -42,13 +42,35 @@ A dependency is acceptable only if **all four** hold:
 
 ### What that admits today, and why
 
-| Crate | Where | Justification |
-|---|---|---|
-| `mio` | `rt-core` | epoll/kqueue/IOCP behind one API. Portable readiness notification is OS territory, and getting it wrong on three platforms is not a good use of anyone's time. |
-| `libc` | `rt-core/sys` | CPU affinity syscalls. Same reason. |
-| `thiserror` | spec crates | Derives `Display`/`Error`. Compile-time only, no runtime footprint. |
-| `syn`/`quote` | macro crates | Rust parsing. Reimplementing this would be a project, not a crate. |
-| `serde` | edge crates only | The de facto serialization contract. **Never** in a `*-core` spec crate. |
+| Crate | Where | Test 4 (edge / hot path) | Justification |
+|---|---|---|---|
+| `mio` | `rt-core` | ⚠️ **fails** — `Poll::poll` is the reactor loop | epoll/kqueue/IOCP behind one API. Admitted anyway, on the strength of the other three tests and the Windows case (see below). This is the one dependency on a hot path we control, and the honest exception. |
+| `libc` | `rt-core/sys` | ✅ edge | CPU affinity syscalls, called at shard startup. |
+| `thiserror` | spec crates | ✅ compile-time | Derives `Display`/`Error`. No runtime footprint. |
+| `syn`/`quote` | macro crates | ✅ compile-time | Rust parsing. Reimplementing this would be a project, not a crate. |
+| `serde` | edge crates only | ✅ edge | The de facto serialization contract. **Never** in a `*-core` spec crate. |
+
+### The mio exception, stated plainly
+
+`mio` does not pass the rule cleanly, and a principles document that pretends
+otherwise is not worth having. `Poll::poll` runs once per reactor iteration —
+that is the hot path, and test 4 says a dependency must stay off it.
+
+It is admitted because the alternative is unbalanced by platform:
+
+- **Linux `epoll` and macOS `kqueue`** are ~250 lines each over `libc` — writable,
+  and test 2 ("reimplementing would be reckless") does *not* hold for them. On
+  these two platforms mio is convenience, not necessity.
+- **Windows IOCP is completion-based, not readiness-based.** mio emulates
+  readiness on top of it using the undocumented `\Device\Afd` interface. That is
+  a genuine project to reproduce, and test 2 holds firmly.
+
+So the honest position is: mio earns its place on Windows and is tolerated on
+Unix. The direction, recorded in the `rt-core` charter, is to own the Unix
+`sys/` poller and keep mio behind `#[cfg(windows)]` — but only when there is a
+reason (an `io_uring` backend, whose completion model fits mio poorly; or a
+measurement showing mio on the request path costs something). Rewriting a working
+poller for purity alone would fail test 2 in the other direction.
 
 ### What it excludes, and this is the point
 
