@@ -15,6 +15,7 @@ use std::time::Duration;
 use di_core::AppContext;
 use kernway_core::{error::StatusCode, request::Request, response::Response};
 use kernway_http::{encode_response, encode_response_with, parse_bytes, Connection, Parsed};
+use kernway_static::{mime_for, StaticFiles};
 use rt_core::Shutdown;
 use rt_net::{AsyncTcpStream, ShardConfig};
 
@@ -63,6 +64,7 @@ pub struct AppBuilder {
     router:       Router,
     context:      AppContext,
     middlewares:  Vec<Arc<dyn Middleware>>,
+    static_files: Option<Arc<StaticFiles>>,
     shards:       Option<usize>,
     keep_alive:   KeepAliveConfig,
     drain:        Duration,
@@ -77,6 +79,7 @@ impl AppBuilder {
             router: Router::new(),
             context: AppContext::new(),
             middlewares: Vec::new(),
+            static_files: None,
             shards: None,
             keep_alive: KeepAliveConfig::default(),
             drain: rt_net::DEFAULT_DRAIN_TIMEOUT,
@@ -122,6 +125,27 @@ impl AppBuilder {
         self
     }
 
+    /// Serve static files from `root` for any GET the router does not handle.
+    ///
+    /// A request is tried against the router first, so a dynamic route always
+    /// wins; only misses fall through to the filesystem. `/` and any path ending
+    /// in `/` serve `index.html` from that directory. Path traversal, dotfiles,
+    /// and malformed encodings are rejected before any file is opened — see
+    /// [`kernway_static::StaticFiles::resolve`].
+    ///
+    /// ```no_run
+    /// # use kernway_server::KernwayApp;
+    /// KernwayApp::builder()
+    ///     .static_files("public")   // drop index.html, css, js in ./public
+    ///     .build()
+    ///     .run()
+    ///     .unwrap();
+    /// ```
+    pub fn static_files(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.static_files = Some(Arc::new(StaticFiles::new(root)));
+        self
+    }
+
     /// Register a GET route.
     pub fn get(mut self, pattern: &str, handler: impl Fn(&Request, &AppContext) -> Response + Send + Sync + 'static) -> Self {
         self.router.add("GET", pattern, Arc::new(handler));
@@ -163,6 +187,7 @@ impl AppBuilder {
             router: Arc::new(self.router),
             context: Arc::new(self.context),
             middlewares: Arc::new(self.middlewares),
+            static_files: self.static_files,
         }
     }
 }
@@ -183,6 +208,7 @@ pub struct KernwayApp {
     router:       Arc<Router>,
     context:      Arc<AppContext>,
     middlewares:  Arc<Vec<Arc<dyn Middleware>>>,
+    static_files: Option<Arc<StaticFiles>>,
 }
 
 impl KernwayApp {
@@ -249,6 +275,7 @@ impl KernwayApp {
         let router = Arc::clone(&self.router);
         let context = Arc::clone(&self.context);
         let middlewares = Arc::clone(&self.middlewares);
+        let static_files = self.static_files.clone();
         let keep_alive = self.keep_alive;
         let shutdown = self.shutdown.clone();
 
@@ -256,9 +283,10 @@ impl KernwayApp {
             let router = Arc::clone(&router);
             let context = Arc::clone(&context);
             let middlewares = Arc::clone(&middlewares);
+            let static_files = static_files.clone();
             let shutdown = shutdown.clone();
             async move {
-                serve_connection(stream, router, context, middlewares, keep_alive, shutdown).await;
+                serve_connection(stream, router, context, middlewares, static_files, keep_alive, shutdown).await;
             }
         });
 
@@ -283,6 +311,7 @@ async fn serve_connection(
     router: Arc<Router>,
     context: Arc<AppContext>,
     middlewares: Arc<Vec<Arc<dyn Middleware>>>,
+    static_files: Option<Arc<StaticFiles>>,
     keep_alive: KeepAliveConfig,
     shutdown: Shutdown,
 ) {
@@ -348,7 +377,13 @@ async fn serve_connection(
             && served < keep_alive.max_requests
             && !shutdown.is_triggered();
 
-        let response = handle(request, &router, &context, &middlewares);
+        // A static-file hit is served from the blocking pool so the read never
+        // stalls this shard; a miss (no root configured, non-GET, a route claims
+        // the path, or no such file) falls through to the router and middleware.
+        let response = match try_static(static_files.as_deref(), &router, &request).await {
+            Some(file_response) => file_response,
+            None => handle(request, &router, &context, &middlewares),
+        };
         let connection = if persist { Connection::KeepAlive } else { Connection::Close };
         if stream
             .write_all(&encode_response_with(&response, connection))
@@ -372,6 +407,54 @@ async fn serve_connection(
 /// its own timeout for the `connection: close` we announced.
 fn close(stream: &mut AsyncTcpStream) {
     let _ = stream.shutdown(std::net::Shutdown::Write);
+}
+
+/// Try to answer a request from the static file root.
+///
+/// Returns `Some` only for a GET the router does not claim, whose path resolves
+/// to a readable file. Everything else — no root configured, a non-GET method, a
+/// route that owns the path, a rejected path, or a missing file — is `None`, and
+/// the caller falls through to the router.
+///
+/// The file read runs on the blocking pool via [`rt_core::spawn_blocking`], so
+/// it never stalls the shard ([KEP-0000 §4]). This is the M1 slice: whole-file
+/// read into memory, GET only. Streaming (`Body::File`), HEAD, `Range`, ETag,
+/// and the symlink re-check are M2 — see the kernway-server charter.
+///
+/// [KEP-0000 §4]: https://github.com/tacpham/kernway/blob/main/docs/kep/0000-principles.md
+async fn try_static(
+    static_files: Option<&StaticFiles>,
+    router: &Router,
+    request: &Request,
+) -> Option<Response> {
+    let sf = static_files?;
+
+    if !request.method.eq_ignore_ascii_case("GET") {
+        return None;
+    }
+    // The router wins: a dynamic route for this path takes precedence over a
+    // file that happens to share it.
+    if router.find(&request.method, &request.path).is_some() {
+        return None;
+    }
+    // Reject hostile or malformed paths before any I/O. A rejection is a miss —
+    // indistinguishable from "no such file", so a 404 either way reveals nothing
+    // about what is or is not on disk.
+    let path = sf.resolve(&request.path).ok()?;
+
+    // `spawn_blocking` yields `None` if the read panicked; `std::fs::read` yields
+    // `Err` for a missing or unreadable file. Both fall through to the router.
+    let read = rt_core::spawn_blocking(move || std::fs::read(&path).map(|bytes| (bytes, path))).await;
+    let (bytes, path) = read?.ok()?;
+
+    let mut response = Response::new(StatusCode::OK)
+        .content_type(mime_for(&path))
+        .body(bytes);
+    // The extension-derived type is authoritative; stop the browser sniffing.
+    response
+        .headers
+        .insert("x-content-type-options".to_string(), "nosniff".to_string());
+    Some(response)
 }
 
 /// Run the middleware chain and the matched route.
@@ -507,7 +590,7 @@ mod tests {
         let middlewares: Arc<Vec<Arc<dyn Middleware>>> = Arc::new(Vec::new());
         ex.block_on(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_connection(stream, router, context, middlewares, keep_alive, Shutdown::new()).await;
+            serve_connection(stream, router, context, middlewares, None, keep_alive, Shutdown::new()).await;
         })
         .unwrap();
 
@@ -606,7 +689,7 @@ mod keep_alive_tests {
         let middlewares: Arc<Vec<Arc<dyn Middleware>>> = Arc::new(Vec::new());
         ex.block_on(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_connection(stream, router, context, middlewares, keep_alive, shutdown).await;
+            serve_connection(stream, router, context, middlewares, None, keep_alive, shutdown).await;
         })
         .unwrap();
 

@@ -100,22 +100,26 @@ As of 2026-07-23.
 |---|---|---|
 | Routing — exact paths | ✅ | `HashMap` lookup, O(1) regardless of route count |
 | Routing — `{param}` patterns | ✅ | Linear scan over dynamic routes only |
-| Routing — prefix mounts (`/assets/**`) | ❌ | Blocks static file serving |
+| Routing — prefix mounts (`/assets/**`) | ❌ | Static serving works without it — see below |
 | Middleware chain | ✅ | Synchronous, nested |
 | Keep-alive, pipelining | ✅ | RFC 9112 §9.3, idle timeout, request cap |
-| Graceful shutdown / drain | 🚧 | In flight — `Shutdown` handle, signal wiring |
+| Graceful shutdown / drain | ✅ | Verified under a real `SIGTERM` from `docker stop`: drained and exited in 0.18s (M1) |
 | Panic isolation | ✅ | `catch_unwind` per request → 500, core survives |
-| **Async handlers** | ❌ | Handlers are `Fn(...) -> Response`, blocking |
-| **Response body streaming** | ❌ | `body: Vec<u8>` — whole file in memory |
-| **Static file serving** | ❌ | Nothing exists |
-| **View / template pipeline** | ❌ | `TemplateEngine` trait exists but is unusable — see below |
-| **htmx support** | ❌ | Nothing exists |
+| **Static file serving** | 🚧 M1 | GET only, whole-file read on the blocking pool via `.static_files(root)`. Traversal/dotfile rejected. HEAD, Range, ETag, streaming are M2. |
+| **Async handlers** | ❌ | Handlers are `Fn(...) -> Response`, blocking. Static files sidestep this (the read is on the blocking pool, not in a handler). |
+| **Response body streaming** | ❌ | `body: Vec<u8>` — whole file in memory. M2. |
+| **View / template pipeline** | ❌ | Deliberately out of scope — it lives in a renderer crate, not here |
+| **htmx support** | ❌ | Its own crate, not started |
 
-**Today**: it serves handler-generated responses over a sharded async transport,
-correctly and with panic isolation.
+**Today**: it serves handler responses and static files over a sharded async
+transport, with panic isolation, and shuts down gracefully in a container
+([the M1 slice](../MILESTONES.md#m1--walking-skeleton-it-runs-in-docker--2026-07-24) —
+`examples/web-docker`).
 
-**Not yet**: anything involving a file or a template. A reader coming from Spring
-Boot will assume `static/` and a view resolver exist. They do not.
+**Not yet**: templates, HEAD/Range/conditional static requests, and streaming
+large files. A reader from Spring Boot will assume a full view resolver exists;
+it does not, and by the [scope decision](#scope--decided-2026-07-23) it never
+will here — that belongs to a renderer crate.
 
 ## Standards
 
@@ -128,7 +132,7 @@ Boot will assume `static/` and a view resolver exist. They do not.
 | RFC 9110 §14 | Range requests — `206`, `Content-Range` | ❌ not started — needed for static |
 | RFC 9111 | Caching — `Cache-Control`, `immutable` | ❌ not started — needed for static |
 | RFC 6265 | Cookies | ❌ not started |
-| IANA media types | `Content-Type` by extension | ❌ not started |
+| IANA media types | `Content-Type` by extension | partial — curated table in `kernway-static::mime_for`, ~18 types |
 
 Rule for this module: an RFC section listed as implemented has a test named after
 it. `keep_alive_tests` in `app.rs` is the existing model to follow.
@@ -463,7 +467,7 @@ crates are simply the first users of the same handover:
 | Crate | Provides | Status |
 |---|---|---|
 | `kernway-web` | `Json<T>`, `Html<T>` — `IntoResponse` impls | ✅ exists |
-| `kernway-static` | static files, `Body::File` | ❌ planned |
+| `kernway-static` | path resolution + MIME (no I/O); read wired here | ✅ M1 |
 | `kernway-htmx` | `Htmx` extractor + `HX-*` response builder | ❌ planned |
 | `kernleaf` | a template engine | ❌ planned |
 | *anyone's crate* | whatever they want | — |
@@ -479,11 +483,11 @@ that a third-party crate cannot also use, that is a design bug in the hook.
 | Slowloris — connection held open, nothing sent | idle timeout covers first byte and mid-request stall | ✅ |
 | Unbounded connection hold | `max_requests` per connection | ✅ |
 | Unbounded request head/body | `MAX_HEAD_BYTES`, `MAX_BODY_BYTES` in `kernway-http` | 🚧 |
-| **Path traversal** — `../`, `%2e%2e%2f`, `..\`, NUL | canonicalize, then verify the prefix. Not string replacement. | ❌ |
-| **Symlink escape** from the static root | resolve and re-check the prefix | ❌ |
-| **Dotfile exposure** — `.env`, `.git/` | deny by default | ❌ |
-| **Directory listing** | off by default | ❌ |
-| **MIME sniffing** | `Content-Type` from extension only, plus `X-Content-Type-Options: nosniff` | ❌ |
+| **Path traversal** — `../`, `%2e%2e%2f`, `..\`, NUL | percent-decode first, then reject `..`/control/backslash segments lexically, before any I/O | ✅ `kernway-static` unit tests + M1 live `curl --path-as-is` |
+| **Dotfile exposure** — `.env`, `.git/` | any segment starting `.` denied as a class | ✅ tested |
+| **MIME sniffing** | `Content-Type` from extension only, plus `X-Content-Type-Options: nosniff` | ✅ tested (M1 live: header present) |
+| **Directory listing** | no listing exists — a directory request serves its index or 404s | ✅ by construction |
+| **Symlink escape** from the static root | a file inside the root linking outside is *not* caught by lexical checks; needs canonicalize-and-recheck at open time | ❌ **M2 — do not serve untrusted symlinked roots until then** |
 | **Range amplification** DoS | cap the number of ranges per request | ❌ |
 | **XSS via template** | auto-escape by default; raw output is a differently-named syntax | ❌ |
 | **XSS via context confusion** | context-aware escaping — HTML body, attribute, URL, and JS need different rules. `<a href="${url}">` with `javascript:` is still XSS after HTML escaping. | ❌ |

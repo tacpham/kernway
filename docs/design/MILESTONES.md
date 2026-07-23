@@ -53,46 +53,74 @@ code is written" — something that either happens or does not.
 
 ---
 
-## M1 — Walking skeleton: it runs in Docker
+## M1 — Walking skeleton: it runs in Docker ✅ (2026-07-24)
 
-**Goal**: one example application, one dependency line, one Docker image, and it
-answers a request and shuts down cleanly. **No static files, no templates, no
-htmx.** One JSON route and one hardcoded HTML string.
+**Goal**: one example application, one Docker image, and it answers a request and
+shuts down cleanly.
 
-This is deliberately almost nothing. Its whole purpose is to make the front door
-real and to find out what breaks in a container.
+Done, and it pulled in a little more than the original plan: static file serving
+was small enough to include, so `examples/web-docker` serves a real `index.html`
+from `public/` rather than a hardcoded string. That is M2 work brought forward
+because the slice was cheap — the walking skeleton finding its own next step.
 
-**Forces us to build**:
+**What it forced us to build** — and did:
 
-- `kernway` meta-crate depends on and re-exports `kernway-server` + `kernway-web`
-  — today `KernwayApp` is **not reachable** through `kernway`
-- `examples/web-docker/` using `kernway = { path = "...", features = [] }` and
-  nothing else
-- A real `Dockerfile` (multi-stage, cached dependency layer, distroless runtime)
-- `PORT` from the environment — Cloud Run and Heroku assign it
-- `/health` (liveness) and `/ready` (readiness) — different semantics, k8s needs
-  both
-- `SIGTERM` → drain (in flight already)
+- `crates/kernway-static` — path resolution + MIME, zero dependencies, 21 tests
+- `.static_files(root)` on the builder; the read runs on the blocking pool via
+  `spawn_blocking`, so it never stalls a shard
+- `examples/web-docker/` — static site + JSON route + health checks
+- A multi-stage `Dockerfile` on a distroless runtime
+- `PORT` from the environment; bind `0.0.0.0`
+- `/health` (liveness) and `/ready` (readiness) as distinct endpoints
 
-**Gate**:
+**Gate — passed, from a clean build:**
 
-```bash
-docker build -t kernway-skeleton .
-docker run -d -p 8080:8080 kernway-skeleton
-curl -f localhost:8080/health          # 200
-curl -f localhost:8080/api/ping        # 200, JSON
-time docker stop kernway-skeleton      # exits cleanly, well under 10s
-docker images kernway-skeleton         # size recorded, not guessed
+```
+docker build -f examples/web-docker/Dockerfile -t kernway-web-docker .
+docker run -d -p 8080:8080 kernway-web-docker
+
+GET /                      200  text/html   1222 B   (public/index.html)
+GET /style.css             200  text/css             (+ x-content-type-options: nosniff)
+GET /api/ping              200  {"message":"pong"}   (router wins over static)
+GET /health                200
+GET /ready                 200
+GET /../../etc/passwd      404  (raw, curl --path-as-is — server rejects, not curl)
+GET /.env                  404
+docker stop                exited in 0.18s
+image size                 34.9 MB
 ```
 
-**What it will reveal** — these are open questions, not predictions:
+**What it revealed** — the open questions, answered:
 
-- Is the meta-crate actually usable as a single dependency? Nothing has ever
-  tested it.
-- Does graceful shutdown work when the signal comes from Docker rather than a
-  test harness?
-- What does the image actually weigh, and what is the cold start? Both are
-  currently claims.
+- **Does graceful shutdown work with a real Docker `SIGTERM`?** Yes — 0.18s to
+  drain and exit, not the 10s-then-`SIGKILL` of an unhandled signal. This moved
+  the charter's "graceful shutdown" row from 🚧 to ✅.
+- **Image weight?** 34.9 MB on distroless/cc — measured, no longer a guess.
+- **Is the meta-crate usable as one dependency?** *Still not tested* — the
+  example depends on the crates by path, because `kernway` does not re-export
+  `KernwayApp` yet. That is the honest finding: the front door is still ajar, and
+  making it a single `kernway = { features = [...] }` line is the next task, now
+  scoped as [M1a](#m1a--close-the-front-door).
+
+**Deferred out of M1**, now explicit: cold-start time and idle RSS were not
+measured (they belong to M6's real load test), and HEAD returns 404 for static
+paths (GET-only slice; HEAD/Range are M2).
+
+---
+
+## M1a — Close the front door
+
+**Goal**: `examples/web-docker` depends on `kernway` alone, not on six crates by
+path. The meta-crate re-exports `KernwayApp`, `Response`, and the prelude; the
+example proves it.
+
+This is the meta-crate charter's Phase 1, promoted to a milestone because M1
+showed the single-dependency story is still untested — and an untested front door
+fails for the first user, not for us.
+
+**Gate**: `web-docker/Cargo.toml` lists `kernway` and `serde_json` only, the
+image still passes the M1 gate, and `grep -c 'path =' examples/web-docker/Cargo.toml`
+is 0.
 
 ---
 

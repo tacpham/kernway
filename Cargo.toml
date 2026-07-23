@@ -8,6 +8,7 @@ members = [
     "crates/kernway-http",
     "crates/kernway-web",
     "crates/kernway-server",
+    "crates/kernway-static",
     "crates/kernway-orm-core",
     "crates/kernway-orm-macro",
     "crates/kernway-orm-memory",
@@ -29,6 +30,7 @@ members = [
     "examples/hello-openapi",
     "examples/todo-app",
     "examples/todo-sqlite",
+    "examples/web-docker",
 ]
 resolver = "2"
 
@@ -87,6 +89,7 @@ kernway-core         = { path = "crates/kernway-core" }
 kernway-http         = { path = "crates/kernway-http" }
 kernway-web          = { path = "crates/kernway-web" }
 kernway-server       = { path = "crates/kernway-server" }
+kernway-static       = { path = "crates/kernway-static" }
 kernway-orm-core     = { path = "crates/kernway-orm-core" }
 kernway-orm-macro    = { path = "crates/kernway-orm-macro" }
 kernway-orm-memory   = { path = "crates/kernway-orm-memory" }
