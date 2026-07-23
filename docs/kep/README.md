@@ -46,7 +46,7 @@ implementation in the issue tracker, not by editing the status.
 
 ## Process
 
-1. Copy `0000-template.md` to `NNNN-short-kebab-title.md`, taking the next free
+1. Copy `TEMPLATE.md` to `NNNN-short-kebab-title.md`, taking the next free
    number. Fill it in — including the sections that argue against you.
 2. Open a PR. The PR is the discussion; keep amending the document as the
    argument moves, so the file ends up reflecting the conclusion rather than the
@@ -73,19 +73,26 @@ to keep.
 
 | # | Title | Status |
 |---|---|---|
-| [0001](0001-thread-per-core-runtime.md) | Thread-per-core runtime instead of work-stealing | Accepted |
-| [0002](0002-spec-crates-carry-no-implementation.md) | Spec crates carry no implementation dependency | Accepted |
-| [0003](0003-compile-time-bean-override.md) | Bean override resolved at compile time | Accepted |
-| [0004](0004-no-lazy-loading.md) | The ORM has no lazy loading | Accepted |
+| [0000](0000-principles.md) | Founding principles — write it ourselves, fast, solid, stable | Accepted |
+| [0001](0001-respect-rust.md) | Respect Rust — inspiration is not translation | Accepted |
 
-## A note on the first four
+## The first two are different from the rest
 
-KEP-0001 through 0004 are **backfilled**. The decisions were made and shipped
-before this process existed; the documents were written afterwards from
-`ARCHITECTURE.md`, `FULL_PLAN.md`, and the code.
+KEP-0000 and KEP-0001 are not decisions about a feature. They are the standing
+rules every later decision is checked against — what a new core is written to,
+and how to behave when a Spring shape meets a Rust constraint. Read them before
+writing a KEP; most proposals are resolved by one of them.
 
-They are therefore tidier than a real proposal would have been — nobody argued
-against them in a PR thread, and the alternatives are reconstructed rather than
-recorded live. Treat them as accurate about *what* was decided and honest, but
-necessarily second-hand, about *why*. KEP-0005 onward should be written before
-the code, not after.
+Numbering starts at 0000 for that reason: it precedes everything.
+
+An earlier set of KEPs (0001–0004) recorded four architectural decisions
+*retroactively* — thread-per-core, spec crates, compile-time bean override, no
+lazy loading. They were removed. Written after the code shipped, they documented
+conclusions rather than arguments, and several of their premises changed during
+later design work. What survived is in KEP-0000 and KEP-0001 as principles, and
+in the module charters under `../design/modules/` as decisions recorded where
+they are acted on.
+
+From KEP-0002 onward, a KEP is written **before** the code. That is the only way
+the format is worth its cost — a document that records what you already did
+cannot change what you do.
