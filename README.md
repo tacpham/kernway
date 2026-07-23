@@ -179,6 +179,15 @@ kernway (meta-crate)
 └── kernway-multipart     — Multipart/form-data parser (RFC 7578)
 ```
 
+**API docs**: `cargo doc --workspace --no-deps --open`. Every crate has a
+`//!` header covering what it does, the flow through it, and why it is shaped
+that way — start with `di-core`, `kernway-core`, or `kernway-orm-core`.
+
+**Why it is shaped that way**: the decisions that are expensive to reverse are
+written down as [KEPs](docs/kep/) — Kernway Enhancement Proposals, modelled on
+Rust's RFC process. Each one records what was rejected and what the choice costs,
+not only what was chosen.
+
 ---
 
 ## Examples
