@@ -54,18 +54,37 @@ pub enum Rejected {
 pub struct StaticFiles {
     root: PathBuf,
     index: String,
+    precompressed: bool,
 }
 
 impl StaticFiles {
     /// Serve files from `root`, using `index.html` for directory requests.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into(), index: "index.html".to_string() }
+        Self { root: root.into(), index: "index.html".to_string(), precompressed: false }
     }
 
     /// Use a different index file name than `index.html`.
     pub fn index(mut self, name: impl Into<String>) -> Self {
         self.index = name.into();
         self
+    }
+
+    /// Serve a precompressed `.br`/`.gz` sitting next to a file when the client
+    /// accepts it and the file is a [compressible][is_compressible] type.
+    ///
+    /// Off by default, and deliberately so: with it on, every request for a
+    /// compressible asset does one or two extra `stat`s probing for a variant,
+    /// which is wasted work unless a build step actually produced them. Turn it
+    /// on once your deploy ships `app.js.br` beside `app.js`. When on, responses
+    /// carry `Vary: Accept-Encoding` so a shared cache keys on the encoding.
+    pub fn precompressed(mut self) -> Self {
+        self.precompressed = true;
+        self
+    }
+
+    /// Whether precompressed variants are served — see [`precompressed`](Self::precompressed).
+    pub fn serves_precompressed(&self) -> bool {
+        self.precompressed
     }
 
     /// The configured root directory.
@@ -162,6 +181,140 @@ pub fn mime_for(path: &Path) -> &'static str {
         Some("pdf") => "application/pdf",
         _ => "application/octet-stream",
     }
+}
+
+/// A content encoding Kernway can serve from a **precompressed file on disk**.
+///
+/// The server never compresses on the request path (that would spend CPU per
+/// request, [KEP-0000 §4](../../kep/0000-principles.md)); it serves a `.br`/`.gz`
+/// that a build step produced. So this enum names only the two encodings worth
+/// shipping that way, in the order the server prefers them: Brotli first (it
+/// compresses text ~15–20% smaller than gzip), gzip as the fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Encoding {
+    /// Brotli — `Content-Encoding: br`, variant file `*.br`.
+    Brotli,
+    /// gzip — `Content-Encoding: gzip`, variant file `*.gz`.
+    Gzip,
+}
+
+impl Encoding {
+    /// Server preference order, best first. Brotli beats gzip on text.
+    pub const PREFERENCE: [Encoding; 2] = [Encoding::Brotli, Encoding::Gzip];
+
+    /// The `Content-Encoding` token to send.
+    pub fn token(self) -> &'static str {
+        match self {
+            Encoding::Brotli => "br",
+            Encoding::Gzip => "gzip",
+        }
+    }
+
+    /// The filename suffix of the precompressed variant (`.br` / `.gz`).
+    pub fn extension(self) -> &'static str {
+        match self {
+            Encoding::Brotli => ".br",
+            Encoding::Gzip => ".gz",
+        }
+    }
+}
+
+/// The encodings a client accepts, in **server preference order** (Brotli, then
+/// gzip) — the order to try variant files in.
+///
+/// Parses `Accept-Encoding` by RFC 9110 §12.5.3: a `;q=0` explicitly refuses an
+/// encoding, a `*` sets the default for anything unlisted, and an exact token
+/// beats the wildcard. An empty result means "no acceptable precompressed
+/// encoding — send the file as-is."
+///
+/// ```
+/// use kernway_static::{accepted_encodings, Encoding};
+///
+/// assert_eq!(accepted_encodings("br, gzip"), vec![Encoding::Brotli, Encoding::Gzip]);
+/// assert_eq!(accepted_encodings("gzip"), vec![Encoding::Gzip]);
+/// assert_eq!(accepted_encodings("gzip;q=0"), vec![]);       // refused
+/// assert_eq!(accepted_encodings("identity"), vec![]);       // no compressed form wanted
+/// ```
+pub fn accepted_encodings(accept_encoding: &str) -> Vec<Encoding> {
+    Encoding::PREFERENCE
+        .into_iter()
+        .filter(|e| is_accepted(accept_encoding, e.token()))
+        .collect()
+}
+
+/// Whether `token` (e.g. `"br"`) has a positive q-value in the header.
+fn is_accepted(header: &str, token: &str) -> bool {
+    let mut exact_q: Option<f32> = None;
+    let mut wildcard_q: Option<f32> = None;
+    for part in header.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (name, q) = split_qvalue(part);
+        if name.eq_ignore_ascii_case(token) {
+            exact_q = Some(q);
+        } else if name == "*" {
+            wildcard_q = Some(q);
+        }
+    }
+    // An exact match wins over the wildcard; unlisted with no `*` is not accepted.
+    exact_q.or(wildcard_q).unwrap_or(0.0) > 0.0
+}
+
+/// Split `"gzip;q=0.8"` into (`"gzip"`, `0.8`). A missing or malformed `q`
+/// defaults to `1.0`, per the spec's "quality 1 unless stated".
+fn split_qvalue(part: &str) -> (&str, f32) {
+    match part.split_once(';') {
+        None => (part, 1.0),
+        Some((name, params)) => {
+            let q = params
+                .split(';')
+                .find_map(|p| {
+                    let p = p.trim();
+                    let v = p.strip_prefix("q=").or_else(|| p.strip_prefix("Q="))?;
+                    v.trim().parse::<f32>().ok()
+                })
+                .unwrap_or(1.0);
+            (name.trim(), q)
+        }
+    }
+}
+
+/// Whether a MIME type is worth serving precompressed.
+///
+/// The answer to "what can be precompressed": the **text tier**. Text markup and
+/// code shrink 60–90% under gzip/brotli, so a `.br`/`.gz` is a large win. Binary
+/// media (`image/png`, `image/jpeg`, `image/webp`, `font/woff2`, …) is *already*
+/// compressed — a second pass gains nothing and often grows the file — so the
+/// server does not even look for a variant of it, saving a `stat` per request.
+///
+/// ```
+/// use kernway_static::is_compressible;
+///
+/// assert!(is_compressible("text/html; charset=utf-8"));
+/// assert!(is_compressible("application/json"));
+/// assert!(is_compressible("image/svg+xml"));
+/// assert!(!is_compressible("image/png"));
+/// assert!(!is_compressible("font/woff2"));
+/// ```
+pub fn is_compressible(mime: &str) -> bool {
+    // Only the type/subtype matters; drop a `; charset=…` parameter.
+    let base = mime.split(';').next().unwrap_or(mime).trim();
+    if base.starts_with("text/") {
+        return true;
+    }
+    matches!(
+        base,
+        "application/json"
+            | "application/xml"
+            | "application/javascript"
+            | "application/manifest+json"
+            | "application/wasm"
+            | "image/svg+xml"
+            | "font/ttf"
+            | "font/otf"
+    )
 }
 
 /// Build an `ETag` for a file from its length and modification time.
@@ -409,5 +562,87 @@ mod tests {
     fn if_none_match_ignores_weak_prefix() {
         let e = etag(100, 5);
         assert!(etag_matches(&format!("W/{e}"), &e));
+    }
+
+    // --- content negotiation ----------------------------------------------
+
+    #[test]
+    fn brotli_is_preferred_over_gzip_regardless_of_client_order() {
+        // The server's preference wins, not the client's listing order.
+        assert_eq!(accepted_encodings("gzip, br"), vec![Encoding::Brotli, Encoding::Gzip]);
+        assert_eq!(accepted_encodings("br, gzip"), vec![Encoding::Brotli, Encoding::Gzip]);
+    }
+
+    #[test]
+    fn only_the_accepted_encodings_are_returned() {
+        assert_eq!(accepted_encodings("gzip"), vec![Encoding::Gzip]);
+        assert_eq!(accepted_encodings("br"), vec![Encoding::Brotli]);
+        assert_eq!(accepted_encodings("deflate"), vec![]);
+        assert_eq!(accepted_encodings(""), vec![]);
+    }
+
+    #[test]
+    fn a_q_zero_refuses_an_encoding() {
+        // `gzip;q=0` means "do not send gzip", even though the token is present.
+        assert_eq!(accepted_encodings("br, gzip;q=0"), vec![Encoding::Brotli]);
+        assert_eq!(accepted_encodings("gzip;q=0"), vec![]);
+    }
+
+    #[test]
+    fn a_wildcard_enables_unlisted_encodings() {
+        assert_eq!(accepted_encodings("*"), vec![Encoding::Brotli, Encoding::Gzip]);
+        // …but an explicit token overrides the wildcard.
+        assert_eq!(accepted_encodings("*, br;q=0"), vec![Encoding::Gzip]);
+        assert_eq!(accepted_encodings("*;q=0, gzip"), vec![Encoding::Gzip]);
+    }
+
+    #[test]
+    fn negotiation_tolerates_whitespace_and_case() {
+        assert_eq!(
+            accepted_encodings("  BR ; q=0.9 ,  GZIP "),
+            vec![Encoding::Brotli, Encoding::Gzip]
+        );
+    }
+
+    #[test]
+    fn encoding_tokens_and_extensions() {
+        assert_eq!(Encoding::Brotli.token(), "br");
+        assert_eq!(Encoding::Brotli.extension(), ".br");
+        assert_eq!(Encoding::Gzip.token(), "gzip");
+        assert_eq!(Encoding::Gzip.extension(), ".gz");
+    }
+
+    // --- compressibility ---------------------------------------------------
+
+    #[test]
+    fn text_tier_is_compressible() {
+        for m in [
+            "text/html; charset=utf-8",
+            "text/css; charset=utf-8",
+            "text/javascript; charset=utf-8",
+            "application/json; charset=utf-8",
+            "application/xml; charset=utf-8",
+            "application/wasm",
+            "image/svg+xml",
+            "font/ttf",
+        ] {
+            assert!(is_compressible(m), "{m} should be compressible");
+        }
+    }
+
+    #[test]
+    fn already_compressed_media_is_not() {
+        for m in [
+            "image/png",
+            "image/jpeg",
+            "image/webp",
+            "image/gif",
+            "font/woff2",
+            "font/woff",
+            "application/pdf",
+            "application/octet-stream",
+        ] {
+            assert!(!is_compressible(m), "{m} should not be compressible");
+        }
     }
 }
