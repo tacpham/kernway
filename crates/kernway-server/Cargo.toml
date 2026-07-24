@@ -32,6 +32,13 @@ harness = false
 name    = "vs_matchit"
 harness = false
 
+# A large-file download load test that sweeps the streaming chunk size, to set
+# FILE_CHUNK from a measurement rather than a guess (KEP-0002). Not a criterion
+# micro-bench — its own main; run with `cargo bench -p kernway-server --bench stream_chunk`.
+[[bench]]
+name    = "stream_chunk"
+harness = false
+
 [lints]
 workspace = true
 

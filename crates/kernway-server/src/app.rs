@@ -66,6 +66,7 @@ pub struct AppBuilder {
     middlewares:  Vec<Arc<dyn Middleware>>,
     static_files: Option<Arc<StaticFiles>>,
     precompressed: bool,
+    file_chunk:   usize,
     shards:       Option<usize>,
     keep_alive:   KeepAliveConfig,
     drain:        Duration,
@@ -82,6 +83,7 @@ impl AppBuilder {
             middlewares: Vec::new(),
             static_files: None,
             precompressed: false,
+            file_chunk: FILE_CHUNK,
             shards: None,
             keep_alive: KeepAliveConfig::default(),
             drain: rt_net::DEFAULT_DRAIN_TIMEOUT,
@@ -172,6 +174,18 @@ impl AppBuilder {
         self
     }
 
+    /// Chunk size for streaming a file body, in bytes (default 64 KiB).
+    ///
+    /// Each chunk is one `read` on the blocking pool and one socket `write`, so
+    /// this trades syscall count against per-connection memory. The default was
+    /// measured against a large-file download — see
+    /// [BENCHMARKS.md](https://github.com/tacpham/kernway/blob/main/docs/design/BENCHMARKS.md);
+    /// override it only if a profile of your workload says to.
+    pub fn file_chunk_size(mut self, bytes: usize) -> Self {
+        self.file_chunk = bytes.max(1);
+        self
+    }
+
     /// Register a GET route.
     pub fn get(mut self, pattern: &str, handler: impl Fn(&Request, &AppContext) -> Response + Send + Sync + 'static) -> Self {
         self.router.add("GET", pattern, Arc::new(handler));
@@ -220,6 +234,7 @@ impl AppBuilder {
             context: Arc::new(self.context),
             middlewares: Arc::new(self.middlewares),
             static_files,
+            file_chunk: self.file_chunk,
         }
     }
 }
@@ -241,6 +256,7 @@ pub struct KernwayApp {
     context:      Arc<AppContext>,
     middlewares:  Arc<Vec<Arc<dyn Middleware>>>,
     static_files: Option<Arc<StaticFiles>>,
+    file_chunk:   usize,
 }
 
 impl KernwayApp {
@@ -309,6 +325,7 @@ impl KernwayApp {
         let middlewares = Arc::clone(&self.middlewares);
         let static_files = self.static_files.clone();
         let keep_alive = self.keep_alive;
+        let file_chunk = self.file_chunk;
         let shutdown = self.shutdown.clone();
 
         let result = rt_net::run_shards_with_shutdown(config, self.shutdown, move |stream| {
@@ -318,7 +335,7 @@ impl KernwayApp {
             let static_files = static_files.clone();
             let shutdown = shutdown.clone();
             async move {
-                serve_connection(stream, router, context, middlewares, static_files, keep_alive, shutdown).await;
+                serve_connection(stream, router, context, middlewares, static_files, keep_alive, file_chunk, shutdown).await;
             }
         });
 
@@ -345,6 +362,7 @@ async fn serve_connection(
     middlewares: Arc<Vec<Arc<dyn Middleware>>>,
     static_files: Option<Arc<StaticFiles>>,
     keep_alive: KeepAliveConfig,
+    file_chunk: usize,
     shutdown: Shutdown,
 ) {
     let mut buf: Vec<u8> = Vec::with_capacity(READ_CHUNK);
@@ -421,7 +439,7 @@ async fn serve_connection(
             None => handle(request, &router, &context, &middlewares),
         };
         let connection = if persist { Connection::KeepAlive } else { Connection::Close };
-        if write_response(&mut stream, &response, connection, is_head).await.is_err() {
+        if write_response(&mut stream, &response, connection, is_head, file_chunk).await.is_err() {
             return; // peer vanished mid-write; nothing to half-close
         }
 
@@ -441,9 +459,16 @@ fn close(stream: &mut AsyncTcpStream) {
     let _ = stream.shutdown(std::net::Shutdown::Write);
 }
 
-/// Chunk size for streaming a file body. Trades syscalls against memory; 64 KiB
-/// is a starting point, to be measured against a large-file load test (KEP-0002).
-const FILE_CHUNK: usize = 64 * 1024;
+/// Default chunk size for streaming a file body, overridable with
+/// [`AppBuilder::file_chunk_size`].
+///
+/// Measured, not guessed (see BENCHMARKS.md, `stream_chunk`): download throughput
+/// climbs steeply with chunk size — the old 64 KiB sat at ~41% of peak, because
+/// each chunk is a `spawn_blocking` hop whose overhead dominates when the chunk is
+/// small — and peaks near 4 MiB before cache pressure drops it. 256 KiB is the
+/// default: ~1.75× the throughput of 64 KiB while keeping per-connection memory
+/// bounded (it multiplies by concurrency). A download-heavy server can raise it.
+const FILE_CHUNK: usize = 256 * 1024;
 
 /// Write a response. An in-memory body goes out in one buffer (head and bytes
 /// coalesced); a [`Body::File`] streams — the head first, then the file in
@@ -453,6 +478,7 @@ async fn write_response(
     response: &Response,
     connection: Connection,
     is_head: bool,
+    file_chunk: usize,
 ) -> std::io::Result<()> {
     // A HEAD gets exactly the headers a GET would — including the Content-Length
     // the body *would* have — and no body. `encode_head` takes the length
@@ -465,7 +491,7 @@ async fn write_response(
         Body::File { path, len, range } => {
             let head = encode_head(response, connection, response.body.len());
             stream.write_all(&head).await?;
-            stream_file(stream, path.clone(), *range, *len).await
+            stream_file(stream, path.clone(), *range, *len, file_chunk).await
         }
         Body::Empty | Body::Bytes(_) => {
             stream.write_all(&encode_response_with(response, connection)).await
@@ -485,6 +511,7 @@ async fn stream_file(
     path: std::path::PathBuf,
     range: Option<(u64, u64)>,
     len: u64,
+    file_chunk: usize,
 ) -> std::io::Result<()> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -507,7 +534,7 @@ async fn stream_file(
 
     let mut remaining = total;
     while remaining > 0 {
-        let want = remaining.min(FILE_CHUNK as u64) as usize;
+        let want = remaining.min(file_chunk as u64) as usize;
         // Read one chunk on the blocking pool; move the file in and back out.
         let read = rt_core::spawn_blocking(move || {
             let mut buf = vec![0u8; want];
@@ -985,7 +1012,7 @@ mod tests {
         let middlewares: Arc<Vec<Arc<dyn Middleware>>> = Arc::new(Vec::new());
         ex.block_on(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_connection(stream, router, context, middlewares, None, keep_alive, Shutdown::new()).await;
+            serve_connection(stream, router, context, middlewares, None, keep_alive, FILE_CHUNK, Shutdown::new()).await;
         })
         .unwrap();
 
@@ -1084,7 +1111,7 @@ mod keep_alive_tests {
         let middlewares: Arc<Vec<Arc<dyn Middleware>>> = Arc::new(Vec::new());
         ex.block_on(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_connection(stream, router, context, middlewares, None, keep_alive, shutdown).await;
+            serve_connection(stream, router, context, middlewares, None, keep_alive, FILE_CHUNK, shutdown).await;
         })
         .unwrap();
 
@@ -1528,7 +1555,7 @@ mod static_file_tests {
         let keep_alive = KeepAliveConfig { enabled: false, ..Default::default() };
         ex.block_on(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_connection(stream, router, context, middlewares, static_files, keep_alive, Shutdown::new()).await;
+            serve_connection(stream, router, context, middlewares, static_files, keep_alive, FILE_CHUNK, Shutdown::new()).await;
         })
         .unwrap();
 
@@ -1562,16 +1589,16 @@ mod static_file_tests {
 
     #[test]
     fn streams_a_large_file_in_chunks_over_http() {
-        // Larger than FILE_CHUNK (64 KiB), so the streaming loop runs several
+        // Larger than FILE_CHUNK (256 KiB), so the streaming loop runs several
         // read-a-chunk/write-a-chunk iterations — the path a real download takes,
         // and the reason Body::File exists (never the whole file in memory).
         let root = tmpdir("large");
-        let content = "x".repeat(200_000); // ~3.1 chunks
+        let content = "x".repeat(700_000); // ~2.7 chunks at the 256 KiB default
         fs::write(root.join("big.txt"), &content).unwrap();
 
         let got = serve_static(root.clone(), "GET /big.txt HTTP/1.1\r\nHost: x\r\n\r\n".to_string());
         assert!(got.starts_with("HTTP/1.1 200 OK\r\n"), "got head");
-        assert!(got.contains("content-length: 200000"), "content-length must be the file size");
+        assert!(got.contains("content-length: 700000"), "content-length must be the file size");
         assert!(
             got.ends_with(&content),
             "the whole file must arrive intact across chunk boundaries (got {} body bytes)",
