@@ -1,7 +1,7 @@
 //! HTTP Response abstraction.
 
 use crate::error::StatusCode;
-use std::collections::HashMap;
+use crate::fields::Headers;
 use std::path::PathBuf;
 
 /// A response body: bytes in memory, or a file the connection task streams.
@@ -55,8 +55,10 @@ impl Body {
 pub struct Response {
     /// Status line code.
     pub status:  StatusCode,
-    /// Response headers, written out verbatim.
-    pub headers: HashMap<String, String>,
+    /// Response headers. A [`Headers`] (one-buffer), not a `HashMap` — a response
+    /// sets a few short-keyed headers and the encoder iterates them once and
+    /// sizes its buffer from [`Headers::byte_len`] in O(1). See KEP-0000 §2.
+    pub headers: Headers,
     /// Response body — bytes, a file, or empty.
     pub body:    Body,
 }
@@ -66,7 +68,7 @@ impl Response {
     pub fn new(status: StatusCode) -> Self {
         Self {
             status,
-            headers: HashMap::new(),
+            headers: Headers::new(),
             body: Body::Empty,
         }
     }
@@ -98,8 +100,8 @@ impl Response {
     }
 
     /// Set Content-Type header.
-    pub fn content_type(mut self, ct: impl Into<String>) -> Self {
-        self.headers.insert("content-type".to_owned(), ct.into());
+    pub fn content_type(mut self, ct: impl AsRef<str>) -> Self {
+        self.headers.insert("content-type", ct.as_ref());
         self
     }
 }
@@ -190,7 +192,7 @@ mod tests {
         let r = "hello".into_response();
         assert_eq!(r.status, StatusCode::OK);
         assert_eq!(r.body_bytes(), b"hello");
-        assert!(r.headers["content-type"].contains("text/plain"));
+        assert!(r.headers.get("content-type").unwrap().contains("text/plain"));
     }
 
     #[test]

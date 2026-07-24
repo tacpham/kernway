@@ -173,8 +173,8 @@ exists.
 | `parse/browser_get_8_headers` | 705 ns |
 | `parse/json_post_with_body` | 331 ns |
 | `parse/incomplete_head` | 133 ns |
-| `encode/small_json_close` | 47 ns |
-| `encode/small_json_keep_alive` | 46 ns |
+| `encode/small_json_close` | 60 ns |
+| `encode/eight_headers` | 525 ns |
 
 Parsing a realistic browser request with eight headers takes ~705 ns; encoding a
 small JSON response ~47 ns. `incomplete_head` is the partial-read path — the
@@ -184,12 +184,34 @@ lets a connection accumulate a request across several reads.
 Encoding briefly regressed to 75 ns when `Body` split the head from the body
 (KEP-0002) — the head sized its own buffer, then the body was appended, risking a
 realloc between them. Fixed by sizing one buffer for head+body up front
-(`encode_head_into`), back to ~47 ns. A separate experiment — moving
-`Response.headers` from `HashMap` to the one-buffer `Headers` — was measured here
-and **reverted**: a micro-benchmark liked it, the encode path did not (75 → 103 ns),
-because the encoder iterates the headers twice. That is the "measure in context"
-lesson in [KEP-0000 §2](../kep/0000-principles.md#2-fast--measured-or-it-is-not-a-claim),
-paid in full.
+(`encode_head_into`), back to ~47 ns.
+
+### Headers: HashMap vs the one-buffer structure — measured both ways
+
+`Response.headers` was a `HashMap<String, String>`; it is now the one-buffer
+`Headers`. The first attempt at this **regressed** (75 → 103 ns) because the
+encoder walked the headers twice — once to size the buffer, once to write. The
+fix is to size in O(1): `Headers::byte_len()` is the buffer length, so the head
+size is that plus a fixed per-pair overhead, no walk. With that, measured both
+structures on the same responses:
+
+| encode | HashMap | Headers (O(1) size) | winner |
+|---|---|---|---|
+| 1 header (JSON API) | 46.7 ns | 59.6 ns | HashMap by 13 ns |
+| 8 headers (static/secured page) | 885 ns | 525 ns | **Headers by 360 ns (1.7×)** |
+| `pipeline/static_get` (1–2 hdr) | 388 ns | 381 ns | tie |
+
+**Neither wins outright — the crossover is ~3–4 headers.** HashMap is faster for
+one or two (a single hash, one bucket); `Headers` is faster for many, and the
+gap there is far larger (360 ns vs 13 ns) because it sizes in O(1), allocates one
+buffer instead of two-per-pair, and writes once. Kernway serves static files
+(5 headers) and secured pages (8+), so the many-header case is the common one and
+the one that matters. `Headers` adopted.
+
+The 13 ns the JSON-API case still gives up is one extra allocation (`Headers`
+grows two `Vec`s from empty on the first insert; `HashMap` grows one). That is
+the next target — a small-buffer optimisation keeping few short headers inline,
+no heap — which would close it and make `Headers` win at both ends.
 
 ## Runtime — executor and scheduling
 

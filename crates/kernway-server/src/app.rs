@@ -518,8 +518,8 @@ impl StaticOutcome {
         match self {
             StaticOutcome::NotModified { etag } => {
                 let mut r = Response::new(StatusCode::NOT_MODIFIED);
-                r.headers.insert("etag".to_string(), etag);
-                r.headers.insert("cache-control".to_string(), "no-cache".to_string());
+                r.headers.insert("etag", &etag);
+                r.headers.insert("cache-control", &"no-cache".to_string());
                 r
             }
             StaticOutcome::File { path, len, etag, mime } => {
@@ -527,14 +527,14 @@ impl StaticOutcome {
                 // streams it in bounded chunks off the blocking pool, so a large
                 // download is never read whole into memory.
                 let mut r = Response::new(StatusCode::OK).content_type(mime).file(path, len);
-                r.headers.insert("etag".to_string(), etag);
+                r.headers.insert("etag", &etag);
                 // `no-cache` means "cache, but revalidate every time" — the browser
                 // re-asks with If-None-Match and gets a 304 when nothing changed.
-                r.headers.insert("cache-control".to_string(), "no-cache".to_string());
+                r.headers.insert("cache-control", &"no-cache".to_string());
                 // The extension-derived type is authoritative; stop the browser sniffing.
-                r.headers.insert("x-content-type-options".to_string(), "nosniff".to_string());
+                r.headers.insert("x-content-type-options", &"nosniff".to_string());
                 // Advertise range support so clients (video players, resumers) ask.
-                r.headers.insert("accept-ranges".to_string(), "bytes".to_string());
+                r.headers.insert("accept-ranges", &"bytes".to_string());
                 r
             }
         }
@@ -709,7 +709,7 @@ fn apply_range(response: &mut Response, header: &str, len: u64) {
             response.status = StatusCode::PARTIAL_CONTENT;
             response
                 .headers
-                .insert("content-range".to_string(), format!("bytes {}-{}/{}", start, end - 1, len));
+                .insert("content-range", &format!("bytes {}-{}/{}", start, end - 1, len));
             if let Body::File { range, .. } = &mut response.body {
                 *range = Some((start, end));
             }
@@ -718,7 +718,7 @@ fn apply_range(response: &mut Response, header: &str, len: u64) {
             response.status = StatusCode::RANGE_NOT_SATISFIABLE;
             response
                 .headers
-                .insert("content-range".to_string(), format!("bytes */{len}"));
+                .insert("content-range", &format!("bytes */{len}"));
             response.body = Body::Empty;
         }
     }
@@ -811,7 +811,7 @@ mod tests {
             fn name(&self) -> &'static str { "Tag" }
             fn handle(&self, req: &mut Request, next: &dyn Fn(&mut Request) -> Response) -> Response {
                 let mut resp = next(req);
-                resp.headers.insert("x-tag".into(), "seen".into());
+                resp.headers.insert("x-tag", "seen");
                 resp
             }
         }
