@@ -68,6 +68,19 @@ fn encoding(c: &mut Criterion) {
         .content_type("application/json")
         .body(br#"{"status":"UP"}"#.to_vec());
 
+    // A response with the header set a static file or a secured page carries —
+    // the "many headers" side of the structure question. Built fresh in the
+    // closure so the set cost is measured too, not just the encode.
+    let many_pairs: &[(&str, &str)] = &[
+        ("etag", "\"4c6-18c4fd34848dd5fd\""),
+        ("cache-control", "no-cache"),
+        ("x-content-type-options", "nosniff"),
+        ("accept-ranges", "bytes"),
+        ("vary", "Accept-Encoding"),
+        ("x-frame-options", "DENY"),
+        ("x-request-id", "550e8400-e29b-41d4-a716-446655440000"),
+    ];
+
     let large = Response::new(StatusCode::OK)
         .content_type("application/json")
         .body(vec![b'x'; 64 * 1024]);
@@ -78,6 +91,17 @@ fn encoding(c: &mut Criterion) {
     });
     group.bench_function("small_json_keep_alive", |b| {
         b.iter(|| black_box(encode_response_with(black_box(&small), Connection::KeepAlive)));
+    });
+    // Build a many-header response and encode it: the full response path with a
+    // realistic header count, which is where the one-buffer layout should pay.
+    group.bench_function("eight_headers", |b| {
+        b.iter(|| {
+            let mut resp = Response::new(StatusCode::OK).content_type("text/html; charset=utf-8");
+            for (k, v) in many_pairs {
+                resp.headers.insert(k, v);
+            }
+            black_box(encode_response_with(black_box(&resp), Connection::KeepAlive))
+        });
     });
 
     // Head and body share one buffer, so a large body pays a copy. This is the

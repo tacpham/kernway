@@ -150,6 +150,16 @@ impl<const CASE_INSENSITIVE: bool> Fields<CASE_INSENSITIVE> {
         self.entries.len()
     }
 
+    /// Total bytes of all names and values combined.
+    ///
+    /// Free from the one-buffer layout — it is the buffer's length, no iteration.
+    /// The encoder uses it to size its output in O(1): the head is this plus a
+    /// fixed per-pair overhead (`": "` and `\r\n`), where a `HashMap` would have
+    /// to walk every entry to learn the same thing.
+    pub fn byte_len(&self) -> usize {
+        self.buf.len()
+    }
+
     /// Whether the set is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()

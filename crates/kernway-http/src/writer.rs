@@ -67,7 +67,7 @@ fn encode_head_into(out: &mut Vec<u8>, response: &Response, connection: Connecti
     out.extend_from_slice(status_text(response.status.0).as_bytes());
     out.extend_from_slice(b"\r\n");
 
-    for (name, value) in &response.headers {
+    for (name, value) in response.headers.iter() {
         // The connection and content-length headers are the transport's call.
         if name.eq_ignore_ascii_case("connection") || name.eq_ignore_ascii_case("content-length") {
             continue;
@@ -99,17 +99,15 @@ pub fn encode_response_with(response: &Response, connection: Connection) -> Vec<
     out
 }
 
-/// Big enough for the head in one allocation, without walking the headers twice
-/// to get it exactly right. Over-estimating a few bytes is cheaper than a
-/// realloc; under-estimating only costs the growth `Vec` would have done anyway.
+/// Big enough for the head in one allocation. O(1): `Headers` is one buffer, so
+/// the total name+value bytes is [`Headers::byte_len`] without walking the
+/// entries, plus a fixed `": "` + `\r\n` per pair. This is the estimate that used
+/// to walk every header — the whole point of the one-buffer layout is not having
+/// to. Over-estimating a few bytes is cheaper than a realloc.
 fn head_estimate(response: &Response) -> usize {
     const STATUS_AND_FIXED_HEADERS: usize = 64; // status line + content-length + connection
-    let headers: usize = response
-        .headers
-        .iter()
-        .map(|(name, value)| name.len() + value.len() + 4)
-        .sum();
-    STATUS_AND_FIXED_HEADERS + headers
+    const PER_PAIR_OVERHEAD: usize = 4; // ": " + "\r\n"
+    STATUS_AND_FIXED_HEADERS + response.headers.byte_len() + response.headers.len() * PER_PAIR_OVERHEAD
 }
 
 /// Decimal digits of `n`, without the allocation `format!`/`to_string` makes.

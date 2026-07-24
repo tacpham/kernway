@@ -27,7 +27,7 @@ impl Middleware for RequestIdMiddleware {
         let id = generate_request_id();
         req.headers.insert("x-request-id", &id);
         let mut resp = next(req);
-        resp.headers.insert("x-request-id".to_string(), id);
+        resp.headers.insert("x-request-id", &id);
         resp
     }
 }
@@ -50,10 +50,7 @@ impl Middleware for LoggingMiddleware {
             resp.status.0,
             method,
             path,
-            resp.headers
-                .get("x-request-id")
-                .map(|s| s.as_str())
-                .unwrap_or("-"),
+            resp.headers.get("x-request-id").unwrap_or("-"),
             start.elapsed().as_millis()
         );
         resp
@@ -82,14 +79,14 @@ mod tests {
         let resp = middleware.handle(&mut req, &|request| {
             let mut resp = Response::new(StatusCode::OK);
             if let Some(id) = request.headers.get("x-request-id") {
-                resp.headers.insert("seen-request-id".to_string(), id.to_string());
+                resp.headers.insert("seen-request-id", &id.to_string());
             }
             resp
         });
 
         let req_id = req.headers.get("x-request-id").unwrap().to_string();
-        assert_eq!(resp.headers.get("x-request-id"), Some(&req_id));
-        assert_eq!(resp.headers.get("seen-request-id"), Some(&req_id));
+        assert_eq!(resp.headers.get("x-request-id"), Some(req_id.as_str()));
+        assert_eq!(resp.headers.get("seen-request-id"), Some(req_id.as_str()));
     }
 
     #[test]
