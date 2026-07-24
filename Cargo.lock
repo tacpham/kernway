@@ -355,6 +355,8 @@ dependencies = [
  "di-core",
  "di-macro",
  "kernway-core",
+ "kernway-server",
+ "kernway-web",
 ]
 
 [[package]]
@@ -837,11 +839,7 @@ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 name = "web-docker"
 version = "0.1.0"
 dependencies = [
- "di-core",
- "kernway-core",
- "kernway-server",
- "kernway-web",
- "serde_json",
+ "kernway",
 ]
 
 [[package]]

@@ -35,22 +35,22 @@ the one every user meets first.
 |---|---|---|
 | Re-export DI (`di-core`, `di-macro`) | ✅ | `AppContext`, `#[derive(Component)]`, `#[inject]` |
 | Re-export `kernway-core` traits | ✅ | via `prelude` |
-| Re-export `kernway-server` | ❌ | **`KernwayApp` is not reachable through `kernway`** |
-| Re-export `kernway-web` | ❌ | `Json<T>`, `Path<T>`, `Query<T>` not reachable |
-| Re-export ORM / cache / openapi / sse | ❌ | not dependencies at all |
-| `[features]` table | ❌ | **none declared** |
-| Used by any example | ❌ | every example bypasses it |
+| Re-export `kernway-server` | ✅ M1a | `KernwayApp`, `Router`, `AppBuilder` |
+| Re-export `kernway-web` | ✅ M1a | `Json`, `Path`, `Query`, `ProblemDetail` |
+| Re-export ORM / cache / openapi / sse | ❌ | not dependencies yet — become optional features later |
+| `[features]` table | ❌ | none declared — the feature graph is a later milestone |
+| Used by an example | ✅ M1a | `examples/web-docker` depends on `kernway` alone |
+| Doctest builds a server through `kernway` | ✅ M1a | the front door cannot silently close again |
 
-**Today**: `kernway` gives you dependency injection and some traits. It cannot
-build a web application — `KernwayApp::builder()` is not reachable through it.
+**Today**: `kernway` alone builds and runs a web server — DI, routing, HTTP,
+JSON, and static files. `examples/web-docker` proves it, and a crate-level
+doctest keeps it true.
 
-**Not yet**: everything the README's Quick Start implies. `todo-app` declares
-**13 crates by path**; `hello-web` declares 7. The single-dependency story is
-aspirational, and because no example uses the meta-crate, nothing tests whether
-it works.
-
-That last point is the real risk: an untested front door fails for the first
-user rather than for us.
+**Not yet**: the feature graph. The web baseline is pulled unconditionally;
+`orm`/`cache`/`openapi`/`sse`/`htmx`/`kernleaf` are not yet Cargo features
+(some of those crates do not exist). And the older examples still declare their
+crates by path — `todo-app` names 13 — so converting them is the remaining part
+of "the front door is real for everyone", tracked as the meta-crate's Phase 2.
 
 ## Standards
 

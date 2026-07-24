@@ -8,10 +8,16 @@ license.workspace    = true
 repository.workspace = true
 homepage.workspace   = true
 
+# Baseline — always compiled. A fresh `kernway` is a working web server: DI,
+# routing, HTTP, JSON, and static files. Optional capabilities (orm, cache,
+# openapi, htmx, a template engine) become feature flags in a later milestone,
+# once those crates are ready to gate. See docs/design/modules/kernway.md.
 [dependencies]
-kernway-core = { workspace = true }
-di-core      = { workspace = true }
-di-macro     = { workspace = true }
+kernway-core   = { workspace = true }
+kernway-server = { workspace = true }   # KernwayApp, Router, Middleware (+ http, static, rt, di transitively)
+kernway-web    = { workspace = true }   # Json, Path, Query, ProblemDetail
+di-core        = { workspace = true }
+di-macro       = { workspace = true }
 
 [lints]
 workspace = true
