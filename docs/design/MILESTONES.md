@@ -319,7 +319,7 @@ allocation-free correctness, not a throughput claim. See
 
 ---
 
-## M4 — Templates and security (`features = ["web"]`)
+## M4 — Templates and security (`features = ["web"]`) ✅
 
 **Goal**: render a page from data; accept a form back safely.
 
@@ -332,11 +332,35 @@ allocation-free correctness, not a throughput claim. See
   HTML-escapes, and iterates a `Seq` against it — proof it is implementable (the
   old trait was not). Hot reload (M5) forced the model to be *dynamic*; the
   disciplined form is a serde-free enum that borrows its strings.
-- `kernleaf`: parse → IR → render, IR compiled at startup and cached, never read
-  from disk on the request path — **now unblocked** by the model above
-- Context-aware escaping: HTML body, attribute, URL, and JS need different rules
-- `kernway-security`: CSRF token issue and verify, security headers
-- Fragment addressing, so htmx gets a fragment from the same template
+- ✅ `kernleaf`: parse → IR → render, cached, off the request path. Built as the
+  full **Thymeleaf Standard Dialect** (`th:*` attributes, natural templates, the
+  Standard Expression language, `@{}`/`#{}`, `#`-utility objects) — larger than the
+  roadmap's original modest `kw:`-prefixed sketch, at the user's "chuẩn Thymeleaf"
+  direction. **1.7× faster than minijinja** on render. See the charter.
+- ✅ Context-aware escaping: HTML body/attribute, URL (`@{}`), JS and CSS
+  (`th:inline`) each get their own rule, chosen at parse time so the HTML path
+  stays fast.
+- ✅ `kernway-security`: CSRF (double-submit token) + security headers + a
+  `SecurityContext`; its own crate, its own charter.
+- ✅ `th:authorize` (via a `kernway-core` `Authorization` trait) + auto-CSRF form
+  injection, wired into `kernleaf`.
+- ✅ Fragment addressing (`th:fragment` + `th:insert`/`th:replace`), so htmx gets a
+  fragment from the same template — cross/same/whole-template refs, depth-capped
+  against cycles (kernleaf slice G).
+
+**Gate — met** (kernleaf unit tests, 69 total):
+
+```
+th:text of "<script>…"        → escaped, not executed          (interpolated_html_is_escaped)
+th:inline="javascript" value  → \u-escaped, no <script> breakout (javascript_inline_escapes…)
+th:authorize with no context  → element dropped (fail-closed)   (th_authorize_is_fail_closed…)
+POST form                     → hidden _csrf field auto-injected (auto_csrf_injects…)
+```
+
+The XSS/escaping and CSRF cases — the gate's real bar — pass. What remains for the
+*full* M4 "accept a form back safely" story is the server-side CSRF *verify* on the
+POST (that primitive is done in `kernway-security::csrf::verify_request`; wiring it
+as a route guard is a server-integration step, tracked under kernway-security).
 
 **Gate**:
 
