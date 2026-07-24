@@ -1,0 +1,465 @@
+//! Sessions (KEP-0004): a signed token backed by a revocable registry, with live
+//! timeouts and an optional account seam.
+//!
+//! The [`SessionManager`] ties together the token codec, the session registry
+//! ([`SessionStore`]), a hot-reloadable [`SessionConfig`], and an optional
+//! [`AccountStatus`] provider. `authenticate` is the one decision point: verify the
+//! token, confirm the `sid` is still registered, enforce the current timeouts, and —
+//! when an account provider is set — check `active`/`expire`/`version`. Any failure
+//! is anonymous, and the session is evicted on the way out.
+
+use std::collections::HashMap;
+use std::sync::RwLock;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use crate::csrf::CsrfToken;
+use crate::token::{Claims, TokenCodec};
+use crate::SecurityContext;
+
+/// The cookie the session token is carried in.
+pub const COOKIE: &str = "kw_session";
+
+/// The `Set-Cookie` value that stores a session token. `HttpOnly` (JS cannot read
+/// it) and `SameSite=Lax`; `Secure` when served over HTTPS.
+pub fn set_cookie(token: &str, secure: bool) -> String {
+    let secure = if secure { "; Secure" } else { "" };
+    format!("{COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax{secure}")
+}
+
+/// The `Set-Cookie` value that clears the session cookie (logout).
+pub fn clear_cookie() -> String {
+    format!("{COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+}
+
+/// Pull the session token out of a `Cookie` header value.
+pub fn token_from_cookie(cookie_header: &str) -> Option<&str> {
+    cookie_header.split(';').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k.trim() == COOKIE).then(|| v.trim())
+    })
+}
+
+/// Unix seconds now.
+fn now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// One login. The registry holds one of these per active session.
+#[derive(Debug, Clone)]
+pub struct SessionRecord {
+    /// The user this session belongs to.
+    pub user: String,
+    /// Login time, unix seconds — for the absolute timeout.
+    pub created: u64,
+    /// Last activity, unix seconds — for the idle timeout (advanced lazily).
+    pub last_seen: u64,
+    /// A device/ip label, for a "my sessions" list.
+    pub meta: String,
+}
+
+/// The session registry — an index of live sessions, keyed by `sid`. The default
+/// backend is in-memory; a trait so Redis/SQL can be swapped in for scale.
+pub trait SessionStore: Send + Sync {
+    /// Register a new session.
+    fn insert(&self, sid: &str, record: SessionRecord);
+    /// The record for `sid`, or `None` — this is also the membership check.
+    fn get(&self, sid: &str) -> Option<SessionRecord>;
+    /// Advance `last_seen` (for the idle timeout); called lazily.
+    fn touch(&self, sid: &str, at: u64);
+    /// Remove one session (logout / revocation / eviction).
+    fn remove(&self, sid: &str);
+    /// Remove every session of a user (logout everywhere / ban).
+    fn remove_user(&self, user: &str);
+    /// This user's active sessions, as `(sid, record)`.
+    fn sessions_of(&self, user: &str) -> Vec<(String, SessionRecord)>;
+    /// The number of live sessions — for the capacity cap.
+    fn len(&self) -> usize;
+}
+
+/// In-memory registry: a read-mostly `RwLock<HashMap>`. The per-request path is a
+/// read; login/logout are the rare writes.
+#[derive(Default)]
+pub struct MemorySessionStore {
+    inner: RwLock<HashMap<String, SessionRecord>>,
+}
+
+impl MemorySessionStore {
+    /// An empty in-memory registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl SessionStore for MemorySessionStore {
+    fn insert(&self, sid: &str, record: SessionRecord) {
+        self.inner.write().unwrap().insert(sid.to_string(), record);
+    }
+    fn get(&self, sid: &str) -> Option<SessionRecord> {
+        self.inner.read().unwrap().get(sid).cloned()
+    }
+    fn touch(&self, sid: &str, at: u64) {
+        if let Some(r) = self.inner.write().unwrap().get_mut(sid) {
+            r.last_seen = at;
+        }
+    }
+    fn remove(&self, sid: &str) {
+        self.inner.write().unwrap().remove(sid);
+    }
+    fn remove_user(&self, user: &str) {
+        self.inner.write().unwrap().retain(|_, r| r.user != user);
+    }
+    fn sessions_of(&self, user: &str) -> Vec<(String, SessionRecord)> {
+        self.inner
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(_, r)| r.user == user)
+            .map(|(sid, r)| (sid.clone(), r.clone()))
+            .collect()
+    }
+    fn len(&self) -> usize {
+        self.inner.read().unwrap().len()
+    }
+}
+
+/// Session timeouts and capacity — read live on every `authenticate`, so a change
+/// takes effect immediately for existing sessions (KEP-0004).
+#[derive(Debug, Clone)]
+pub struct SessionConfig {
+    /// The `exp` baked into a new token (a fail-safe upper bound).
+    pub token_ttl: Duration,
+    /// Max session age from `created`, enforced server-side against current config.
+    pub absolute_timeout: Duration,
+    /// Max gap since `last_seen`; `None` = no idle limit.
+    pub idle_timeout: Option<Duration>,
+    /// Registry capacity cap; `None` = bounded only by memory.
+    pub max_sessions: Option<usize>,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            token_ttl: Duration::from_secs(60 * 60),
+            absolute_timeout: Duration::from_secs(24 * 60 * 60),
+            idle_timeout: None,
+            max_sessions: None,
+        }
+    }
+}
+
+/// Per-user account status — the optional seam (KEP-0004). When a provider is set,
+/// `authenticate` checks it, so deactivation, subscription expiry, and role changes
+/// take effect on the next request.
+#[derive(Debug, Clone)]
+pub struct Account {
+    /// `false` → the session is invalidated (account disabled / banned).
+    pub active: bool,
+    /// Subscription end, unix seconds; `Some(t)` with `t < now` invalidates.
+    pub expires: Option<u64>,
+    /// Bumped by the app on any change that must force re-login (role, etc.).
+    pub version: u64,
+}
+
+/// Implemented by the application over its user store.
+pub trait AccountStatus: Send + Sync {
+    /// The account status for `user`, or `None` if the user does not exist.
+    fn account(&self, user: &str) -> Option<Account>;
+}
+
+/// Why a login was refused.
+#[derive(Debug, PartialEq, Eq)]
+pub enum LoginError {
+    /// The registry is at `max_sessions`.
+    AtCapacity,
+}
+
+/// Ties the registry, the token codec, the live config, and the optional account
+/// provider together.
+pub struct SessionManager {
+    store: Box<dyn SessionStore>,
+    codec: TokenCodec,
+    config: RwLock<SessionConfig>,
+    accounts: Option<Box<dyn AccountStatus>>,
+}
+
+impl SessionManager {
+    /// Build a manager over a store, a signing key, and an initial config.
+    pub fn new(store: Box<dyn SessionStore>, key: impl Into<Vec<u8>>, config: SessionConfig) -> Self {
+        Self { store, codec: TokenCodec::new(key), config: RwLock::new(config), accounts: None }
+    }
+
+    /// Attach an account-status provider (the optional seam).
+    #[must_use]
+    pub fn with_accounts(mut self, accounts: Box<dyn AccountStatus>) -> Self {
+        self.accounts = Some(accounts);
+        self
+    }
+
+    /// Update the live config; the change applies to the next `authenticate`.
+    pub fn reconfigure(&self, f: impl FnOnce(&mut SessionConfig)) {
+        f(&mut self.config.write().unwrap());
+    }
+
+    /// Log a user in: register a session and return a signed token to set as a
+    /// cookie. `roles` is the login snapshot; with an account provider, `version`
+    /// is taken from the account so a later change forces re-login.
+    pub fn login(&self, user: &str, roles: Vec<String>, meta: impl Into<String>) -> Result<String, LoginError> {
+        self.login_at(user, roles, meta, now())
+    }
+
+    pub(crate) fn login_at(&self, user: &str, roles: Vec<String>, meta: impl Into<String>, at: u64) -> Result<String, LoginError> {
+        let cfg = self.config.read().unwrap();
+        if let Some(max) = cfg.max_sessions {
+            if self.store.len() >= max {
+                return Err(LoginError::AtCapacity);
+            }
+        }
+        let sid = CsrfToken::generate().as_str().to_string(); // 32 bytes of OS randomness, hex
+        let version = self
+            .accounts
+            .as_ref()
+            .and_then(|a| a.account(user))
+            .map_or(0, |acc| acc.version);
+        self.store.insert(
+            &sid,
+            SessionRecord { user: user.to_string(), created: at, last_seen: at, meta: meta.into() },
+        );
+        let exp = at + cfg.token_ttl.as_secs();
+        Ok(self.codec.sign(&Claims { sid, user: user.to_string(), roles, version, exp }))
+    }
+
+    /// Turn a token (from the cookie) into a `SecurityContext`. Absent/invalid/
+    /// revoked/expired/disabled → anonymous.
+    pub fn authenticate(&self, token: Option<&str>) -> SecurityContext {
+        self.authenticate_at(token, now())
+    }
+
+    pub(crate) fn authenticate_at(&self, token: Option<&str>, at: u64) -> SecurityContext {
+        let Some(token) = token else { return SecurityContext::anonymous() };
+        let Some(claims) = self.codec.verify(token) else { return SecurityContext::anonymous() };
+
+        // Token's own expiry — the fail-safe upper bound.
+        if claims.exp < at {
+            return SecurityContext::anonymous();
+        }
+        // Revocation: the sid must still be registered.
+        let Some(record) = self.store.get(&claims.sid) else { return SecurityContext::anonymous() };
+
+        let cfg = self.config.read().unwrap();
+        // Timeouts, enforced against the *current* config.
+        if at > record.created.saturating_add(cfg.absolute_timeout.as_secs()) {
+            self.store.remove(&claims.sid);
+            return SecurityContext::anonymous();
+        }
+        if let Some(idle) = cfg.idle_timeout {
+            if at > record.last_seen.saturating_add(idle.as_secs()) {
+                self.store.remove(&claims.sid);
+                return SecurityContext::anonymous();
+            }
+        }
+        drop(cfg);
+
+        // Account seam: active, subscription expiry, and version (role change).
+        let roles = if let Some(accounts) = &self.accounts {
+            match accounts.account(&claims.user) {
+                None => {
+                    self.store.remove(&claims.sid);
+                    return SecurityContext::anonymous();
+                }
+                Some(acc) => {
+                    let invalid = !acc.active
+                        || acc.expires.is_some_and(|e| e < at)
+                        || acc.version != claims.version;
+                    if invalid {
+                        self.store.remove(&claims.sid);
+                        return SecurityContext::anonymous();
+                    }
+                    // Roles from the token are safe: a role change would have bumped
+                    // the version and been caught above.
+                    claims.roles.clone()
+                }
+            }
+        } else {
+            claims.roles.clone()
+        };
+
+        // Advance last_seen lazily (only when it drifts, to stay read-mostly).
+        if at > record.last_seen + 60 {
+            self.store.touch(&claims.sid, at);
+        }
+
+        SecurityContext::authenticated(claims.user, roles)
+    }
+
+    /// Log out one session (this device).
+    pub fn logout(&self, sid: &str) {
+        self.store.remove(sid);
+    }
+
+    /// Log out the session a token names — the handler's convenience: read the
+    /// cookie, hand it here. A bad token is a no-op.
+    pub fn logout_token(&self, token: &str) {
+        if let Some(claims) = self.codec.verify(token) {
+            self.store.remove(&claims.sid);
+        }
+    }
+
+    /// Log a user out everywhere (all devices) — also how a ban takes effect.
+    pub fn logout_user(&self, user: &str) {
+        self.store.remove_user(user);
+    }
+
+    /// The user's active sessions, for a "my logins" view.
+    pub fn sessions_of(&self, user: &str) -> Vec<(String, SessionRecord)> {
+        self.store.sessions_of(user)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manager() -> SessionManager {
+        SessionManager::new(Box::new(MemorySessionStore::new()), "test-key", SessionConfig::default())
+    }
+
+    // Extract the sid from a token by verifying it (test helper).
+    fn sid_of(mgr: &SessionManager, token: &str) -> String {
+        mgr.codec.verify(token).unwrap().sid
+    }
+
+    #[test]
+    fn login_then_authenticate_yields_the_user_and_roles() {
+        let mgr = manager();
+        let token = mgr.login("alice", vec!["ADMIN".into()], "chrome").unwrap();
+        let ctx = mgr.authenticate(Some(&token));
+        assert!(ctx.is_authenticated());
+        assert_eq!(ctx.principal(), Some("alice"));
+        assert!(ctx.has_role("ADMIN"));
+    }
+
+    #[test]
+    fn no_token_is_anonymous() {
+        assert!(!manager().authenticate(None).is_authenticated());
+    }
+
+    #[test]
+    fn a_forged_token_is_anonymous() {
+        let mgr = manager();
+        assert!(!mgr.authenticate(Some("garbage.token")).is_authenticated());
+    }
+
+    #[test]
+    fn logout_makes_the_next_request_anonymous() {
+        let mgr = manager();
+        let token = mgr.login("alice", vec![], "d").unwrap();
+        let sid = sid_of(&mgr, &token);
+        assert!(mgr.authenticate(Some(&token)).is_authenticated());
+        mgr.logout(&sid);
+        assert!(!mgr.authenticate(Some(&token)).is_authenticated(), "revoked session must be anonymous");
+    }
+
+    #[test]
+    fn logout_user_kills_every_device() {
+        let mgr = manager();
+        let t1 = mgr.login("alice", vec![], "phone").unwrap();
+        let t2 = mgr.login("alice", vec![], "laptop").unwrap();
+        assert_eq!(mgr.sessions_of("alice").len(), 2, "two devices logged in");
+        mgr.logout_user("alice");
+        assert!(!mgr.authenticate(Some(&t1)).is_authenticated());
+        assert!(!mgr.authenticate(Some(&t2)).is_authenticated());
+        assert_eq!(mgr.sessions_of("alice").len(), 0);
+    }
+
+    #[test]
+    fn an_expired_token_is_anonymous() {
+        let mgr = manager();
+        let token = mgr.login_at("alice", vec![], "d", 1000).unwrap();
+        // token_ttl default 1h → exp = 1000 + 3600. Authenticate well past it.
+        assert!(!mgr.authenticate_at(Some(&token), 1000 + 3600 + 1).is_authenticated());
+    }
+
+    #[test]
+    fn the_absolute_timeout_is_enforced_live() {
+        let mgr = manager();
+        mgr.reconfigure(|c| {
+            c.token_ttl = Duration::from_secs(10_000); // token long-lived…
+            c.absolute_timeout = Duration::from_secs(300); // …but 5-min session cap
+        });
+        let token = mgr.login_at("alice", vec![], "d", 1000).unwrap();
+        assert!(mgr.authenticate_at(Some(&token), 1000 + 299).is_authenticated(), "within 5 min");
+        assert!(!mgr.authenticate_at(Some(&token), 1000 + 301).is_authenticated(), "past 5 min → out");
+    }
+
+    #[test]
+    fn shortening_the_timeout_takes_effect_immediately() {
+        let mgr = manager();
+        mgr.reconfigure(|c| c.absolute_timeout = Duration::from_secs(1800));
+        let token = mgr.login_at("alice", vec![], "d", 1000).unwrap();
+        assert!(mgr.authenticate_at(Some(&token), 1000 + 1000).is_authenticated());
+        // Admin shortens the timeout to 5 min while the session is alive.
+        mgr.reconfigure(|c| c.absolute_timeout = Duration::from_secs(300));
+        assert!(!mgr.authenticate_at(Some(&token), 1000 + 1000).is_authenticated(), "the live config applies now");
+    }
+
+    #[test]
+    fn max_sessions_refuses_a_new_login() {
+        let mgr = manager();
+        mgr.reconfigure(|c| c.max_sessions = Some(1));
+        let _ = mgr.login("a", vec![], "d").unwrap();
+        assert_eq!(mgr.login("b", vec![], "d"), Err(LoginError::AtCapacity));
+    }
+
+    // --- the account seam --------------------------------------------------
+
+    struct Accounts(std::sync::Mutex<HashMap<String, Account>>);
+    impl AccountStatus for Accounts {
+        fn account(&self, user: &str) -> Option<Account> {
+            self.0.lock().unwrap().get(user).cloned()
+        }
+    }
+
+    fn with_account(acc: Account) -> (SessionManager, std::sync::Arc<Accounts>) {
+        // Note: for a mutable-in-test provider we keep a handle to tweak it.
+        let mut map = HashMap::new();
+        map.insert("alice".to_string(), acc);
+        let accounts = std::sync::Arc::new(Accounts(std::sync::Mutex::new(map)));
+        // The manager needs its own boxed provider; use a thin forwarder.
+        struct Fwd(std::sync::Arc<Accounts>);
+        impl AccountStatus for Fwd {
+            fn account(&self, u: &str) -> Option<Account> {
+                self.0.account(u)
+            }
+        }
+        let mgr = SessionManager::new(Box::new(MemorySessionStore::new()), "k", SessionConfig::default())
+            .with_accounts(Box::new(Fwd(accounts.clone())));
+        (mgr, accounts)
+    }
+
+    #[test]
+    fn a_deactivated_account_is_logged_out() {
+        let (mgr, accounts) = with_account(Account { active: true, expires: None, version: 1 });
+        let token = mgr.login("alice", vec!["USER".into()], "d").unwrap();
+        assert!(mgr.authenticate(Some(&token)).is_authenticated());
+        accounts.0.lock().unwrap().get_mut("alice").unwrap().active = false;
+        assert!(!mgr.authenticate(Some(&token)).is_authenticated(), "disabled → out");
+    }
+
+    #[test]
+    fn an_expired_subscription_is_logged_out() {
+        let (mgr, _accounts) = with_account(Account { active: true, expires: Some(500), version: 1 });
+        let token = mgr.login_at("alice", vec![], "d", 100).unwrap();
+        assert!(mgr.authenticate_at(Some(&token), 400).is_authenticated(), "before expiry");
+        assert!(!mgr.authenticate_at(Some(&token), 600).is_authenticated(), "after subscription expiry");
+    }
+
+    #[test]
+    fn a_version_bump_forces_re_login() {
+        let (mgr, accounts) = with_account(Account { active: true, expires: None, version: 1 });
+        let token = mgr.login("alice", vec!["ADMIN".into()], "d").unwrap();
+        assert!(mgr.authenticate(Some(&token)).is_authenticated());
+        // A role change bumps the version → the old token's version no longer matches.
+        accounts.0.lock().unwrap().get_mut("alice").unwrap().version = 2;
+        assert!(!mgr.authenticate(Some(&token)).is_authenticated(), "account change → logged out");
+    }
+}
