@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 # One dependency. The whole point of the meta-crate: a Kernway web app names
 # `kernway` and nothing else. (M1a closed this — before it, KernwayApp was not
-# reachable through `kernway`.)
+# reachable through `kernway`.) The `htmx` feature adds the typed HX-* API used
+# by the /htmx/greet route — one line, no extra crate named.
 [dependencies]
-kernway = { path = "../../crates/kernway" }
+kernway = { path = "../../crates/kernway", features = ["htmx"] }

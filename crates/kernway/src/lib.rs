@@ -22,6 +22,20 @@
 //! `use kernway::prelude::*` brings in what a handler needs. The individual
 //! crates (`kernway_server`, `kernway_web`, `di_core`, …) are re-exported here
 //! too, so a caller never depends on them by name.
+//!
+//! ## Capabilities
+//!
+//! The baseline is a working web server on its own — DI, routing, HTTP, JSON,
+//! HTML, and static files. Extra capabilities are opt-in features that pull in
+//! nothing when off:
+//!
+//! ```toml
+//! kernway = { version = "0.1", features = ["htmx"] }
+//! ```
+//!
+//! | Feature | Brings in | Adds to the prelude |
+//! |---|---|---|
+//! | `htmx` | typed `HX-*` request extraction and response headers (htmx 2.0.x) | `Htmx`, `HtmxResponse`, `Swap` |
 
 // --- HTTP vocabulary (kernway-core) ---
 pub use kernway_core::prelude::*;
@@ -31,7 +45,11 @@ pub use kernway_core::{error, error as http_error, request, response};
 pub use kernway_server::{AppBuilder, KernwayApp, Router};
 
 // --- web: extractors and response types ---
-pub use kernway_web::{Json, Path, ProblemDetail, Query};
+pub use kernway_web::{Html, Json, Path, ProblemDetail, Query};
+
+// --- htmx: typed HX-* extraction and response headers (feature = "htmx") ---
+#[cfg(feature = "htmx")]
+pub use kernway_htmx::{Htmx, HtmxResponse, Swap};
 
 // --- DI ---
 pub use di_core::{AppContext, BeanEntry, DiError};
@@ -50,7 +68,10 @@ pub mod prelude {
     // Traits
     pub use crate::{IntoResponse, FromRequest, Layer, Next, DbPool, TemplateEngine, KernwayPlugin};
     // Extractors and response types
-    pub use crate::{Json, Path, ProblemDetail, Query};
+    pub use crate::{Html, Json, Path, ProblemDetail, Query};
+    // htmx (feature = "htmx")
+    #[cfg(feature = "htmx")]
+    pub use crate::{Htmx, HtmxResponse, Swap};
     // DI
     pub use crate::{AppContext, BeanEntry, DiError, KernwayComponent, KernwayController};
     // Macros

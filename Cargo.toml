@@ -7,6 +7,7 @@ members = [
     "crates/di-macro",
     "crates/kernway-http",
     "crates/kernway-web",
+    "crates/kernway-htmx",
     "crates/kernway-server",
     "crates/kernway-static",
     "crates/kernway-orm-core",
@@ -88,6 +89,7 @@ libc = "0.2"
 kernway-core         = { path = "crates/kernway-core" }
 kernway-http         = { path = "crates/kernway-http" }
 kernway-web          = { path = "crates/kernway-web" }
+kernway-htmx         = { path = "crates/kernway-htmx" }
 kernway-server       = { path = "crates/kernway-server" }
 kernway-static       = { path = "crates/kernway-static" }
 kernway-orm-core     = { path = "crates/kernway-orm-core" }

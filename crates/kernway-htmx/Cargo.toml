@@ -1,0 +1,36 @@
+[package]
+name        = "kernway-htmx"
+description = "Kernway htmx support — typed HX-* request extraction and response headers"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+homepage.workspace   = true
+
+# Only kernway-core — reading Request headers and building a Response. htmx is a
+# header vocabulary, not a runtime, so there is nothing external to depend on
+# (KEP-0000 §1).
+[dependencies]
+kernway-core = { workspace = true }
+
+[lints]
+workspace = true
+
+# Benchmarks only. These pull in the incumbent (axum-htmx) and the shared
+# substrate (http::HeaderMap) so the numbers in docs/design/BENCHMARKS.md are a
+# real head-to-head, not a claim in isolation (KEP-0000 §2). They never reach a
+# release build — kernway-htmx itself still depends on nothing but kernway-core.
+[dev-dependencies]
+criterion = { workspace = true }
+http      = "1"
+axum-htmx = "0.8"
+axum-core = "0.5"
+futures   = "0.3"
+
+[[bench]]
+name    = "htmx"
+harness = false
+
+[package.metadata.docs.rs]
+all-features = true

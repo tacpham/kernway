@@ -38,6 +38,31 @@ impl<T: Serialize + Send> IntoResponse for Json<T> {
     }
 }
 
+// ============================================================
+// Html<T> — HTML response (a full page or an htmx fragment)
+// ============================================================
+
+/// An HTML response — `Content-Type: text/html; charset=utf-8`.
+///
+/// Used for a full page or an htmx fragment alike; the difference is only how
+/// much markup it carries. The value is sent verbatim, so an engine that
+/// produced it is responsible for escaping — this type does not escape.
+///
+/// ```rust,ignore
+/// fn page(req: &Request, ctx: &AppContext) -> Html<String> {
+///     Html("<h1>Hello</h1>".to_string())
+/// }
+/// ```
+pub struct Html<T>(pub T);
+
+impl<T: Into<String> + Send> IntoResponse for Html<T> {
+    fn into_response(self) -> Response {
+        Response::new(StatusCode::OK)
+            .content_type("text/html; charset=utf-8")
+            .body(self.0.into().into_bytes())
+    }
+}
+
 impl<T: DeserializeOwned> Json<T> {
     /// Extract a JSON body from the request.
     pub fn from_request(req: &Request) -> Result<Self, String> {

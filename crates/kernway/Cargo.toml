@@ -9,15 +9,25 @@ repository.workspace = true
 homepage.workspace   = true
 
 # Baseline — always compiled. A fresh `kernway` is a working web server: DI,
-# routing, HTTP, JSON, and static files. Optional capabilities (orm, cache,
-# openapi, htmx, a template engine) become feature flags in a later milestone,
-# once those crates are ready to gate. See docs/design/modules/kernway.md.
+# routing, HTTP, JSON, HTML, and static files. Optional capabilities are opted
+# into with a feature and pull in nothing when off. See docs/design/modules/kernway.md.
 [dependencies]
 kernway-core   = { workspace = true }
 kernway-server = { workspace = true }   # KernwayApp, Router, Middleware (+ http, static, rt, di transitively)
-kernway-web    = { workspace = true }   # Json, Path, Query, ProblemDetail
+kernway-web    = { workspace = true }   # Json, Html, Path, Query, ProblemDetail
 di-core        = { workspace = true }
 di-macro       = { workspace = true }
+
+# Optional — off by default, code and compile cost only when the feature is on.
+kernway-htmx   = { workspace = true, optional = true }   # Htmx, HtmxResponse, Swap
+
+# Capability features. The first of them: `htmx` is the model every later
+# capability (orm, cache, openapi, a template engine) follows —
+# `kernway = { version = "…", features = ["htmx"] }` and nothing more.
+[features]
+default = []
+## Typed `HX-*` request extraction and response headers (htmx 2.0.x).
+htmx = ["dep:kernway-htmx"]
 
 [lints]
 workspace = true
