@@ -114,6 +114,7 @@ pub mod layer;
 pub mod db;
 pub mod template;
 pub mod plugin;
+pub mod security;
 
 /// Re-export all traits for use with: `use kernway_core::prelude::*`
 pub mod prelude {
