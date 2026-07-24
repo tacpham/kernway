@@ -58,7 +58,7 @@
 //! | [`layer`] | [`Layer`], [`Next`] | `OncePerRequestFilter`, `FilterChain` |
 //! | [`error`] | [`KernwayError`], [`StatusCode`] | `HttpStatus` |
 //! | [`db`] | [`DbPool`], [`Connection`] | `javax.sql.DataSource` |
-//! | [`template`] | [`TemplateEngine`], [`TemplateContext`] | `ViewResolver` |
+//! | [`template`] | [`TemplateEngine`], [`Value`], [`ToValue`] | `ViewResolver`, `Model` |
 //! | [`plugin`] | [`KernwayPlugin`] | `ApplicationContextInitializer` |
 //!
 //! [`Request`]: request::Request
@@ -73,7 +73,8 @@
 //! [`StatusCode`]: error::StatusCode
 //! [`DbPool`]: db::DbPool
 //! [`Connection`]: db::Connection
-//! [`TemplateContext`]: template::TemplateContext
+//! [`Value`]: template::Value
+//! [`ToValue`]: template::ToValue
 //! [`KernwayPlugin`]: plugin::KernwayPlugin
 //!
 //! ## Example
@@ -121,6 +122,6 @@ pub mod prelude {
     pub use crate::response::IntoResponse;
     pub use crate::layer::{Layer, Next};
     pub use crate::db::DbPool;
-    pub use crate::template::TemplateEngine;
+    pub use crate::template::{TemplateEngine, ToValue, Value};
     pub use crate::plugin::KernwayPlugin;
 }
