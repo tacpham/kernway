@@ -219,6 +219,87 @@ allocation-free, correct-by-construction API (the `Vary: HX-Request` is automati
 not a thing you must remember) that is also, measurably, never slower. Faster
 where it can be, equal where the body allocation rules — never the bottleneck.
 
+## File streaming — the chunk size, measured not guessed
+
+`cargo bench -p kernway-server --bench stream_chunk`
+
+`FILE_CHUNK` was `64 KiB` with a comment admitting it was a guess. A large-file
+download over loopback, swept across chunk sizes (256 MiB file, best of 5, one
+shard), shows the guess was costing more than half the achievable throughput:
+
+| chunk | MB/s | % of peak |
+|---|---|---|
+| 64 KiB (old default) | 2647 | 41% |
+| 128 KiB | 3906 | 60% |
+| 256 KiB **(new default)** | 4638 | 71% |
+| 512 KiB | 5575 | 86% |
+| 1 MiB | 6015 | 92% |
+| 2 MiB | 6321 | 97% |
+| 4 MiB | 6506 | **100% (peak)** |
+| 8 MiB | 6330 | 97% |
+| 16 MiB | 5583 | 86% |
+
+Two effects, both visible. Throughput climbs steeply at small sizes because each
+chunk is a `spawn_blocking` hop (enqueue, wake a pool thread, run, return), and
+that fixed per-chunk cost dominates when the chunk is small — 64 KiB on a 256 MiB
+file is 4096 hops, 4 MiB is 64. Past ~4 MiB it falls again: a chunk larger than
+the CPU cache stops the read buffer staying hot between the read and the write.
+
+**The default is 256 KiB, not the 4 MiB peak.** A default multiplies by
+concurrency — the per-chunk buffer is live per in-flight download, so 4 MiB ×
+hundreds of connections is memory a server cannot assume. 256 KiB is ~1.75× the
+old throughput while staying memory-bounded; the peak is one `.file_chunk_size(4
+<< 20)` away for a download-heavy deployment that has measured its own
+concurrency. This is the KEP-0000 §2 loop applied to a constant that had been an
+assumption since M2b — and the reason the knob is now public.
+
+## Template rendering — kernleaf vs minijinja
+
+`cargo bench -p kernleaf`
+
+kernleaf is measured against **minijinja 2** — the dynamic-template incumbent that
+pays the same runtime-dispatch cost (the fair bar; Askama compiles to the binary
+and is a different trade-off, per [KEP-0003]). kernleaf speaks Thymeleaf (`th:*`
+attributes), minijinja speaks Jinja — two different surfaces rendering a 50-row
+name list to the **same HTML**, which the bench asserts before timing, so it is
+the same work and the same escaping both sides.
+
+| Benchmark | kernleaf | minijinja | kernleaf is |
+|---|---|---|---|
+| `render/user_list_50` (the hot path) | **3.01 µs** | 5.17 µs | **1.72× faster** |
+| `parse/user_list` (once, off the request path) | 0.80 µs | 1.02 µs | 1.28× faster |
+
+Slice B (the full Standard Expression engine — operators, comparison, boolean,
+ternary/elvis, `\|…\|`) added only ~5% to render (2.86 → 3.01 µs): every `${…}`
+now walks an expression AST instead of a bare path lookup, and that walk is cheap.
+kernleaf stays 1.72× faster while doing strictly more.
+
+[KEP-0003]: ../kep/0003-template-model.md
+
+### What this measures, and what it does not
+
+**Render is the number that matters** — parsing happens once at `add`/hot-reload,
+never per request. kernleaf renders 1.76× faster because it walks a parsed DOM
+directly over a minimal `Value`, where minijinja runs a more general bytecode VM —
+and it is faster *while* doing real Thymeleaf work (attribute processors, natural
+templates). It is a fair result on identical output, but an **honest** one:
+kernleaf today does *less* of the Standard Dialect — no expression operators, no
+`@{}`/`#{}`, no utility objects, one escaping context. Some of the gap is that
+missing generality, and it will narrow as those slices land; the benchmark is
+rerun each time, not quoted as a permanent ratio. (An earlier `{{ }}` prototype
+measured 2.74×; adopting the real Thymeleaf attribute engine — and a simpler
+name-only template — brought it to 1.76×, which is the honest current number.)
+
+**Syntax was not a speed decision — the measurement is why kernleaf could adopt
+Thymeleaf without a penalty.** A `{{ }}` surface and Thymeleaf's `th:*` attributes
+both compile to a cached IR walked the same way; the only difference is *parse*
+cost (an attribute grammar needs HTML-aware parsing), and parse is off the request
+path — under a microsecond, once. The `render` number above is the Thymeleaf
+engine's, and it is still 1.76× minijinja. So Thymeleaf's natural-templates win
+(a designer previews a `.html` without the server) came at no measured runtime
+cost — which is exactly why the surface choice was made on product merit, with the
+speed question settled first.
+
 ## DI resolution — bean lookup is nearly free
 
 `cargo bench -p di-core`
