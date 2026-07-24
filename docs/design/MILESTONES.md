@@ -184,10 +184,10 @@ HEAD and byte-range requests.
 **Blocked on a real decision**, which is why it is separate: `Response.body` is
 `Vec<u8>`. Streaming needs a `Body` enum (`Bytes` | `File` | `Stream`), and that
 is a breaking change to `Response` touching every response type in the framework
-— it needs a KEP (0005) before code. HEAD and Range also need the encoder to
+— it needs a KEP (0002, now Accepted) before code. HEAD and Range also need the encoder to
 send a `Content-Length` without a body, which it cannot do today.
 
-- KEP-0005: `Body` enum + async handler future (the `!Send` handler)
+- KEP-0002 (Accepted): `Body` enum. The async handler is a separate, later KEP
 - `Body::File` streamed in bounded chunks from the blocking pool
 - HEAD: headers with the file's length, empty body
 - `Range` → `206` + `Content-Range`, with a cap on ranges per request
