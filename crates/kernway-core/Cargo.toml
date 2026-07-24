@@ -13,6 +13,13 @@ rust-version.workspace = true
 futures-core = { workspace = true }
 thiserror    = { workspace = true }
 
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name    = "fields"
+harness = false
+
 [lints]
 workspace = true
 

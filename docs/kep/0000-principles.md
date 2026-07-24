@@ -123,6 +123,39 @@ knowing it exists.
 does work faster.** A static route became a hash lookup instead of a linear scan;
 that is worth more than any amount of tuning the scan.
 
+**A problem that recurs on the hot path earns a structure built for it.** When
+the same shape of work runs on every request, the question is not "is this
+general-purpose type good?" — `std`'s are excellent — but "is it the *right
+shape* for this specific, repeated problem?" Often it is not, and the win is a
+purpose-built structure, not a faster general one:
+
+- Request headers and query params are short-keyed entries, parsed in one pass
+  then read by name. `Headers`/`QueryParams` keep everything in one buffer, so
+  the parser allocates once per request instead of once per pair — the reason
+  they are not `HashMap`s.
+- The DI container keys on `TypeId`, already a well-distributed value; a
+  pass-through hasher beats SipHash **6×**.
+- The router keys on short path segments with no adversarial input; FNV beats
+  SipHash **2×**.
+
+**But measure it in context, not in isolation — this rule has a trap, and we
+fell in it.** A micro-benchmark said the one-buffer `Headers` built and iterated
+5 entries 1.35× faster than a `HashMap`, so `Response.headers` was migrated from
+`HashMap` to `Headers`. In the *actual encode path* it was **slower** — 75 → 103 ns
+per response — because the encoder iterates the headers twice (size estimate,
+then write) and real responses set fewer headers than the micro-benchmark used.
+The isolated number pointed one way; the number that ships pointed the other. The
+migration was reverted. The same structure that wins on the request side (parse
+once, look up) lost on the response side (set a few, iterate to encode) — a
+structure is right *for a use case*, not in the abstract.
+
+So the discipline is: name the problem precisely (few entries? short keys?
+build-then-iterate? how many? read back or not?), pick or write the structure
+that answers *that*, and **benchmark it where it runs** — in the pipeline, not in
+a micro-benchmark that flatters it. This is also **not** licence to reimplement
+`std`: rewriting `HashMap` to match `hashbrown` is the reckless-not-tedious line
+in §1.
+
 **Fast enough for itself is not the bar. The bar is the incumbent.** A number in
 isolation only says the code is not embarrassing — it does not say it is good. We
 chose to write our own router, parser, and runtime instead of using `matchit`,
