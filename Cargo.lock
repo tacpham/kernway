@@ -514,6 +514,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "kernway-core",
+ "kernway-security",
  "minijinja",
 ]
 
