@@ -1,47 +1,60 @@
 //! # kernway
 //!
-//! Rust Web Framework — Spring-inspired.
+//! Rust web framework — Spring-inspired. One dependency; a fresh `kernway` is a
+//! working web server.
 //!
 //! ```toml
 //! [dependencies]
 //! kernway = "0.1"
 //! ```
 //!
-//! ```rust,ignore
+//! ```no_run
 //! use kernway::prelude::*;
 //!
-//! #[component]
-//! struct UserService;
-//!
-//! #[component]
-//! struct UserController {
-//!     #[inject]
-//!     service: std::sync::Arc<UserService>,
-//! }
+//! KernwayApp::builder()
+//!     .static_files("public")
+//!     .get("/health", |_req, _ctx| Response::new(StatusCode::OK))
+//!     .build()
+//!     .run()
+//!     .unwrap();
 //! ```
+//!
+//! `use kernway::prelude::*` brings in what a handler needs. The individual
+//! crates (`kernway_server`, `kernway_web`, `di_core`, …) are re-exported here
+//! too, so a caller never depends on them by name.
 
-// Re-export core traits
+// --- HTTP vocabulary (kernway-core) ---
 pub use kernway_core::prelude::*;
-pub use kernway_core::{request, response, error as http_error};
+pub use kernway_core::{error, error as http_error, request, response};
 
-// Re-export DI
+// --- server: the builder, router, middleware, static files ---
+pub use kernway_server::{AppBuilder, KernwayApp, Router};
+
+// --- web: extractors and response types ---
+pub use kernway_web::{Json, Path, ProblemDetail, Query};
+
+// --- DI ---
 pub use di_core::{AppContext, BeanEntry, DiError};
 pub use di_core::{KernwayComponent, KernwayController};
 
-// Re-export macros
+// --- macros ---
 pub use di_macro::{Component, component, inject, controller, route, require_role, validated, transactional};
 
-/// `use kernway::prelude::*` — import everything required.
+/// `use kernway::prelude::*` — everything a handler usually needs.
 pub mod prelude {
-    pub use crate::{
-        // Core traits
-        IntoResponse, FromRequest, Layer, Next, DbPool, TemplateEngine, KernwayPlugin,
-        // DI
-        AppContext, BeanEntry, DiError, KernwayComponent, KernwayController,
-        // Macros
-        component, inject, controller, route, require_role, validated, transactional,
-        Component,
-    };
-    pub use std::sync::Arc;
+    // Server
+    pub use crate::{AppBuilder, KernwayApp, Router};
+    // HTTP types
+    pub use crate::response::Response;
     pub use kernway_core::error::StatusCode;
+    // Traits
+    pub use crate::{IntoResponse, FromRequest, Layer, Next, DbPool, TemplateEngine, KernwayPlugin};
+    // Extractors and response types
+    pub use crate::{Json, Path, ProblemDetail, Query};
+    // DI
+    pub use crate::{AppContext, BeanEntry, DiError, KernwayComponent, KernwayController};
+    // Macros
+    pub use crate::{component, inject, controller, route, require_role, validated, transactional, Component};
+
+    pub use std::sync::Arc;
 }

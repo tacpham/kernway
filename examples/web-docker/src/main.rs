@@ -12,8 +12,7 @@
 //!   http://localhost:8080/health      → 200 (liveness)
 //!   http://localhost:8080/ready       → 200 (readiness)
 
-use kernway_core::{error::StatusCode, response::Response};
-use kernway_server::KernwayApp;
+use kernway::prelude::*;
 
 fn main() -> std::io::Result<()> {
     // Cloud Run, Heroku, and most PaaS assign the port at runtime. Honour $PORT,

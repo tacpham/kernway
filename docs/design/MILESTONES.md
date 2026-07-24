@@ -108,19 +108,42 @@ paths (GET-only slice; HEAD/Range are M2).
 
 ---
 
-## M1a — Close the front door
+## M1a — Close the front door ✅ (2026-07-24)
 
 **Goal**: `examples/web-docker` depends on `kernway` alone, not on six crates by
 path. The meta-crate re-exports `KernwayApp`, `Response`, and the prelude; the
 example proves it.
 
-This is the meta-crate charter's Phase 1, promoted to a milestone because M1
-showed the single-dependency story is still untested — and an untested front door
-fails for the first user, not for us.
+**Built**:
 
-**Gate**: `web-docker/Cargo.toml` lists `kernway` and `serde_json` only, the
-image still passes the M1 gate, and `grep -c 'path =' examples/web-docker/Cargo.toml`
-is 0.
+- `kernway` now depends on `kernway-server` and `kernway-web` as baseline (a
+  fresh `kernway` is a working web server), re-exports `KernwayApp`, `Router`,
+  `Json`/`Path`/`Query`, and the HTTP vocabulary
+- `kernway::prelude::*` brings in what a handler needs — server, `Response`,
+  `StatusCode`, extractors, DI, macros
+- a runnable crate-level doctest builds a server through `kernway` alone, so the
+  front door cannot silently close again
+- `web-docker` reduced to `kernway = { path = ... }` and `use kernway::prelude::*`
+
+**Gate — passed:**
+
+```
+examples/web-docker/Cargo.toml [dependencies]:  kernway   (one entry)
+cargo run -p web-docker         → the full M1 gate still green
+  GET /  200 html · /style.css 200 css · /api/ping JSON · /health 200 · traversal 404
+```
+
+The `serde_json` and `di-core` entries turned out to be unused — the example's
+bodies are byte literals — so the single dependency is genuinely `kernway`.
+(`grep 'path ='` is not 0, as an earlier draft of this gate assumed: the
+`[[bin]]` `path` and the intra-workspace `kernway` path are both unavoidable
+until the crate is published. The real gate is "one dependency, and it is
+`kernway`", which holds.)
+
+**What is deferred**: the feature graph. `kernway` pulls the web baseline
+unconditionally; turning `orm`/`cache`/`openapi`/`sse`/`htmx`/`kernleaf` into
+Cargo features is a later milestone, once those crates exist to gate (`kernleaf`
+and `kernway-htmx` do not yet). See the meta-crate charter.
 
 ---
 
