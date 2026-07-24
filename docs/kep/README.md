@@ -76,6 +76,7 @@ to keep.
 | [0000](0000-principles.md) | Founding principles — write it ourselves, fast, solid, stable | Accepted |
 | [0001](0001-respect-rust.md) | Respect Rust — inspiration is not translation | Accepted |
 | [0002](0002-response-body.md) | A response body that can be bytes, a file, or a stream | Accepted |
+| [0003](0003-template-model.md) | A template model an engine can actually render | Accepted |
 
 ## The first two are different from the rest
 
