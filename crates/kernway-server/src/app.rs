@@ -377,15 +377,19 @@ async fn serve_connection(
             && served < keep_alive.max_requests
             && !shutdown.is_triggered();
 
+        // Captured before the match: a `None` from `try_static` moves `request`
+        // into `handle`, so the method must be read first.
+        let is_head = request.method.eq_ignore_ascii_case("HEAD");
+
         // A static-file hit is served from the blocking pool so the read never
-        // stalls this shard; a miss (no root configured, non-GET, a route claims
-        // the path, or no such file) falls through to the router and middleware.
+        // stalls this shard; a miss (no root configured, an unsupported method, a
+        // route claims the path, or no such file) falls through to the router.
         let response = match try_static(static_files.as_deref(), &router, &request).await {
             Some(file_response) => file_response,
             None => handle(request, &router, &context, &middlewares),
         };
         let connection = if persist { Connection::KeepAlive } else { Connection::Close };
-        if write_response(&mut stream, &response, connection).await.is_err() {
+        if write_response(&mut stream, &response, connection, is_head).await.is_err() {
             return; // peer vanished mid-write; nothing to half-close
         }
 
@@ -416,7 +420,15 @@ async fn write_response(
     stream: &mut AsyncTcpStream,
     response: &Response,
     connection: Connection,
+    is_head: bool,
 ) -> std::io::Result<()> {
+    // A HEAD gets exactly the headers a GET would — including the Content-Length
+    // the body *would* have — and no body. `encode_head` takes the length
+    // separately, so a File's length is sent without the File being read.
+    if is_head {
+        let head = encode_head(response, connection, response.body.len());
+        return stream.write_all(&head).await;
+    }
     match &response.body {
         Body::File { path, len, range } => {
             let head = encode_head(response, connection, response.body.len());
@@ -521,6 +533,8 @@ impl StaticOutcome {
                 r.headers.insert("cache-control".to_string(), "no-cache".to_string());
                 // The extension-derived type is authoritative; stop the browser sniffing.
                 r.headers.insert("x-content-type-options".to_string(), "nosniff".to_string());
+                // Advertise range support so clients (video players, resumers) ask.
+                r.headers.insert("accept-ranges".to_string(), "bytes".to_string());
                 r
             }
         }
@@ -578,9 +592,9 @@ fn load_static(root: &std::path::Path, path: std::path::PathBuf, if_none_match: 
 ///
 /// All I/O (canonicalize, stat, read) runs on the blocking pool via
 /// [`rt_core::spawn_blocking`], so it never stalls the shard ([KEP-0000 §4]).
-/// M2a: conditional GET with `ETag`/`If-None-Match` → 304, `Cache-Control`, and
-/// the symlink re-check. Still to come (M2b): HEAD, `Range`, streaming, and
-/// precompressed variants — see the kernway-server charter.
+/// Handles GET and HEAD, conditional (`If-None-Match` → 304), and a single byte
+/// `Range` (→ 206, or 416 if unsatisfiable). The HEAD/body distinction is the
+/// caller's — [`write_response`] writes head-only for a HEAD.
 ///
 /// [KEP-0000 §4]: https://github.com/tacpham/kernway/blob/main/docs/kep/0000-principles.md
 async fn try_static(
@@ -590,12 +604,14 @@ async fn try_static(
 ) -> Option<Response> {
     let sf = static_files?;
 
-    if !request.method.eq_ignore_ascii_case("GET") {
+    // GET and HEAD are served from the filesystem; other methods fall through.
+    let method = &request.method;
+    if !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD") {
         return None;
     }
     // The router wins: a dynamic route for this path takes precedence over a
     // file that happens to share it.
-    if router.find(&request.method, &request.path).is_some() {
+    if router.find(method, &request.path).is_some() {
         return None;
     }
     // Reject hostile or malformed paths before any I/O. A rejection is a miss —
@@ -611,7 +627,101 @@ async fn try_static(
     })
     .await??;
 
-    Some(outcome.into_response())
+    let mut response = outcome.into_response();
+
+    // A byte range applies only to a 200 file body. Capture the length first so
+    // the borrow of `response.body` ends before the mutation.
+    let file_len = if let Body::File { len, .. } = &response.body {
+        Some(*len)
+    } else {
+        None
+    };
+    if let (Some(len), Some(range_header)) = (file_len, request.headers.get("range")) {
+        apply_range(&mut response, range_header, len);
+    }
+
+    Some(response)
+}
+
+/// A parsed single byte range against a resource of known length.
+enum RangeSpec {
+    /// No usable range — serve the full `200` (bad syntax, or multi-range, which
+    /// this cut answers with the whole body as RFC 9110 §14.2 permits).
+    Full,
+    /// Send `[start, end)` — half-open. `206`.
+    Satisfiable { start: u64, end: u64 },
+    /// The range lies outside the resource — `416`.
+    Unsatisfiable,
+}
+
+/// Parse a single `Range: bytes=…` value against a resource of length `len`.
+///
+/// Supports `bytes=start-end`, `bytes=start-` (to the end), and `bytes=-suffix`
+/// (the last N bytes). A missing `bytes=` unit, malformed digits, or a
+/// comma-separated multi-range all return [`RangeSpec::Full`] — the server then
+/// sends the whole body, which the spec allows. A start past the end is
+/// [`RangeSpec::Unsatisfiable`].
+fn parse_range(header: &str, len: u64) -> RangeSpec {
+    let Some(spec) = header.trim().strip_prefix("bytes=") else {
+        return RangeSpec::Full;
+    };
+    let spec = spec.trim();
+    if spec.contains(',') {
+        return RangeSpec::Full; // multi-range: single-range only in this cut
+    }
+    let Some((a, b)) = spec.split_once('-') else {
+        return RangeSpec::Full;
+    };
+
+    let (start, end_incl) = if a.is_empty() {
+        // Suffix range: the last `n` bytes.
+        let Ok(n) = b.parse::<u64>() else { return RangeSpec::Full };
+        if n == 0 {
+            return RangeSpec::Unsatisfiable;
+        }
+        if n >= len {
+            (0, len.saturating_sub(1))
+        } else {
+            (len - n, len - 1)
+        }
+    } else {
+        let Ok(start) = a.parse::<u64>() else { return RangeSpec::Full };
+        let end_incl = if b.is_empty() {
+            len.saturating_sub(1)
+        } else {
+            let Ok(end) = b.parse::<u64>() else { return RangeSpec::Full };
+            end.min(len.saturating_sub(1))
+        };
+        (start, end_incl)
+    };
+
+    if len == 0 || start >= len || start > end_incl {
+        return RangeSpec::Unsatisfiable;
+    }
+    RangeSpec::Satisfiable { start, end: end_incl + 1 }
+}
+
+/// Turn a `200` file response into a `206` (or `416`) per the `Range` header.
+fn apply_range(response: &mut Response, header: &str, len: u64) {
+    match parse_range(header, len) {
+        RangeSpec::Full => {} // leave the 200 as-is
+        RangeSpec::Satisfiable { start, end } => {
+            response.status = StatusCode::PARTIAL_CONTENT;
+            response
+                .headers
+                .insert("content-range".to_string(), format!("bytes {}-{}/{}", start, end - 1, len));
+            if let Body::File { range, .. } = &mut response.body {
+                *range = Some((start, end));
+            }
+        }
+        RangeSpec::Unsatisfiable => {
+            response.status = StatusCode::RANGE_NOT_SATISFIABLE;
+            response
+                .headers
+                .insert("content-range".to_string(), format!("bytes */{len}"));
+            response.body = Body::Empty;
+        }
+    }
 }
 
 /// Run the middleware chain and the matched route.
@@ -1220,6 +1330,70 @@ mod static_file_tests {
         );
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn head_returns_the_length_without_a_body_over_http() {
+        let root = tmpdir("head");
+        fs::write(root.join("a.txt"), b"hello").unwrap();
+
+        let got = serve_static(root.clone(), "HEAD /a.txt HTTP/1.1\r\nHost: x\r\n\r\n".to_string());
+        assert!(got.starts_with("HTTP/1.1 200 OK\r\n"), "got {got:?}");
+        assert!(got.contains("content-length: 5"), "HEAD must send the length: {got:?}");
+        assert!(got.contains("accept-ranges: bytes"), "and advertise ranges: {got:?}");
+        // Head only — the response ends at the blank line, no "hello".
+        assert!(got.ends_with("\r\n\r\n"), "HEAD must send no body: {got:?}");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_byte_range_returns_206_over_http() {
+        let root = tmpdir("range");
+        fs::write(root.join("f.txt"), b"0123456789abcdef").unwrap(); // 16 bytes
+
+        let got = serve_static(
+            root.clone(),
+            "GET /f.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=4-7\r\n\r\n".to_string(),
+        );
+        assert!(got.starts_with("HTTP/1.1 206 Partial Content\r\n"), "got {got:?}");
+        assert!(got.contains("content-range: bytes 4-7/16"), "got {got:?}");
+        assert!(got.contains("content-length: 4"), "got {got:?}");
+        assert!(got.ends_with("4567"), "the 4 bytes [4,8) must be sent: {got:?}");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_unsatisfiable_range_returns_416_over_http() {
+        let root = tmpdir("range416");
+        fs::write(root.join("f.txt"), b"short").unwrap(); // 5 bytes
+
+        let got = serve_static(
+            root.clone(),
+            "GET /f.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=100-200\r\n\r\n".to_string(),
+        );
+        assert!(got.starts_with("HTTP/1.1 416 Range Not Satisfiable\r\n"), "got {got:?}");
+        assert!(got.contains("content-range: bytes */5"), "must state the real length: {got:?}");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn parse_range_cases() {
+        use super::{parse_range, RangeSpec};
+        let len = 100;
+        assert!(matches!(parse_range("bytes=0-9", len), RangeSpec::Satisfiable { start: 0, end: 10 }));
+        assert!(matches!(parse_range("bytes=90-", len), RangeSpec::Satisfiable { start: 90, end: 100 }));
+        assert!(matches!(parse_range("bytes=-10", len), RangeSpec::Satisfiable { start: 90, end: 100 }));
+        // end past the resource is clamped to the last byte.
+        assert!(matches!(parse_range("bytes=50-999", len), RangeSpec::Satisfiable { start: 50, end: 100 }));
+        // start past the end → unsatisfiable.
+        assert!(matches!(parse_range("bytes=100-200", len), RangeSpec::Unsatisfiable));
+        // bad syntax / multi-range / wrong unit → serve full.
+        assert!(matches!(parse_range("bytes=abc", len), RangeSpec::Full));
+        assert!(matches!(parse_range("bytes=0-9,20-29", len), RangeSpec::Full));
+        assert!(matches!(parse_range("items=0-9", len), RangeSpec::Full));
     }
 
     #[test]
