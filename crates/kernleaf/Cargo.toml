@@ -1,0 +1,32 @@
+[package]
+name        = "kernleaf"
+description = "Kernleaf — Kernway's template engine: parse → IR → render, HTML-safe by default"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+homepage.workspace   = true
+
+# Only kernway-core — the engine renders the `Value` model and implements the
+# `TemplateEngine` trait defined there (KEP-0003). Parsing and rendering are ours,
+# not a wrapped dependency (KEP-0000 §1).
+[dependencies]
+kernway-core = { workspace = true }
+
+[lints]
+workspace = true
+
+# Benchmarks only. minijinja is the dynamic-template incumbent kernleaf is
+# measured against (KEP-0000 §2) — the fair bar, since it pays the same
+# runtime-dispatch cost. Never in a release build.
+[dev-dependencies]
+criterion = { workspace = true }
+minijinja = "2"
+
+[[bench]]
+name    = "render"
+harness = false
+
+[package.metadata.docs.rs]
+all-features = true
