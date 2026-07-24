@@ -476,6 +476,9 @@ dependencies = [
 [[package]]
 name = "kernway-static"
 version = "0.1.0"
+dependencies = [
+ "criterion",
+]
 
 [[package]]
 name = "kernway-web"

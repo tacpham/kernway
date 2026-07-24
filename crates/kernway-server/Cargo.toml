@@ -21,6 +21,10 @@ criterion = { workspace = true }
 name    = "routing"
 harness = false
 
+[[bench]]
+name    = "pipeline"
+harness = false
+
 [lints]
 workspace = true
 
