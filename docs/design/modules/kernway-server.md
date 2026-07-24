@@ -346,14 +346,18 @@ number here that is not quoted from there.
 
 | Path | Runs | Measured | Budget | Bench |
 |---|---|---|---|---|
-| **Full pipeline, static GET** | every request | **392 ns** (parse→route→handle→encode, no I/O) | the CPU floor; a regression anywhere shows here | ✅ `pipeline/static_get` |
-| Full pipeline, param GET | every param request | 768 ns (headers + param map + JSON body) | — | ✅ `pipeline/param_get` |
-| `Router::find`, static route | every request | 41 ns, flat from 4 to 102 routes | O(1), must not grow with route count | ✅ `route/static_hit` |
-| `Router::find`, dynamic route | every request with a param | 331 ns @ 4, 2.17 µs @ 102 | — | ✅ `route/param_hit` |
-| `Router::find`, miss | every unmatched request | 80 ns @ 4, 1.87 µs @ 102 | should collapse with a mount tree | ✅ `route/miss` |
-| Static resolve + ETag | every static request | 136 ns resolve + 14 ns etag match | in `kernway-static` bench | ✅ `resolve/*`, `etag/*` |
-| Mount match | every static-asset request | — | O(log n) or better on mount count | ❌ to write |
+| **Full pipeline, static GET** | every request | **363 ns** (parse→route→handle→encode, no I/O) | the CPU floor; a regression anywhere shows here | ✅ `pipeline/static_get` |
+| Full pipeline, param GET | every param request | 598 ns (headers + param map + JSON body) | — | ✅ `pipeline/param_get` |
+| `Router::find`, static route | every request | 21 ns, flat in route count | ≤ ~1.5× matchit (met); target parity | ✅ `route/static_hit`, `vs_matchit` |
+| `Router::find`, param route | every request with a param | 151 ns, flat (radix trie) | 5.8× matchit — target is borrowed params (KEP) | ✅ `route/param_hit`, `vs_matchit` |
+| `Router::find`, miss | every unmatched request | 12 ns, flat | met | ✅ `route/miss` |
+| Static resolve + ETag | every static request | 136 ns resolve + 14 ns etag match | resolve alloc is the target | ✅ `resolve/*`, `etag/*` |
 | Static file read (I/O) | every uncached asset | — | O(chunk) memory once `Body::File` lands (KEP-0002) | ❌ load test, not micro-bench |
+
+The router was tuned against `matchit` (axum's) over three rounds — radix trie,
+string-walk, FNV + in-place param map — taking static from 41 → 21 ns (within
+1.5× of matchit) and param from 2.17 µs → 151 ns and flat. See
+[BENCHMARKS.md](../BENCHMARKS.md#routing--a-radix-trie-optimised-against-the-incumbent).
 
 The static-route row is the one to defend. It is flat across route count today,
 and it is measured — the split router keeps a hash lookup off the linear scan, so

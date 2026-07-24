@@ -26,51 +26,59 @@ is the **shape** — O(1) vs O(n), the ratio between two approaches — and that
 what the analysis below leans on. Re-run on your own hardware before quoting an
 absolute figure elsewhere.
 
-## Routing — measured, and behind the incumbent
+## Routing — a radix trie, optimised against the incumbent
 
 `cargo bench -p kernway-server` and `--bench vs_matchit`
 
-The internal numbers first:
+The router is a segment radix trie, tuned across three rounds against `matchit`
+(axum's) under [KEP-0000 §2]'s loop: measure, compare, optimise, repeat. The
+internal numbers, now flat in route count for *every* class:
 
 | Benchmark | 4 routes | 102 routes | Shape |
 |---|---|---|---|
-| `route/static_hit` | 41.2 ns | 41.6 ns | flat in route count |
-| `route/param_hit` | 331 ns | 2.17 µs | O(n) in dynamic-route count |
-| `route/miss` | 80 ns | 1.87 µs | O(n) |
+| `route/static_hit` | 21 ns | 21 ns | flat — O(path length) |
+| `route/param_hit` | 151 ns | 153 ns | **flat** — was O(n), now O(path) |
+| `route/miss` | 12 ns | 12 ns | **flat** — was O(n) |
 
-The good news is real: a static route is flat — 41 ns whether the app has 4
-routes or 102 — because static patterns go in a hash map, not the scan. A param
-route is a linear scan and grows with the table, as the shape shows.
-
-But "fast enough for itself" is not the bar ([KEP-0000 §2]). Against `matchit`,
-the radix-trie router axum uses, on the same table and machine:
+Against `matchit`, same table and machine:
 
 | | kernway | matchit | kernway is |
 |---|---|---|---|
-| static hit, 22 routes | 42 ns | 14.6 ns | **2.9× slower** |
-| static hit, 102 routes | 42 ns | 14.8 ns | **2.9× slower** |
-| param hit, 22 routes | 680 ns | 28.7 ns | **24× slower** |
-| param hit, 102 routes | 2.22 µs | 28.7 ns | **77× slower** |
+| static hit, 22 routes | 21 ns | 14.3 ns | 1.5× slower |
+| static hit, 102 routes | 21 ns | 14.4 ns | 1.5× slower |
+| param hit, 22 routes | 156 ns | 27 ns | 5.8× slower |
+| param hit, 102 routes | 156 ns | 27 ns | 5.8× slower |
 
-This is the honest picture, and it retires an earlier boast in this file that
-41 ns was a "headline". It is not, next to 14 ns. Two facts hold at once: our
-static routing is O(1) in *route count* (good, and matchit is too), and its
-*constant* is ~3× matchit's because it hashes the whole path string with SipHash
-where matchit walks a trie. And our param routing is O(n) where matchit is O(path
-length), so the gap widens without bound as routes are added — 77× at a hundred
-routes, and it keeps going.
+### What the loop bought, and where it stopped
 
-**This is the optimisation loop's open target, not a settled result.** Writing
-our own router (rather than depending on matchit) is only justified once it
-matches or beats matchit; today it does not. The fix is a radix trie for both
-classes, which is the next routing work. Recorded here so the gap is a tracked
-number, not a surprise.
+The starting point (a hash map plus a linear scan) was **2.9× slower on static
+and up to 77× on param, widening without bound**. Three rounds closed most of it:
+
+1. **Radix trie** replaced the linear scan. Param routing went from O(n) —
+   2.22 µs at 102 routes — to O(path), a flat 226 ns. A miss went from 1.87 µs to
+   the same order. The gap that grew without bound now does not grow at all.
+2. **Walk the path string directly**, no `Vec<&str>` of segments. Static dropped
+   52 → 30 ns and became allocation-free.
+3. **FNV-1a for the trie's static children** (SipHash is DoS-resistant and slow,
+   and a router faces no adversarial keys), and the parameter map filled in place
+   rather than collected from a `Vec`. Static 30 → 21 ns, param 186 → 156 ns.
+
+Net: **static went 41 → 21 ns and is now within 1.5× of matchit — competitive;
+param went 2.22 µs → 156 ns at a hundred routes, a 14× improvement, and is flat.**
+
+Static is where we set out to be. Param is still 5.8× behind, and the remaining
+gap is not the trie — it is the API. `find` returns an **owned**
+`HashMap<String, String>`, so each parameter costs two `String` allocations
+(`name` and value); matchit returns borrowed slices and allocates nothing. Closing
+this means returning borrowed parameters, which changes `Request.path_params` and
+every handler signature — an API decision that deserves its own KEP, not a quiet
+tweak. Recorded as the loop's next target, with the reason it stopped here.
 
 [KEP-0000 §2]: ../kep/0000-principles.md#2-fast--measured-or-it-is-not-a-claim
 
-**Allocation**: zero for a matched static route, one `HashMap` only for a route
-that actually has parameters — but allocation is not where the gap is; the hash
-and the scan are.
+**Allocation**: a static match allocates nothing (the returned map is empty and
+`HashMap::new` does not allocate until an insert). A param match allocates the
+map plus two `String`s per parameter — the target above.
 
 ## The full request pipeline — every module together
 
@@ -84,13 +92,13 @@ the network.
 
 | Benchmark | Time | What it exercises |
 |---|---|---|
-| `pipeline/static_get` | 392 ns | parse + static route + handler + encode |
-| `pipeline/param_get` | 768 ns | parse (with headers) + param route + param map + JSON build + encode |
+| `pipeline/static_get` | 363 ns | parse + static route + handler + encode |
+| `pipeline/param_get` | 598 ns | parse (with headers) + param route + param map + JSON build + encode |
 
-392 ns end to end for a static-route request is ~2.5 M requests/sec/core of pure
+363 ns end to end for a static-route request is ~2.75 M requests/sec/core of pure
 CPU headroom — the ceiling a real deployment works down from once the network,
-the syscalls, and the scheduler are added. `param_get` costs roughly double: a
-browser request with headers to parse, a parameter map to allocate, and a
+the syscalls, and the scheduler are added. `param_get` costs ~1.6× more: a
+browser request with more headers to parse, a parameter map to allocate, and a
 `format!`ed JSON body.
 
 This is the guard the module benchmarks below serve: a regression in parsing,
