@@ -18,7 +18,7 @@ OS        macOS 26.5
 rustc     1.96.0, release profile
 Tool      criterion (statistical, warmed, outlier-filtered)
 Date      2026-07-24 (routing/DI/http/runtime); static + pipeline added same day
-Reproduce cargo bench -p di-core -p kernway-http -p kernway-server -p rt-core -p kernway-static
+Reproduce cargo bench -p di-core -p kernway-http -p kernway-server -p rt-core -p kernway-static -p kernway-htmx
 ```
 
 Absolute nanoseconds are specific to this machine. What carries across machines
@@ -130,6 +130,94 @@ it is the one place the static path is not allocation-free, and a candidate to
 optimise if a large-file load test later shows it mattering. `etag_matches` at
 14 ns means a conditional request's 304 decision is effectively free next to the
 file `stat` it accompanies.
+
+## Precompressed static — the payload win, and its honest cost
+
+`cargo bench -p kernway-static -- negotiate`, plus measured payload sizes.
+
+With `.precompressed()` on, the server serves a `.br`/`.gz` sitting next to a
+compressible file. Two things to measure: the CPU it adds per request, and the
+bytes it removes from the wire — the second is the whole point.
+
+**Payload** (`examples/web-docker/public/style.css`, a real stylesheet):
+
+| Variant | Bytes | vs identity |
+|---|---|---|
+| identity | 1055 | — |
+| gzip `-9` | 531 | **−50%** |
+| brotli `-9` | 479 | **−55%** |
+
+**CPU added on the request path** — the pure negotiation only; the file read is
+the same either way:
+
+| Step | Time | Runs |
+|---|---|---|
+| `negotiate/accept_encoding` (parse `Accept-Encoding`) | 180 ns | once per compressible asset, when precompression is on |
+| `negotiate/is_compressible_binary` (skip gate) | 9.7 ns | once per asset — returns early for `image/*`, fonts, PDFs |
+| `negotiate/is_compressible_text` | 13 ns | — |
+
+Plus one or two `canonicalize`/`stat` syscalls to find the variant — I/O in the
+hundreds of nanoseconds to low microseconds, dwarfing the parse. Those only
+happen for a compressible type on a precompressed root; the `is_compressible`
+gate (~10 ns) is what keeps a `.png` request from paying any of it.
+
+### What this does and does not prove
+
+It **does** prove the mechanism is cheap where it is CPU (≈200 ns of parsing to
+shave 50–55% off the transferred bytes) and that the cost is skipped for media
+that would not benefit. It **does not** make Kernway faster than another
+framework: precompressed static is table stakes — nginx (`gzip_static`), axum
+(`tower-http`), and every CDN do the same thing, and in many deployments the
+compression happens at the edge, not the app. The honest framing (KEP-0000 §2):
+this is a **bandwidth** feature Kernway now has, done the disciplined way — zero
+per-request compression CPU (the `.br`/`.gz` is built ahead of time), the
+already-compressed tier skipped, and `Vary: Accept-Encoding` set consistently so
+a shared cache stays correct. It is parity with the incumbents on a feature that
+matters, not an edge over them.
+
+## htmx handling — head-to-head against the incumbent
+
+`cargo bench -p kernway-htmx`
+
+htmx support is a header layer: read the `HX-*` request headers, write the
+`HX-*` response headers. So it can be measured against exactly what a developer
+uses on axum today — `axum-htmx` 0.8, the dedicated crate — and against the raw
+`http::HeaderMap` you write without any helper. All three do the *same* work per
+round, on the same 8-header request profile the codec benches use. axum-htmx's
+extractors are `async fn`; they are driven to completion with a no-op waker, so
+the figure is the extractor's own work, not an executor's.
+
+| Benchmark | kernway | axum-htmx | http substrate | kernway is |
+|---|---|---|---|---|
+| `extract` — read `is_request` + `boosted` + `target` + `trigger` | **57.8 ns** | 80.2 ns | 85.1 ns | **1.39× faster** than axum-htmx |
+| `respond` — body + content-type + 3 `HX-*` + `Vary` | **240.9 ns** | — | 280.4 ns | **1.16× faster** than the substrate |
+| `turn` — extract the request, build the reply | **176.7 ns** | 180.5 ns | — | ~2%, a tie |
+
+The response row has no separate axum-htmx column because its responders *are*
+`HeaderMap::insert` calls — the `http substrate` figure is what axum-htmx compiles
+to, and the fair floor to beat.
+
+### Where the win comes from, and where it does not
+
+**Reading is the clear win — 1.39× over the dedicated crate.** Two reasons, both
+from kernway-core: the one-buffer `Headers` scans a handful of short byte strings
+instead of hashing each name (same structure the codec benches favour above),
+and `target()`/`trigger()` return a borrowed `&str`. axum-htmx's `HxTarget` /
+`HxTrigger` are `Option<String>` — they *allocate* the value out of the header on
+every extraction. The kernway extractor allocates nothing.
+
+**Writing is a narrower win — 1.16×.** Both sides allocate the HTML body `Vec`,
+which dominates, so the header structure only moves the remainder; `Headers` edges
+`HeaderMap` on a small set for the reasons the codec section already measured.
+
+**Over a whole turn it is a tie (~2%),** and that is the honest headline: the
+entire htmx layer — read the flags, pick fragment vs page, set the headers — costs
+**~180 ns**, next to the ~350–600 ns the request pipeline already spends parsing,
+routing, and encoding. htmx handling is not where a request is won or lost on
+either framework. What kernway-htmx buys is not throughput; it is a typed,
+allocation-free, correct-by-construction API (the `Vary: HX-Request` is automatic,
+not a thing you must remember) that is also, measurably, never slower. Faster
+where it can be, equal where the body allocation rules — never the bottleneck.
 
 ## DI resolution — bean lookup is nearly free
 

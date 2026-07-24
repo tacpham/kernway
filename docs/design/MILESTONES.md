@@ -140,10 +140,11 @@ bodies are byte literals — so the single dependency is genuinely `kernway`.
 until the crate is published. The real gate is "one dependency, and it is
 `kernway`", which holds.)
 
-**What is deferred**: the feature graph. `kernway` pulls the web baseline
-unconditionally; turning `orm`/`cache`/`openapi`/`sse`/`htmx`/`kernleaf` into
-Cargo features is a later milestone, once those crates exist to gate (`kernleaf`
-and `kernway-htmx` do not yet). See the meta-crate charter.
+**What is deferred**: most of the feature graph. `kernway` pulls the web baseline
+unconditionally; `htmx` is the **first capability turned into a Cargo feature**
+(M3), and is the template `orm`/`cache`/`openapi`/`sse`/`kernleaf` follow as each
+crate becomes ready to gate (`kernleaf` does not exist yet). See the meta-crate
+charter.
 
 ---
 
@@ -234,37 +235,87 @@ GET /big.txt (200 KB)    200, streamed across 3+ chunks, intact
 `a_byte_range_returns_206_over_http`, `an_unsatisfiable_range_returns_416_over_http`,
 plus `parse_range_cases` for the parser edges — 50 server tests.
 
-**Left, and small:** precompressed `.br`/`.gz` selection by `Accept-Encoding`
-(pick the variant, then `Body::File` it), and the 64 KiB chunk size to measure
-against a large-file load test. Static serving is otherwise done.
+**Precompressed `.br`/`.gz` — done:**
+
+- `kernway-static` gained the pure negotiation: `accepted_encodings` (parse
+  `Accept-Encoding`, honour `q=0` and `*`, in server-preference order — brotli
+  before gzip) and `is_compressible` (the text tier only; `image/*`, fonts, PDFs
+  skip the probe and its `stat` entirely).
+- `kernway-server::load_static` probes for a variant next to the file, re-checks
+  it under the root the same way as the original (a symlinked `.br` cannot
+  escape), serves its bytes as `Body::File` with `Content-Encoding`, keeps the
+  **original** `Content-Type`, derives the `ETag` from the variant actually
+  served, and sets `Vary: Accept-Encoding` on every negotiated response —
+  including the identity fallback, so a shared cache stays correct.
+- Opt-in: `KernwayApp::builder().static_files("public").precompressed()`. Off by
+  default, so the common path pays no extra `stat`.
+
+**Gate — passed over a real socket** (`examples/web-docker`, `style.css` 1055 B):
+
+```
+GET /style.css  Accept-Encoding: br, gzip   200, content-encoding: br,   479 B, vary
+GET /style.css  Accept-Encoding: gzip       200, content-encoding: gzip, 531 B
+GET /style.css  (no Accept-Encoding)        200, identity 1055 B, vary present
+GET /style.css  Accept-Encoding: br;q=0,…   200, falls back to gzip
+```
+
+Locked in `crates/kernway/tests/precompressed_socket.rs` + 6 `load_static` unit
+tests (br-preferred, gzip fallback, identity-with-Vary, binary-not-negotiated,
+empty-AE-still-varies, off-means-off) — 56 server tests.
+
+**Measured**: −50% (gzip) to −55% (brotli) payload for ~200 ns of negotiation and
+zero per-request compression CPU. Parity with nginx/tower-http, not an edge — see
+[BENCHMARKS.md](BENCHMARKS.md#precompressed-static--the-payload-win-and-its-honest-cost).
+
+**Left, and small:** the 64 KiB stream chunk size to tune against a large-file
+load test. Static serving is otherwise done.
 
 ---
 
-## M3 — htmx, in the baseline
+## M3 — htmx, as a feature ✅
 
 **Goal**: static HTML with `hx-get` calls an endpoint; the endpoint returns a
 fragment; it swaps.
 
-**Forces us to build**:
+**Built** (M3 slice, htmx 2.0.x):
 
-- `kernway-htmx` — its own crate, non-optional dependency
-- `Htmx` extractor: `is_request()`, `target()`, `trigger()`, `prompt()`, …
-- `HtmxResponse` builder: `trigger()`, `push_url()`, `retarget()`,
-  `reswap(Swap::…)` — enums, so a typo is a compile error
-- **Automatic `Vary: HX-Request`** whenever the response depends on it
+- `kernway-htmx` — its own crate, depending on `kernway-core` only. **Opt-in as
+  `kernway = { …, features = ["htmx"] }`**, not baseline: the default stays
+  static-only per the design decision that made htmx the first capability
+  feature. (`Html<T>`, the response type, is baseline in `kernway-web`.)
+- `Htmx` extractor: `is_request()`, `is_boosted()`, `is_history_restore()`,
+  `target()`, `trigger()`, `trigger_name()`, `current_url()`, `prompt()` —
+  all returning a borrowed `&str`, no allocation
+- `HtmxResponse` builder: `trigger()`/`trigger_after_settle()`/…, `redirect()`,
+  `location()`, `refresh()`, `push_url()`, `replace_url()`, `retarget()`,
+  `reswap(Swap::…)`, `reselect()` — `Swap` is an enum, so a typo is a compile error
+- **Automatic `Vary: HX-Request`** via `respond(fragment, full_page)`, appended
+  to any existing `Vary`, never clobbering it
 
-**Gate**:
+**Gate — passed** (`examples/web-docker`, live over a socket):
 
-```bash
-curl -i -H 'HX-Request: true' localhost:8080/users
-#   → fragment, and `vary: hx-request` present
-curl -i localhost:8080/users
-#   → full page, same URL
+```text
+curl -i -H 'HX-Request: true' :8199/htmx/greet
+#   → 200, `hx-trigger: greeted`, `vary: HX-Request`, 57-byte fragment
+curl -i :8199/htmx/greet
+#   → 200, same URL, `vary: HX-Request`, 125-byte full page
 ```
+
+Locked in as `crates/kernway/tests/htmx_socket.rs` (feature-gated), so the gate
+re-runs in CI, not just once by hand.
 
 `Vary` is in the gate because without it a cache serves a fragment to a browser
 expecting a page — the classic htmx bug, and invisible until it happens to a
 user.
+
+**Measured** (KEP-0000 §2, vs the incumbent): reading the `HX-*` headers is
+**1.39× faster than `axum-htmx` 0.8** (57.8 ns vs 80.2 ns — no per-name hash, and
+`target()`/`trigger()` borrow where axum-htmx allocates a `String`); building the
+reply is 1.16× faster than the raw `http` substrate; a full turn is a **tie
+(~2%)** because the body allocation dominates both. htmx handling is never the
+bottleneck on either framework — the crate earns its place on typed,
+allocation-free correctness, not a throughput claim. See
+[BENCHMARKS.md](BENCHMARKS.md#htmx-handling--head-to-head-against-the-incumbent).
 
 ---
 
@@ -274,10 +325,15 @@ user.
 
 **Forces us to build**:
 
-- Model representation — the current `TemplateContext` returns `&dyn Any` and
-  **cannot be implemented against**; this must be decided first
+- ~~Model representation — the current `TemplateContext` returns `&dyn Any` and
+  **cannot be implemented against**; this must be decided first~~ ✅ **done**:
+  [KEP-0003](../kep/0003-template-model.md) replaced it with a borrowed `Value`
+  tree + `ToValue`. A reference engine in `kernway-core`'s tests interpolates,
+  HTML-escapes, and iterates a `Seq` against it — proof it is implementable (the
+  old trait was not). Hot reload (M5) forced the model to be *dynamic*; the
+  disciplined form is a serde-free enum that borrows its strings.
 - `kernleaf`: parse → IR → render, IR compiled at startup and cached, never read
-  from disk on the request path
+  from disk on the request path — **now unblocked** by the model above
 - Context-aware escaping: HTML body, attribute, URL, and JS need different rules
 - `kernway-security`: CSRF token issue and verify, security headers
 - Fragment addressing, so htmx gets a fragment from the same template
@@ -361,8 +417,8 @@ Not a milestone — a debt to clear, and the earlier the better.
 ```
 
 The workspace version is `0.1.0`. `ROADMAP.md` places kernleaf at v0.6. Static
-files, htmx, templates, and async handlers do not exist. The most public document
-in the repository claims a stable v1.0 for a project at 0.1.
+files and htmx now exist; templates and async handlers do not. The most public
+document in the repository claims a stable v1.0 for a project at 0.1.
 
 This is worth fixing before anyone reads it, independently of everything above.
 The Quick Start has the same problem in a smaller way: it implies a single
