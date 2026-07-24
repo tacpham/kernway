@@ -208,10 +208,20 @@ buffer instead of two-per-pair, and writes once. Kernway serves static files
 (5 headers) and secured pages (8+), so the many-header case is the common one and
 the one that matters. `Headers` adopted.
 
-The 13 ns the JSON-API case still gives up is one extra allocation (`Headers`
-grows two `Vec`s from empty on the first insert; `HashMap` grows one). That is
-the next target — a small-buffer optimisation keeping few short headers inline,
-no heap — which would close it and make `Headers` win at both ends.
+The 13 ns the JSON-API case gives up is one extra allocation (`Headers` grows two
+`Vec`s from empty on the first insert; `HashMap` grows one).
+
+**A small-buffer optimisation was tried to close it, and reverted.** Making
+`Fields` inline its bytes (64) and entries (5) — no heap for small sets — did
+help the response side (`pipeline/static_get` 383 → 334 ns, `encode/eight_headers`
+525 → 431 ns, fewer reallocs). But it *regressed the request side*: parsing an
+8-header browser request went 680 → 758 ns (+11%), because a set that big spills
+to the heap anyway *and* now pays to copy the larger inline-carrying struct
+around. Netted over a browser round trip (parse a big request, encode a small
+response) the loss outweighed the gain. The inline array's move cost ate the
+allocation it saved — the trade-off `SmallVec` always risks, measured here rather
+than assumed. Kept the two-`Vec` `Headers`; the 13 ns JSON-API gap stands, and
+SSO is not the way to close it.
 
 ## Runtime — executor and scheduling
 
