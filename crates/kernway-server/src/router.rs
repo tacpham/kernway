@@ -223,7 +223,7 @@ mod tests {
         let (handler, params) = router.find(method, path)?;
         let ctx = AppContext::new();
         let resp = handler(&Request::new(method, path), &ctx);
-        Some((String::from_utf8(resp.body).unwrap(), params))
+        Some((String::from_utf8(resp.body_bytes().to_vec()).unwrap(), params))
     }
 
     #[test]

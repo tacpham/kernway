@@ -169,7 +169,7 @@ mod tests {
             SseEvent::data("event1"),
             SseEvent::data("event2"),
         ]).into_response();
-        let body = String::from_utf8(resp.body).unwrap();
+        let body = String::from_utf8(resp.body_bytes().to_vec()).unwrap();
         assert!(body.contains("data: event1"));
         assert!(body.contains("data: event2"));
     }

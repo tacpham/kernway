@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn json_into_response_body_is_valid_json() {
         let resp = Json(User { id: 2, name: "Bob".into() }).into_response();
-        let parsed: User = serde_json::from_slice(&resp.body).unwrap();
+        let parsed: User = serde_json::from_slice(resp.body_bytes()).unwrap();
         assert_eq!(parsed, User { id: 2, name: "Bob".into() });
     }
 
@@ -247,7 +247,7 @@ mod tests {
     fn problem_detail_not_found_status_404() {
         let resp = ProblemDetail::not_found("user 42 not found");
         assert_eq!(resp.status.0, 404);
-        let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(resp.body_bytes()).unwrap();
         assert_eq!(body["status"], 404);
         assert_eq!(body["title"], "Not Found");
         assert_eq!(body["detail"], "user 42 not found");
@@ -257,7 +257,7 @@ mod tests {
     fn problem_detail_bad_request_status_400() {
         let resp = ProblemDetail::bad_request("invalid id");
         assert_eq!(resp.status.0, 400);
-        let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(resp.body_bytes()).unwrap();
         assert_eq!(body["status"], 400);
     }
 

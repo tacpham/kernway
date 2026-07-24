@@ -176,32 +176,52 @@ The symlink case is a live `curl` against a real symlink *and* the automated
 `a_symlink_escaping_the_root_is_rejected` test — the KEP-0000 §3 rule that a
 security claim is a test, so it can never silently regress.
 
-## M2b — Streaming, HEAD, Range
+## M2b — Streaming ✅ (2026-07-24); HEAD, Range next
 
 **Goal**: serve a large file without reading it all into memory, and answer
 HEAD and byte-range requests.
 
-**Blocked on a real decision**, which is why it is separate: `Response.body` is
-`Vec<u8>`. Streaming needs a `Body` enum (`Bytes` | `File` | `Stream`), and that
-is a breaking change to `Response` touching every response type in the framework
-— it needs a KEP (0002, now Accepted) before code. HEAD and Range also need the encoder to
-send a `Content-Length` without a body, which it cannot do today.
+It was blocked on a real decision, now made: KEP-0002 turned `Response.body`
+from `Vec<u8>` into a `Body` enum (`Empty` | `Bytes` | `File`). Done in two
+verified steps.
 
-- KEP-0002 (Accepted): `Body` enum. The async handler is a separate, later KEP
-- `Body::File` streamed in bounded chunks from the blocking pool
-- HEAD: headers with the file's length, empty body
-- `Range` → `206` + `Content-Range`, with a cap on ranges per request
-- precompressed `.br`/`.gz` selection by `Accept-Encoding`
+**Streaming — done:**
 
-**Gate**:
+- `Body` enum in `kernway-core`; `Response::file(path, len)` names a file. The
+  refactor was behavior-preserving — all tests stayed green through the type
+  change (`.body()` still takes bytes, `IntoResponse` still produces `Bytes`).
+- The encoder split: `encode_head(response, connection, content_length)` writes
+  the head with the length passed in, so a body that is not in memory can still
+  be framed. In-memory responses still coalesce head and body into one write.
+- `stream_file` in the connection task: open, seek, and read each 64 KiB chunk on
+  the blocking pool via `spawn_blocking`; only the socket write is on the shard.
+  Memory is O(chunk), not O(file).
+- `load_static` no longer reads the file — it stats for the ETag and returns
+  `Body::File`; the stream happens in the connection task.
 
-```bash
-curl -I localhost:8080/big.bin               # 200, content-length set, no body
-curl -r 0-99 localhost:8080/big.bin          # 206, content-range, 100 bytes
+**Gate — passed:**
+
+```
+GET /big.txt (200 KB, >3 chunks)  200, content-length: 200000, whole file intact
+GET / (index.html, 1 chunk)       200, streamed, content matches
 ```
 
-The traversal cases are part of the gate, not a later hardening pass. A static
-server that ships without them ships a vulnerability.
+Verified over a real socket in `streams_a_large_file_in_chunks_over_http` and
+`serves_a_real_file_over_http` — the streaming loop crossing chunk boundaries is
+a test, not a manual check.
+
+**Still to come (HEAD, Range):**
+
+- HEAD: `encode_head` already takes the length, so a HEAD response is headers
+  with the file's length and an empty body — small, next.
+- `Range` → `206` + `Content-Range`, with a cap on ranges per request (range
+  amplification is a DoS vector — the cap is part of the spec, not hardening).
+- precompressed `.br`/`.gz` selection by `Accept-Encoding`.
+
+```bash
+curl -I localhost:8080/big.txt           # 200, content-length set, no body   (to build)
+curl -r 0-99 localhost:8080/big.txt      # 206, content-range, 100 bytes       (to build)
+```
 
 ---
 

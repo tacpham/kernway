@@ -43,20 +43,16 @@ pub fn encode_response(response: &Response) -> Vec<u8> {
     encode_response_with(response, Connection::Close)
 }
 
-/// Serialize a response, stating explicitly whether the connection persists.
+/// Serialize the head — status line and headers — with `Content-Length` passed
+/// in rather than read from the body.
 ///
-/// Head and body go into one buffer so a small response leaves in a single
-/// `write` — with keep-alive that matters, since a split head and body can
-/// otherwise be delayed by Nagle waiting on the peer's ACK.
-///
-/// `content-length` is always emitted: without it a persistent connection has
-/// no way to tell where one response ends and the next begins.
-pub fn encode_response_with(response: &Response, connection: Connection) -> Vec<u8> {
+/// Passing the length in is what lets the head be written for a body that is not
+/// in memory: a `HEAD` response (length of the file, empty body) or a streamed
+/// `Body::File` (the head goes out, then the connection task streams the bytes).
+pub fn encode_head(response: &Response, connection: Connection, content_length: u64) -> Vec<u8> {
     // Built straight into the output buffer: a separate head `String` copied in
     // afterwards costs an extra allocation and pass over bytes we already have.
-    // `push_str` rather than `format!` per header for the same reason — each
-    // `format!` is one throwaway allocation on a path that runs per response.
-    let mut out = Vec::with_capacity(head_estimate(response) + response.body.len());
+    let mut out = Vec::with_capacity(head_estimate(response));
     out.extend_from_slice(b"HTTP/1.1 ");
     out.extend_from_slice(itoa(u64::from(response.status.0)).as_bytes());
     out.push(b' ');
@@ -64,7 +60,7 @@ pub fn encode_response_with(response: &Response, connection: Connection) -> Vec<
     out.extend_from_slice(b"\r\n");
 
     for (name, value) in &response.headers {
-        // The connection header is the transport's call, not the handler's.
+        // The connection and content-length headers are the transport's call.
         if name.eq_ignore_ascii_case("connection") || name.eq_ignore_ascii_case("content-length") {
             continue;
         }
@@ -75,12 +71,23 @@ pub fn encode_response_with(response: &Response, connection: Connection) -> Vec<
     }
     // Content-Length is required (RFC 9112 §6.2)
     out.extend_from_slice(b"content-length: ");
-    out.extend_from_slice(itoa(u64::try_from(response.body.len()).expect("a body length fits in u64")).as_bytes());
+    out.extend_from_slice(itoa(content_length).as_bytes());
     out.extend_from_slice(b"\r\nconnection: ");
     out.extend_from_slice(connection.header_value().as_bytes());
     out.extend_from_slice(b"\r\n\r\n");
+    out
+}
 
-    out.extend_from_slice(&response.body);
+/// Serialize a response with an in-memory body, head and body in one buffer.
+///
+/// Head and body coalesce so a small response leaves in a single `write` — with
+/// keep-alive that matters, since a split head and body can otherwise be delayed
+/// by Nagle waiting on the peer's ACK. For a `Body::File`, use
+/// [`encode_head`] and stream the file separately instead.
+pub fn encode_response_with(response: &Response, connection: Connection) -> Vec<u8> {
+    let mut out = encode_head(response, connection, response.body.len());
+    out.reserve(response.body.len() as usize);
+    out.extend_from_slice(response.body_bytes());
     out
 }
 
