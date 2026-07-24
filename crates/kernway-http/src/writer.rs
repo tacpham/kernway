@@ -50,9 +50,17 @@ pub fn encode_response(response: &Response) -> Vec<u8> {
 /// in memory: a `HEAD` response (length of the file, empty body) or a streamed
 /// `Body::File` (the head goes out, then the connection task streams the bytes).
 pub fn encode_head(response: &Response, connection: Connection, content_length: u64) -> Vec<u8> {
-    // Built straight into the output buffer: a separate head `String` copied in
-    // afterwards costs an extra allocation and pass over bytes we already have.
     let mut out = Vec::with_capacity(head_estimate(response));
+    encode_head_into(&mut out, response, connection, content_length);
+    out
+}
+
+/// Append the head to an existing buffer.
+///
+/// Split out so [`encode_response_with`] can size one buffer for head *and* body
+/// up front and write into it — head and body in a single allocation, no realloc
+/// between them, which is the property the one-write coalescing depends on.
+fn encode_head_into(out: &mut Vec<u8>, response: &Response, connection: Connection, content_length: u64) {
     out.extend_from_slice(b"HTTP/1.1 ");
     out.extend_from_slice(itoa(u64::from(response.status.0)).as_bytes());
     out.push(b' ');
@@ -75,18 +83,18 @@ pub fn encode_head(response: &Response, connection: Connection, content_length: 
     out.extend_from_slice(b"\r\nconnection: ");
     out.extend_from_slice(connection.header_value().as_bytes());
     out.extend_from_slice(b"\r\n\r\n");
-    out
 }
 
 /// Serialize a response with an in-memory body, head and body in one buffer.
 ///
-/// Head and body coalesce so a small response leaves in a single `write` — with
-/// keep-alive that matters, since a split head and body can otherwise be delayed
-/// by Nagle waiting on the peer's ACK. For a `Body::File`, use
-/// [`encode_head`] and stream the file separately instead.
+/// Head and body coalesce into a single allocation so a small response leaves in
+/// one `write` — with keep-alive that matters, since a split head and body can
+/// otherwise be delayed by Nagle waiting on the peer's ACK. For a `Body::File`,
+/// use [`encode_head`] and stream the file separately instead.
 pub fn encode_response_with(response: &Response, connection: Connection) -> Vec<u8> {
-    let mut out = encode_head(response, connection, response.body.len());
-    out.reserve(response.body.len() as usize);
+    let body_len = response.body.len() as usize;
+    let mut out = Vec::with_capacity(head_estimate(response) + body_len);
+    encode_head_into(&mut out, response, connection, response.body.len());
     out.extend_from_slice(response.body_bytes());
     out
 }

@@ -386,6 +386,7 @@ dependencies = [
 name = "kernway-core"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "futures-core",
  "thiserror",
 ]

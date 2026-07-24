@@ -92,10 +92,10 @@ the network.
 
 | Benchmark | Time | What it exercises |
 |---|---|---|
-| `pipeline/static_get` | 363 ns | parse + static route + handler + encode |
+| `pipeline/static_get` | 352 ns | parse + static route + handler + encode |
 | `pipeline/param_get` | 598 ns | parse (with headers) + param route + param map + JSON build + encode |
 
-363 ns end to end for a static-route request is ~2.75 M requests/sec/core of pure
+352 ns end to end for a static-route request is ~2.8 M requests/sec/core of pure
 CPU headroom — the ceiling a real deployment works down from once the network,
 the syscalls, and the scheduler are added. `param_get` costs ~1.6× more: a
 browser request with more headers to parse, a parameter map to allocate, and a
@@ -173,13 +173,23 @@ exists.
 | `parse/browser_get_8_headers` | 705 ns |
 | `parse/json_post_with_body` | 331 ns |
 | `parse/incomplete_head` | 133 ns |
-| `encode/small_json_close` | 44 ns |
-| `encode/small_json_keep_alive` | 43 ns |
+| `encode/small_json_close` | 47 ns |
+| `encode/small_json_keep_alive` | 46 ns |
 
 Parsing a realistic browser request with eight headers takes ~705 ns; encoding a
-small JSON response ~44 ns. `incomplete_head` is the partial-read path — the
+small JSON response ~47 ns. `incomplete_head` is the partial-read path — the
 parser returns "need more bytes" in 133 ns rather than failing, which is what
 lets a connection accumulate a request across several reads.
+
+Encoding briefly regressed to 75 ns when `Body` split the head from the body
+(KEP-0002) — the head sized its own buffer, then the body was appended, risking a
+realloc between them. Fixed by sizing one buffer for head+body up front
+(`encode_head_into`), back to ~47 ns. A separate experiment — moving
+`Response.headers` from `HashMap` to the one-buffer `Headers` — was measured here
+and **reverted**: a micro-benchmark liked it, the encode path did not (75 → 103 ns),
+because the encoder iterates the headers twice. That is the "measure in context"
+lesson in [KEP-0000 §2](../kep/0000-principles.md#2-fast--measured-or-it-is-not-a-claim),
+paid in full.
 
 ## Runtime — executor and scheduling
 
