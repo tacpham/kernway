@@ -1,0 +1,22 @@
+[package]
+name    = "login-htmx"
+version.workspace = true
+edition.workspace = true
+
+# A lib so the socket tests can build the same app the binary runs.
+[lib]
+name = "login_htmx"
+path = "src/lib.rs"
+
+[[bin]]
+name = "login-htmx"
+path = "src/main.rs"
+
+# The walking-skeleton login flow pulls the web tier together directly: the server,
+# the template engine, security, and htmx. (These are not yet meta-crate features.)
+[dependencies]
+kernway-core     = { workspace = true }
+kernway-server   = { workspace = true }
+kernleaf         = { workspace = true }
+kernway-security = { workspace = true }
+kernway-htmx     = { workspace = true }
