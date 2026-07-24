@@ -1,0 +1,24 @@
+[package]
+name        = "kernway-security"
+description = "Kernway security — CSRF tokens, security headers, and an authorization context"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+homepage.workspace   = true
+
+[dependencies]
+kernway-core = { workspace = true } # Request/Response/Layer integration
+
+# `getrandom` is the one third-party primitive here, and a deliberate exception to
+# KEP-0000 §1: a CSRF token must be unpredictable, and rolling our own CSPRNG is
+# exactly the "solid" failure that principle guards against. getrandom is the
+# OS RNG, small and audited — the responsible dependency, like mio for I/O.
+getrandom = "0.2"
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
