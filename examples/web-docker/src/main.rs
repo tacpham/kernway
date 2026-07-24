@@ -9,6 +9,7 @@
 //!   http://localhost:8080/            → public/index.html
 //!   http://localhost:8080/style.css   → public/style.css
 //!   http://localhost:8080/api/ping    → {"message":"pong"}
+//!   http://localhost:8080/htmx/greet  → an htmx fragment, or a full page
 //!   http://localhost:8080/health      → 200 (liveness)
 //!   http://localhost:8080/ready       → 200 (readiness)
 
@@ -27,6 +28,10 @@ fn main() -> std::io::Result<()> {
         // read from disk at request time; embedding them into the binary for
         // release is M6.
         .static_files("public")
+        // Serve precompressed `.br`/`.gz` next to a compressible file when the
+        // client accepts it — see `public/style.css.br`. No CPU spent
+        // compressing per request; the variants are produced at build time.
+        .precompressed()
         // A JSON API route, to prove routing and static coexist: the router is
         // tried first, so /api/ping is dynamic and everything else falls through
         // to the filesystem.
@@ -34,6 +39,22 @@ fn main() -> std::io::Result<()> {
             Response::new(StatusCode::OK)
                 .content_type("application/json; charset=utf-8")
                 .body(br#"{"message":"pong"}"#.to_vec())
+        })
+        // One htmx endpoint, to prove the typed HX-* API works end to end. htmx
+        // sends `HX-Request: true`; the handler returns just the fragment for it
+        // and a full page for a plain browser hit — the same URL, two shapes,
+        // and `respond` sets `Vary: HX-Request` so a cache never mixes them up.
+        // It also fires a client-side `greeted` event via `HX-Trigger`.
+        .get("/htmx/greet", |req, _ctx| {
+            Htmx::from(req)
+                .respond(
+                    || "<div id=\"greeting\">Hello from an htmx fragment 👋</div>".to_string(),
+                    || "<!doctype html><title>Greet</title>\
+                        <button hx-get=\"/htmx/greet\" hx-target=\"#greeting\">Greet</button>\
+                        <div id=\"greeting\"></div>".to_string(),
+                )
+                .trigger("greeted")
+                .into_response()
         })
         // Liveness: "the process is up". Kubernetes restarts the pod if this
         // fails. It must stay trivially true and touch nothing external.
