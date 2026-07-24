@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use di_core::AppContext;
-use kernway_core::{error::StatusCode, request::Request, response::Response};
-use kernway_http::{encode_response, encode_response_with, parse_bytes, Connection, Parsed};
+use kernway_core::{error::StatusCode, request::Request, response::{Body, Response}};
+use kernway_http::{encode_head, encode_response, encode_response_with, parse_bytes, Connection, Parsed};
 use kernway_static::{mime_for, StaticFiles};
 use rt_core::Shutdown;
 use rt_net::{AsyncTcpStream, ShardConfig};
@@ -385,11 +385,7 @@ async fn serve_connection(
             None => handle(request, &router, &context, &middlewares),
         };
         let connection = if persist { Connection::KeepAlive } else { Connection::Close };
-        if stream
-            .write_all(&encode_response_with(&response, connection))
-            .await
-            .is_err()
-        {
+        if write_response(&mut stream, &response, connection).await.is_err() {
             return; // peer vanished mid-write; nothing to half-close
         }
 
@@ -409,12 +405,100 @@ fn close(stream: &mut AsyncTcpStream) {
     let _ = stream.shutdown(std::net::Shutdown::Write);
 }
 
-/// What the blocking file lookup decided.
+/// Chunk size for streaming a file body. Trades syscalls against memory; 64 KiB
+/// is a starting point, to be measured against a large-file load test (KEP-0002).
+const FILE_CHUNK: usize = 64 * 1024;
+
+/// Write a response. An in-memory body goes out in one buffer (head and bytes
+/// coalesced); a [`Body::File`] streams — the head first, then the file in
+/// bounded chunks, each read on the blocking pool so it never stalls the shard.
+async fn write_response(
+    stream: &mut AsyncTcpStream,
+    response: &Response,
+    connection: Connection,
+) -> std::io::Result<()> {
+    match &response.body {
+        Body::File { path, len, range } => {
+            let head = encode_head(response, connection, response.body.len());
+            stream.write_all(&head).await?;
+            stream_file(stream, path.clone(), *range, *len).await
+        }
+        Body::Empty | Body::Bytes(_) => {
+            stream.write_all(&encode_response_with(response, connection)).await
+        }
+    }
+}
+
+/// Stream a file (or a byte range of it) to the socket, chunk by chunk. Each
+/// open, seek, and read runs on the blocking pool via `spawn_blocking`; only the
+/// socket write is on the shard. Memory is O(chunk), not O(file).
+///
+/// The head — with its `Content-Length` — is already on the wire, so a read
+/// failure mid-stream cannot be signalled in band; the connection is simply
+/// closed (returning `Ok`, since there is nothing more to do).
+async fn stream_file(
+    stream: &mut AsyncTcpStream,
+    path: std::path::PathBuf,
+    range: Option<(u64, u64)>,
+    len: u64,
+) -> std::io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let start = range.map_or(0, |(s, _)| s);
+    let total = range.map_or(len, |(s, e)| e - s);
+
+    // Open and seek on the blocking pool.
+    let opened = rt_core::spawn_blocking(move || {
+        let mut f = std::fs::File::open(&path)?;
+        if start > 0 {
+            f.seek(SeekFrom::Start(start))?;
+        }
+        std::io::Result::Ok(f)
+    })
+    .await;
+    let mut file = match opened {
+        Some(Ok(f)) => f,
+        _ => return Ok(()), // open failed after the head went out — close
+    };
+
+    let mut remaining = total;
+    while remaining > 0 {
+        let want = remaining.min(FILE_CHUNK as u64) as usize;
+        // Read one chunk on the blocking pool; move the file in and back out.
+        let read = rt_core::spawn_blocking(move || {
+            let mut buf = vec![0u8; want];
+            let mut got = 0;
+            while got < buf.len() {
+                match file.read(&mut buf[got..])? {
+                    0 => break, // EOF
+                    n => got += n,
+                }
+            }
+            buf.truncate(got);
+            std::io::Result::Ok((buf, file))
+        })
+        .await;
+        let (chunk, returned) = match read {
+            Some(Ok(x)) => x,
+            _ => return Ok(()),
+        };
+        if chunk.is_empty() {
+            break; // EOF before the expected length — stop
+        }
+        file = returned;
+        stream.write_all(&chunk).await?;
+        remaining -= chunk.len() as u64;
+    }
+    Ok(())
+}
+
+/// What the blocking file lookup decided. Note it carries no file *contents* —
+/// the file is named, not read; the connection task streams it (KEP-0002).
 enum StaticOutcome {
     /// The client's cached copy is current — send `304` with the validator, no body.
     NotModified { etag: String },
-    /// Send the file with a `200` and its headers.
-    File { bytes: Vec<u8>, etag: String, mime: &'static str },
+    /// Send the file with a `200`, streamed. `path`/`len` name it for the body.
+    File { path: std::path::PathBuf, len: u64, etag: String, mime: &'static str },
 }
 
 impl StaticOutcome {
@@ -426,14 +510,14 @@ impl StaticOutcome {
                 r.headers.insert("cache-control".to_string(), "no-cache".to_string());
                 r
             }
-            StaticOutcome::File { bytes, etag, mime } => {
-                let mut r = Response::new(StatusCode::OK).content_type(mime).body(bytes);
+            StaticOutcome::File { path, len, etag, mime } => {
+                // `Body::File`: the response names the file; the connection task
+                // streams it in bounded chunks off the blocking pool, so a large
+                // download is never read whole into memory.
+                let mut r = Response::new(StatusCode::OK).content_type(mime).file(path, len);
                 r.headers.insert("etag".to_string(), etag);
                 // `no-cache` means "cache, but revalidate every time" — the browser
                 // re-asks with If-None-Match and gets a 304 when nothing changed.
-                // The right default for files that can change; `immutable` for
-                // content-hashed assets is later, and needs to know the asset is
-                // hashed.
                 r.headers.insert("cache-control".to_string(), "no-cache".to_string());
                 // The extension-derived type is authoritative; stop the browser sniffing.
                 r.headers.insert("x-content-type-options".to_string(), "nosniff".to_string());
@@ -443,9 +527,9 @@ impl StaticOutcome {
     }
 }
 
-/// Resolve, verify, stat, and (unless the cache is current) read a static file.
-/// Runs entirely on the blocking pool. `None` means "not served here" — the
-/// caller falls through to the router, which 404s.
+/// Resolve, verify, and stat a static file — but do **not** read it. Runs on the
+/// blocking pool. `None` means "not served here" — the caller falls through to
+/// the router, which 404s.
 ///
 /// The symlink re-check is here rather than in `kernway-static` because it needs
 /// I/O: `resolve` guarantees *lexical* containment, but a file inside the root
@@ -475,15 +559,14 @@ fn load_static(root: &std::path::Path, path: std::path::PathBuf, if_none_match: 
     let etag = kernway_static::etag(meta.len(), mtime_nanos);
 
     // Conditional request: if the client's validator still matches, answer 304
-    // and never read the body — the whole point of caching.
+    // and stream nothing — the whole point of caching.
     if let Some(inm) = if_none_match {
         if kernway_static::etag_matches(inm, &etag) {
             return Some(StaticOutcome::NotModified { etag });
         }
     }
 
-    let bytes = std::fs::read(&canon).ok()?;
-    Some(StaticOutcome::File { bytes, etag, mime: mime_for(&canon) })
+    Some(StaticOutcome::File { path: canon, len: meta.len(), etag, mime: mime_for(&path) })
 }
 
 /// Try to answer a request from the static file root.
@@ -576,7 +659,7 @@ mod tests {
         let ctx = AppContext::new();
         let response = handle(get("/nope"), &router, &ctx, &[]);
         assert_eq!(response.status, StatusCode::NOT_FOUND);
-        assert!(String::from_utf8_lossy(&response.body).contains("no route for GET /nope"));
+        assert!(String::from_utf8_lossy(response.body_bytes()).contains("no route for GET /nope"));
     }
 
     #[test]
@@ -586,7 +669,7 @@ mod tests {
             Response::new(StatusCode::OK).body(b"pong".to_vec())
         }));
         let response = handle(get("/ping"), &router, &AppContext::new(), &[]);
-        assert_eq!(response.body, b"pong");
+        assert_eq!(response.body_bytes(), b"pong");
     }
 
     #[test]
@@ -596,7 +679,7 @@ mod tests {
             Response::new(StatusCode::OK).body(req.path_params["id"].clone().into_bytes())
         }));
         let response = handle(get("/users/42"), &router, &AppContext::new(), &[]);
-        assert_eq!(response.body, b"42");
+        assert_eq!(response.body_bytes(), b"42");
     }
 
     #[test]
@@ -986,8 +1069,10 @@ mod static_file_tests {
         fs::write(root.join("a.txt"), b"hello").unwrap();
 
         match load_static(&root, root.join("a.txt"), None).expect("should serve") {
-            StaticOutcome::File { bytes, etag, mime } => {
-                assert_eq!(bytes, b"hello");
+            StaticOutcome::File { path, len, etag, mime } => {
+                // The file is named, not read — verify by size and by reading it here.
+                assert_eq!(len, 5);
+                assert_eq!(std::fs::read(&path).unwrap(), b"hello");
                 assert!(etag.starts_with('"') && etag.ends_with('"'), "etag quoted: {etag}");
                 assert_eq!(mime, "text/plain; charset=utf-8");
             }
@@ -1112,6 +1197,27 @@ mod static_file_tests {
         assert!(got.to_ascii_lowercase().contains("etag:"), "got {got:?}");
         assert!(got.contains("x-content-type-options: nosniff"), "got {got:?}");
         assert!(got.ends_with("<h1>hi</h1>"), "got {got:?}");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn streams_a_large_file_in_chunks_over_http() {
+        // Larger than FILE_CHUNK (64 KiB), so the streaming loop runs several
+        // read-a-chunk/write-a-chunk iterations — the path a real download takes,
+        // and the reason Body::File exists (never the whole file in memory).
+        let root = tmpdir("large");
+        let content = "x".repeat(200_000); // ~3.1 chunks
+        fs::write(root.join("big.txt"), &content).unwrap();
+
+        let got = serve_static(root.clone(), "GET /big.txt HTTP/1.1\r\nHost: x\r\n\r\n".to_string());
+        assert!(got.starts_with("HTTP/1.1 200 OK\r\n"), "got head");
+        assert!(got.contains("content-length: 200000"), "content-length must be the file size");
+        assert!(
+            got.ends_with(&content),
+            "the whole file must arrive intact across chunk boundaries (got {} body bytes)",
+            got.len() - got.find("\r\n\r\n").map_or(0, |i| i + 4)
+        );
 
         fs::remove_dir_all(&root).ok();
     }

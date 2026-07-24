@@ -2,6 +2,53 @@
 
 use crate::error::StatusCode;
 use std::collections::HashMap;
+use std::path::PathBuf;
+
+/// A response body: bytes in memory, or a file the connection task streams.
+///
+/// Per [KEP-0002]. The common case is `Bytes` — what every `IntoResponse`
+/// produces. `File` lets a handler name a file instead of carrying its contents,
+/// so a large download is not read whole into memory: the async connection task
+/// reads it in bounded chunks off the blocking pool.
+///
+/// [KEP-0002]: https://github.com/tacpham/kernway/blob/main/docs/kep/0002-response-body.md
+#[derive(Debug)]
+pub enum Body {
+    /// No body — a `HEAD` response, a `204`, a `304`.
+    Empty,
+    /// Bytes already in memory. What handlers and `IntoResponse` produce.
+    Bytes(Vec<u8>),
+    /// A file to stream. `len` is the full file size; `range`, when set, is the
+    /// half-open byte interval `[start, end)` to send for a `206`.
+    File {
+        /// Path to the file, resolved and safety-checked by the caller.
+        path: PathBuf,
+        /// Full file length, for `Content-Length` and range arithmetic.
+        len: u64,
+        /// The byte interval to send, for a partial response; `None` sends all.
+        range: Option<(u64, u64)>,
+    },
+}
+
+impl Body {
+    /// The number of bytes this body will write — the `Content-Length`.
+    ///
+    /// For a `File` with a range, that is the range width, not the file size.
+    #[must_use]
+    pub fn len(&self) -> u64 {
+        match self {
+            Body::Empty => 0,
+            Body::Bytes(b) => b.len() as u64,
+            Body::File { len, range, .. } => range.map_or(*len, |(s, e)| e - s),
+        }
+    }
+
+    /// Whether the body writes no bytes.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
 
 /// Raw HTTP response — implementation-agnostic.
 #[derive(Debug)]
@@ -10,8 +57,8 @@ pub struct Response {
     pub status:  StatusCode,
     /// Response headers, written out verbatim.
     pub headers: HashMap<String, String>,
-    /// Response body. `Content-Length` is derived from its length at write time.
-    pub body:    Vec<u8>,
+    /// Response body — bytes, a file, or empty.
+    pub body:    Body,
 }
 
 impl Response {
@@ -20,14 +67,34 @@ impl Response {
         Self {
             status,
             headers: HashMap::new(),
-            body: Vec::new(),
+            body: Body::Empty,
         }
     }
 
-    /// Set body bytes.
+    /// Set the body to bytes in memory.
     pub fn body(mut self, body: impl Into<Vec<u8>>) -> Self {
-        self.body = body.into();
+        self.body = Body::Bytes(body.into());
         self
+    }
+
+    /// Set the body to a file the connection task will stream. `len` is the full
+    /// file size; the read happens later, off the request path.
+    pub fn file(mut self, path: impl Into<PathBuf>, len: u64) -> Self {
+        self.body = Body::File { path: path.into(), len, range: None };
+        self
+    }
+
+    /// The in-memory body bytes, or an empty slice for `Empty`/`File`.
+    ///
+    /// A convenience for reading a `Bytes` body (tests, middleware). A `File`
+    /// body has no bytes in memory, so this returns `&[]` for it — use the
+    /// `Body::File` fields to stream.
+    #[must_use]
+    pub fn body_bytes(&self) -> &[u8] {
+        match &self.body {
+            Body::Bytes(b) => b,
+            Body::Empty | Body::File { .. } => &[],
+        }
     }
 
     /// Set Content-Type header.
@@ -109,7 +176,7 @@ mod tests {
     #[test]
     fn response_body_builder() {
         let r = Response::new(StatusCode::OK).body(b"hello".to_vec());
-        assert_eq!(r.body, b"hello");
+        assert_eq!(r.body_bytes(), b"hello");
     }
 
     #[test]
@@ -122,14 +189,14 @@ mod tests {
     fn into_response_static_str() {
         let r = "hello".into_response();
         assert_eq!(r.status, StatusCode::OK);
-        assert_eq!(r.body, b"hello");
+        assert_eq!(r.body_bytes(), b"hello");
         assert!(r.headers["content-type"].contains("text/plain"));
     }
 
     #[test]
     fn into_response_string() {
         let r = String::from("world").into_response();
-        assert_eq!(r.body, b"world");
+        assert_eq!(r.body_bytes(), b"world");
     }
 
     #[test]

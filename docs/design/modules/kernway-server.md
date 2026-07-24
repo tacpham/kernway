@@ -105,9 +105,9 @@ As of 2026-07-23.
 | Keep-alive, pipelining | ✅ | RFC 9112 §9.3, idle timeout, request cap |
 | Graceful shutdown / drain | ✅ | Verified under a real `SIGTERM` from `docker stop`: drained and exited in 0.18s (M1) |
 | Panic isolation | ✅ | `catch_unwind` per request → 500, core survives |
-| **Static file serving** | 🚧 M2a | GET, whole-file read on the blocking pool via `.static_files(root)`. Traversal/dotfile/symlink rejected; ETag + `If-None-Match` → 304; `Cache-Control`. HEAD, Range, streaming are M2b. |
+| **Static file serving** | 🚧 M2b | GET, **streamed** in 64 KiB chunks off the blocking pool via `.static_files(root)`. Traversal/dotfile/symlink rejected; ETag + `If-None-Match` → 304; `Cache-Control`. HEAD and Range still to come. |
+| **Response body streaming** | ✅ M2b | `Body` enum (KEP-0002): `Empty`/`Bytes`/`File`. `Body::File` names a file; the connection task streams it, O(chunk) memory. Verified over a socket with a 200 KB file. |
 | **Async handlers** | ❌ | Handlers are `Fn(...) -> Response`, blocking. Static files sidestep this (the read is on the blocking pool, not in a handler). |
-| **Response body streaming** | ❌ | `body: Vec<u8>` — whole file in memory. M2. |
 | **View / template pipeline** | ❌ | Deliberately out of scope — it lives in a renderer crate, not here |
 | **htmx support** | ❌ | Its own crate, not started |
 
