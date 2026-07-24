@@ -123,6 +123,34 @@ knowing it exists.
 does work faster.** A static route became a hash lookup instead of a linear scan;
 that is worth more than any amount of tuning the scan.
 
+**Fast enough for itself is not the bar. The bar is the incumbent.** A number in
+isolation only says the code is not embarrassing — it does not say it is good. We
+chose to write our own router, parser, and runtime instead of using `matchit`,
+`httparse`, and `tokio`; that choice is only justified if what we wrote is at
+least as fast as what we declined. So a hot path is benchmarked **against the
+crate a mainstream framework uses for the same job**, on the same machine, same
+input, in the same process — and the target is to match it or beat it. If we are
+slower, either we optimise until we are not, or we write down why the gap is an
+acceptable trade (and it rarely is, for a thing we chose to own).
+
+### The per-core loop
+
+Every core follows the same four steps, in order, and the last one repeats:
+
+1. **Write it.**
+2. **Test the core alone** — `cargo test -p <crate>`, including the edges (§3).
+3. **Run it for real** — over a socket, from disk, in a container: the thing a
+   deployment does, not just a function call. A unit test proves the algorithm;
+   a real run proves the wire.
+4. **Benchmark, compare to the incumbent, optimise — and loop.** Measure the hot
+   path, put the number beside the crate a mainstream framework uses, and if it
+   is behind, optimise and measure again. Stop when it matches or beats the
+   incumbent, not when it "seems fine".
+
+Step 4 is a loop, not a checkbox. A first cut that is 3× slower than `matchit`
+is a starting point, not a failure — the loop is what closes the gap, and a
+recorded "we are at 1.2× and here is why" is a legitimate place to stop.
+
 ### Compile time counts as speed
 
 A framework that takes four minutes to rebuild is slow, whatever it does at

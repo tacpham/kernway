@@ -26,33 +26,51 @@ is the **shape** — O(1) vs O(n), the ratio between two approaches — and that
 what the analysis below leans on. Re-run on your own hardware before quoting an
 absolute figure elsewhere.
 
-## Routing — flat with application size
+## Routing — measured, and behind the incumbent
 
-`cargo bench -p kernway-server`
+`cargo bench -p kernway-server` and `--bench vs_matchit`
+
+The internal numbers first:
 
 | Benchmark | 4 routes | 102 routes | Shape |
 |---|---|---|---|
-| `route/static_hit` | 41.2 ns | 41.6 ns | **flat — O(1)** |
-| `route/param_hit` | 331 ns | 2.17 µs | grows with dynamic-route count |
-| `route/miss` | 80 ns | 1.87 µs | grows with dynamic-route count |
+| `route/static_hit` | 41.2 ns | 41.6 ns | flat in route count |
+| `route/param_hit` | 331 ns | 2.17 µs | O(n) in dynamic-route count |
+| `route/miss` | 80 ns | 1.87 µs | O(n) |
 
-The first row is the headline, and it is an architectural claim backed by a
-measurement: **a static route costs the same whether the application has 4
-routes or 102.** 41.2 ns at four, 41.6 ns at a hundred-and-two — inside the noise
-of each other.
+The good news is real: a static route is flat — 41 ns whether the app has 4
+routes or 102 — because static patterns go in a hash map, not the scan. A param
+route is a linear scan and grows with the table, as the shape shows.
 
-That is the payoff of splitting the router in two. A pattern with no placeholder
-goes into a hash map and costs one lookup; only patterns containing `{param}` are
-walked. So the routes that dominate a real application — `/`, `/health`,
-`/assets/...`, every page — do not get slower as it grows.
+But "fast enough for itself" is not the bar ([KEP-0000 §2]). Against `matchit`,
+the radix-trie router axum uses, on the same table and machine:
 
-The contrast makes the point: at 102 routes a static hit is **~52× faster** than
-a parameterised one (41.6 ns vs 2.17 µs), because one is a hash lookup and the
-other is a linear scan. Both are fine; the design ensures the common case is the
-fast one.
+| | kernway | matchit | kernway is |
+|---|---|---|---|
+| static hit, 22 routes | 42 ns | 14.6 ns | **2.9× slower** |
+| static hit, 102 routes | 42 ns | 14.8 ns | **2.9× slower** |
+| param hit, 22 routes | 680 ns | 28.7 ns | **24× slower** |
+| param hit, 102 routes | 2.22 µs | 28.7 ns | **77× slower** |
+
+This is the honest picture, and it retires an earlier boast in this file that
+41 ns was a "headline". It is not, next to 14 ns. Two facts hold at once: our
+static routing is O(1) in *route count* (good, and matchit is too), and its
+*constant* is ~3× matchit's because it hashes the whole path string with SipHash
+where matchit walks a trie. And our param routing is O(n) where matchit is O(path
+length), so the gap widens without bound as routes are added — 77× at a hundred
+routes, and it keeps going.
+
+**This is the optimisation loop's open target, not a settled result.** Writing
+our own router (rather than depending on matchit) is only justified once it
+matches or beats matchit; today it does not. The fix is a radix trie for both
+classes, which is the next routing work. Recorded here so the gap is a tracked
+number, not a surprise.
+
+[KEP-0000 §2]: ../kep/0000-principles.md#2-fast--measured-or-it-is-not-a-claim
 
 **Allocation**: zero for a matched static route, one `HashMap` only for a route
-that actually has parameters.
+that actually has parameters — but allocation is not where the gap is; the hash
+and the scan are.
 
 ## The full request pipeline — every module together
 
