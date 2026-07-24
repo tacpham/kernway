@@ -77,6 +77,8 @@ to keep.
 | [0001](0001-respect-rust.md) | Respect Rust — inspiration is not translation | Accepted |
 | [0002](0002-response-body.md) | A response body that can be bytes, a file, or a stream | Accepted |
 | [0003](0003-template-model.md) | A template model an engine can actually render | Accepted |
+| [0004](0004-sessions.md) | Sessions — a signed token backed by a revocable registry | Accepted |
+| [0005](0005-request-scoped-beans.md) | Request-scoped DI beans — a per-request scope over the app context | Accepted |
 
 ## The first two are different from the rest
 
