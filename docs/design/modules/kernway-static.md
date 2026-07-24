@@ -30,7 +30,7 @@ As of 2026-07-24. Landed in the M1 slice.
 | MIME by extension | ✅ | hand-written table, ~18 types |
 | ETag + `If-None-Match` matching | ✅ M2a | `etag()` + `etag_matches()`, pure; the 304 is decided in the server |
 | Symlink re-check at open time | ✅ M2a | done in `kernway-server::load_static` (needs `canonicalize`, which is I/O) |
-| Precompressed variants (`.br`/`.gz`) | ❌ | M2b |
+| Precompressed variants (`.br`/`.gz`) | ✅ M2b | `accepted_encodings` + `is_compressible` here; the file probe + `Content-Encoding`/`Vary` in `kernway-server` |
 
 **Today**: `StaticFiles::new(root).resolve(url_path)` returns a safe `PathBuf` or
 a typed `Rejected`. `mime_for(path)` names the type.
@@ -71,8 +71,9 @@ Ok(root/style.css…)  or  Err(Rejected)
 Containment is **lexical**: because no `..` segment survives the loop, the joined
 path cannot climb above the root, and this holds without consulting the disk.
 The one thing lexical checks cannot see is a symlink *inside* the root pointing
-*outside* it — that is the single ❌ in Status, and it is closed at open time in
-the caller (M2).
+*outside* it — closed at open time in the caller (`kernway-server::load_static`,
+M2a), which canonicalizes and re-checks containment for the identity file *and*
+any `.br`/`.gz` variant it serves.
 
 ## Public surface
 
@@ -88,10 +89,25 @@ impl StaticFiles {
 pub enum Rejected { Traversal, Dotfile, IllegalByte, BadEncoding }
 
 pub fn mime_for(path: &Path) -> &'static str;
+
+// Precompression (M2b) — pure negotiation; the file probe is the caller's.
+pub enum Encoding { Brotli, Gzip }
+impl Encoding {
+    pub const PREFERENCE: [Encoding; 2];   // Brotli, then Gzip
+    pub fn token(self) -> &'static str;    // "br" / "gzip"
+    pub fn extension(self) -> &'static str; // ".br" / ".gz"
+}
+pub fn accepted_encodings(accept_encoding: &str) -> Vec<Encoding>; // server-preference order
+pub fn is_compressible(mime: &str) -> bool;   // the text tier only
+
+impl StaticFiles {
+    pub fn precompressed(self) -> Self;        // opt in; off by default
+    pub fn serves_precompressed(&self) -> bool;
+}
 ```
 
-**Stability**: the shape is stable; `Rejected` may gain variants (a new refusal
-reason is additive). `mime_for` may gain entries. Neither is a breaking change.
+**Stability**: the shape is stable; `Rejected` and `Encoding` may gain variants
+(additive). `mime_for`/`is_compressible` may gain entries. None is breaking.
 
 ## Integration
 
@@ -116,8 +132,13 @@ filesystem, which is the property that makes the traversal defence trustworthy.
 | `etag` build | every 200 | 117 ns | ✅ `etag/build` |
 | `etag_matches` | every conditional request | 14 ns | ✅ `etag/matches_hit` |
 | `mime_for` | every static response | 30 ns | ✅ `mime_for` |
+| `accepted_encodings` | compressible asset, precompression on | 180 ns | ✅ `negotiate/accept_encoding` |
+| `is_compressible` (binary skip) | every asset on a precompressed root | 10 ns | ✅ `negotiate/is_compressible_binary` |
 
-Numbers from [BENCHMARKS.md](../BENCHMARKS.md).
+Numbers from [BENCHMARKS.md](../BENCHMARKS.md). Precompression's real win is the
+payload: −50% (gzip) to −55% (brotli) on a real stylesheet, for ~200 ns of
+negotiation and no per-request compression — the `.br`/`.gz` is built ahead of
+time. Parity with nginx/tower-http, not an edge; see the BENCHMARKS note.
 
 **Allocation policy**: `resolve` allocates exactly one `PathBuf` (the result);
 the no-`%` path avoids the decode buffer entirely by returning early. `mime_for`
@@ -147,14 +168,16 @@ row; the defence itself is here, and its tests are the proof.
 | NUL / control / backslash | `Rejected::IllegalByte` | ✅ |
 | Malformed `%` encoding | `Rejected::BadEncoding` | ✅ |
 | Non-UTF-8 after decode | `Rejected::IllegalByte` (not lossy replacement) | ✅ |
-| Symlink escaping the root | ❌ not here — canonicalize-at-open, `kernway-server` M2 | ❌ |
+| Symlink escaping the root | canonicalize-at-open, in `kernway-server::load_static` | ✅ M2a |
+| A `.br`/`.gz` variant symlinking outside the root | the variant is canonicalized and re-checked under the root, exactly like the original | ✅ M2b |
 
 ## Direction
 
 | Phase | Goal | Blocked by |
 |---|---|---|
 | M1 | resolve + MIME, wired into the server read | — (done) |
-| M2 | symlink re-check (with the caller's open), HEAD/Range support in the server, precompressed variant selection | async `Body::File` |
+| M2a | symlink re-check (with the caller's open), conditional GET | — (done) |
+| M2b | HEAD/Range in the server, precompressed `.br`/`.gz` negotiation | — (done) |
 | later | a `FileSource` trait so the same resolver serves embedded or remote files | a real need |
 
 **Deliberately out of scope**: reading, caching, ETag computation, HTTP framing.

@@ -7,7 +7,7 @@
 //! (a load test, not a micro-benchmark).
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use kernway_static::{etag, etag_matches, mime_for, StaticFiles};
+use kernway_static::{accepted_encodings, etag, etag_matches, is_compressible, mime_for, StaticFiles};
 use std::path::Path;
 
 fn resolve(c: &mut Criterion) {
@@ -66,5 +66,27 @@ fn mime(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, resolve, conditional, mime);
+/// Precompression negotiation — the pure-CPU part of serving a `.br`/`.gz`. The
+/// real cost of the feature is the extra `stat` syscalls (I/O, measured under
+/// load, not here); this is the parsing that decides *whether* to make them.
+fn negotiate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("negotiate");
+
+    // The header every browser sends. Returns [Brotli, Gzip].
+    group.bench_function("accept_encoding", |b| {
+        b.iter(|| accepted_encodings(black_box("gzip, deflate, br, zstd")))
+    });
+
+    // The gate that skips negotiation for already-compressed media.
+    group.bench_function("is_compressible_text", |b| {
+        b.iter(|| is_compressible(black_box("text/html; charset=utf-8")))
+    });
+    group.bench_function("is_compressible_binary", |b| {
+        b.iter(|| is_compressible(black_box("image/png")))
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, resolve, conditional, mime, negotiate);
 criterion_main!(benches);

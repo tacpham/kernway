@@ -65,6 +65,7 @@ pub struct AppBuilder {
     context:      AppContext,
     middlewares:  Vec<Arc<dyn Middleware>>,
     static_files: Option<Arc<StaticFiles>>,
+    precompressed: bool,
     shards:       Option<usize>,
     keep_alive:   KeepAliveConfig,
     drain:        Duration,
@@ -80,6 +81,7 @@ impl AppBuilder {
             context: AppContext::new(),
             middlewares: Vec::new(),
             static_files: None,
+            precompressed: false,
             shards: None,
             keep_alive: KeepAliveConfig::default(),
             drain: rt_net::DEFAULT_DRAIN_TIMEOUT,
@@ -146,6 +148,30 @@ impl AppBuilder {
         self
     }
 
+    /// Serve a precompressed `.br`/`.gz` sitting next to a compressible file when
+    /// the client accepts it — no CPU spent compressing on the request path, just
+    /// a file a build step produced ([KEP-0000 §4]).
+    ///
+    /// Off by default; order-independent with [`static_files`](Self::static_files).
+    /// Only text-tier types are probed (see [`kernway_static::is_compressible`]),
+    /// and negotiated responses carry `Vary: Accept-Encoding`.
+    ///
+    /// ```no_run
+    /// # use kernway_server::KernwayApp;
+    /// KernwayApp::builder()
+    ///     .static_files("public")   // ship app.js.br beside app.js at build time
+    ///     .precompressed()
+    ///     .build()
+    ///     .run()
+    ///     .unwrap();
+    /// ```
+    ///
+    /// [KEP-0000 §4]: https://github.com/tacpham/kernway/blob/main/docs/kep/0000-principles.md
+    pub fn precompressed(mut self) -> Self {
+        self.precompressed = true;
+        self
+    }
+
     /// Register a GET route.
     pub fn get(mut self, pattern: &str, handler: impl Fn(&Request, &AppContext) -> Response + Send + Sync + 'static) -> Self {
         self.router.add("GET", pattern, Arc::new(handler));
@@ -178,6 +204,12 @@ impl AppBuilder {
 
     /// Build and return KernwayApp.
     pub fn build(self) -> KernwayApp {
+        // Apply the precompression toggle here so it is independent of whether
+        // `.precompressed()` was called before or after `.static_files()`.
+        let static_files = match (self.static_files, self.precompressed) {
+            (Some(sf), true) => Some(Arc::new((*sf).clone().precompressed())),
+            (other, _) => other,
+        };
         KernwayApp {
             addr: self.addr,
             shards: self.shards,
@@ -187,7 +219,7 @@ impl AppBuilder {
             router: Arc::new(self.router),
             context: Arc::new(self.context),
             middlewares: Arc::new(self.middlewares),
-            static_files: self.static_files,
+            static_files,
         }
     }
 }
@@ -508,21 +540,40 @@ async fn stream_file(
 /// the file is named, not read; the connection task streams it (KEP-0002).
 enum StaticOutcome {
     /// The client's cached copy is current — send `304` with the validator, no body.
-    NotModified { etag: String },
+    NotModified {
+        etag: String,
+        /// Emit `Vary: Accept-Encoding` — set when the resource was negotiated.
+        vary_encoding: bool,
+    },
     /// Send the file with a `200`, streamed. `path`/`len` name it for the body.
-    File { path: std::path::PathBuf, len: u64, etag: String, mime: &'static str },
+    File {
+        path: std::path::PathBuf,
+        len: u64,
+        etag: String,
+        mime: &'static str,
+        /// The `Content-Encoding` token when a precompressed variant is served
+        /// (`"br"`/`"gzip"`); `None` for the identity file.
+        encoding: Option<&'static str>,
+        /// Emit `Vary: Accept-Encoding` — set when the resource was negotiated,
+        /// even on the identity fallback, so a cache never serves a `.br` body
+        /// to a client that cannot decode it.
+        vary_encoding: bool,
+    },
 }
 
 impl StaticOutcome {
     fn into_response(self) -> Response {
         match self {
-            StaticOutcome::NotModified { etag } => {
+            StaticOutcome::NotModified { etag, vary_encoding } => {
                 let mut r = Response::new(StatusCode::NOT_MODIFIED);
                 r.headers.insert("etag", &etag);
                 r.headers.insert("cache-control", &"no-cache".to_string());
+                if vary_encoding {
+                    r.headers.insert("vary", &"Accept-Encoding".to_string());
+                }
                 r
             }
-            StaticOutcome::File { path, len, etag, mime } => {
+            StaticOutcome::File { path, len, etag, mime, encoding, vary_encoding } => {
                 // `Body::File`: the response names the file; the connection task
                 // streams it in bounded chunks off the blocking pool, so a large
                 // download is never read whole into memory.
@@ -535,6 +586,15 @@ impl StaticOutcome {
                 r.headers.insert("x-content-type-options", &"nosniff".to_string());
                 // Advertise range support so clients (video players, resumers) ask.
                 r.headers.insert("accept-ranges", &"bytes".to_string());
+                // A precompressed variant: the body is `.br`/`.gz` bytes, but the
+                // Content-Type stayed the *original* type — the client decodes,
+                // then interprets. `Content-Encoding` tells it how.
+                if let Some(enc) = encoding {
+                    r.headers.insert("content-encoding", &enc.to_string());
+                }
+                if vary_encoding {
+                    r.headers.insert("vary", &"Accept-Encoding".to_string());
+                }
                 r
             }
         }
@@ -548,7 +608,12 @@ impl StaticOutcome {
 /// The symlink re-check is here rather than in `kernway-static` because it needs
 /// I/O: `resolve` guarantees *lexical* containment, but a file inside the root
 /// can be a symlink pointing outside it, and only `canonicalize` sees that.
-fn load_static(root: &std::path::Path, path: std::path::PathBuf, if_none_match: Option<&str>) -> Option<StaticOutcome> {
+fn load_static(
+    root: &std::path::Path,
+    path: std::path::PathBuf,
+    if_none_match: Option<&str>,
+    accept_encoding: Option<&str>,
+) -> Option<StaticOutcome> {
     // Resolve symlinks and `.`/`..` for real, then require the result to stay
     // under the canonical root. A file that links outside the root fails here —
     // this is the defence lexical checks cannot provide. `canonicalize` also
@@ -564,23 +629,78 @@ fn load_static(root: &std::path::Path, path: std::path::PathBuf, if_none_match: 
         return None;
     }
 
-    let mtime_nanos = meta
+    // The Content-Type is always the *original* file's — a `.br` variant of
+    // `app.js` is still JavaScript once decoded.
+    let mime = mime_for(&path);
+
+    // Content negotiation. Only attempted for a compressible type, and only when
+    // the caller enabled precompression (so `accept_encoding` is `None` and this
+    // whole block is skipped on the default path). `vary_encoding` is set for
+    // every compressible resource once negotiation is in play — including the
+    // identity fallback below — so a shared cache keys on `Accept-Encoding`.
+    let vary_encoding = accept_encoding.is_some() && kernway_static::is_compressible(mime);
+
+    // Default to the identity file; a matching variant replaces it.
+    let mut served = canon.clone();
+    let mut served_meta = meta;
+    let mut encoding: Option<&'static str> = None;
+
+    if vary_encoding {
+        if let Some(ae) = accept_encoding {
+            for enc in kernway_static::accepted_encodings(ae) {
+                let variant = with_suffix(&canon, enc.extension());
+                // The variant gets the same symlink re-check as the original: a
+                // `.br` that links outside the root must not escape it either.
+                let Ok(vc) = std::fs::canonicalize(&variant) else { continue };
+                if !vc.starts_with(&canon_root) {
+                    continue;
+                }
+                let Ok(vm) = std::fs::metadata(&vc) else { continue };
+                if vm.is_file() {
+                    served = vc;
+                    served_meta = vm;
+                    encoding = Some(enc.token());
+                    break;
+                }
+            }
+        }
+    }
+
+    // The validator comes from the file *actually served*, so `br`, `gz`, and the
+    // identity each get a distinct ETag — a cache cannot confuse one for another.
+    let mtime_nanos = served_meta
         .modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let etag = kernway_static::etag(meta.len(), mtime_nanos);
+    let etag = kernway_static::etag(served_meta.len(), mtime_nanos);
 
     // Conditional request: if the client's validator still matches, answer 304
     // and stream nothing — the whole point of caching.
     if let Some(inm) = if_none_match {
         if kernway_static::etag_matches(inm, &etag) {
-            return Some(StaticOutcome::NotModified { etag });
+            return Some(StaticOutcome::NotModified { etag, vary_encoding });
         }
     }
 
-    Some(StaticOutcome::File { path: canon, len: meta.len(), etag, mime: mime_for(&path) })
+    Some(StaticOutcome::File {
+        path: served,
+        len: served_meta.len(),
+        etag,
+        mime,
+        encoding,
+        vary_encoding,
+    })
+}
+
+/// Append a suffix to a path's filename: `/root/app.js` + `.br` → `/root/app.js.br`.
+/// `PathBuf::set_extension`/`push` would replace or nest, not append, so this
+/// works on the raw `OsString`.
+fn with_suffix(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(suffix);
+    std::path::PathBuf::from(s)
 }
 
 /// Try to answer a request from the static file root.
@@ -619,11 +739,19 @@ async fn try_static(
     let path = sf.resolve(&request.path).ok()?;
     let root = sf.root().to_path_buf();
     let if_none_match = request.headers.get("if-none-match").map(str::to_string);
+    // Negotiate only when this root serves precompressed variants — otherwise
+    // `load_static` gets `None` and skips the extra `stat`s entirely. When it is
+    // on, pass `Some` even if the request sent no `Accept-Encoding` (as `""`):
+    // that still marks the resource negotiated, so its response carries a
+    // consistent `Vary: Accept-Encoding` and a shared cache keys on the encoding.
+    let accept_encoding = sf
+        .serves_precompressed()
+        .then(|| request.headers.get("accept-encoding").unwrap_or("").to_string());
 
     // `spawn_blocking` yields `None` if the closure panicked; `load_static`
     // yields `None` for any miss. Both fall through to the router.
     let outcome = rt_core::spawn_blocking(move || {
-        load_static(&root, path, if_none_match.as_deref())
+        load_static(&root, path, if_none_match.as_deref(), accept_encoding.as_deref())
     })
     .await??;
 
@@ -1178,13 +1306,14 @@ mod static_file_tests {
         let root = tmpdir("serve");
         fs::write(root.join("a.txt"), b"hello").unwrap();
 
-        match load_static(&root, root.join("a.txt"), None).expect("should serve") {
-            StaticOutcome::File { path, len, etag, mime } => {
+        match load_static(&root, root.join("a.txt"), None, None).expect("should serve") {
+            StaticOutcome::File { path, len, etag, mime, encoding, .. } => {
                 // The file is named, not read — verify by size and by reading it here.
                 assert_eq!(len, 5);
                 assert_eq!(std::fs::read(&path).unwrap(), b"hello");
                 assert!(etag.starts_with('"') && etag.ends_with('"'), "etag quoted: {etag}");
                 assert_eq!(mime, "text/plain; charset=utf-8");
+                assert_eq!(encoding, None, "identity file carries no Content-Encoding");
             }
             StaticOutcome::NotModified { .. } => panic!("expected a file, got 304"),
         }
@@ -1196,12 +1325,12 @@ mod static_file_tests {
         let root = tmpdir("cond");
         fs::write(root.join("a.txt"), b"hello").unwrap();
 
-        let etag = match load_static(&root, root.join("a.txt"), None).unwrap() {
+        let etag = match load_static(&root, root.join("a.txt"), None, None).unwrap() {
             StaticOutcome::File { etag, .. } => etag,
             StaticOutcome::NotModified { .. } => unreachable!(),
         };
-        match load_static(&root, root.join("a.txt"), Some(&etag)).unwrap() {
-            StaticOutcome::NotModified { etag: e } => assert_eq!(e, etag),
+        match load_static(&root, root.join("a.txt"), Some(&etag), None).unwrap() {
+            StaticOutcome::NotModified { etag: e, .. } => assert_eq!(e, etag),
             StaticOutcome::File { .. } => panic!("a current cache should get 304, not the body"),
         }
         fs::remove_dir_all(&root).ok();
@@ -1212,7 +1341,7 @@ mod static_file_tests {
         let root = tmpdir("stale");
         fs::write(root.join("a.txt"), b"hello").unwrap();
         assert!(matches!(
-            load_static(&root, root.join("a.txt"), Some("\"stale-0\"")).unwrap(),
+            load_static(&root, root.join("a.txt"), Some("\"stale-0\""), None).unwrap(),
             StaticOutcome::File { .. }
         ));
         fs::remove_dir_all(&root).ok();
@@ -1221,7 +1350,7 @@ mod static_file_tests {
     #[test]
     fn a_missing_file_is_a_miss() {
         let root = tmpdir("missing");
-        assert!(load_static(&root, root.join("nope.txt"), None).is_none());
+        assert!(load_static(&root, root.join("nope.txt"), None, None).is_none());
         fs::remove_dir_all(&root).ok();
     }
 
@@ -1237,12 +1366,132 @@ mod static_file_tests {
         std::os::unix::fs::symlink(outside.join("secret.txt"), root.join("leak.txt")).unwrap();
 
         assert!(
-            load_static(&root, root.join("leak.txt"), None).is_none(),
+            load_static(&root, root.join("leak.txt"), None, None).is_none(),
             "a symlink pointing outside the root must not be served, even though its target exists"
         );
 
         fs::remove_dir_all(&root).ok();
         fs::remove_dir_all(&outside).ok();
+    }
+
+    // --- precompressed variants -------------------------------------------
+
+    /// The `.br` is preferred over `.gz`, its bytes are what gets served, the
+    /// Content-Type stays the original, and the ETag is the variant's own.
+    #[test]
+    fn a_brotli_variant_is_preferred_and_served_with_the_original_type() {
+        let root = tmpdir("precomp-br");
+        fs::write(root.join("app.js"), b"the original javascript source").unwrap();
+        fs::write(root.join("app.js.gz"), b"GZIPPED").unwrap();
+        fs::write(root.join("app.js.br"), b"BROTLI").unwrap();
+
+        match load_static(&root, root.join("app.js"), None, Some("br, gzip")).unwrap() {
+            StaticOutcome::File { path, len, mime, encoding, vary_encoding, etag } => {
+                assert_eq!(std::fs::read(&path).unwrap(), b"BROTLI", "the .br bytes are served");
+                assert_eq!(len, 6);
+                assert_eq!(mime, "text/javascript; charset=utf-8", "type is the original's");
+                assert_eq!(encoding, Some("br"));
+                assert!(vary_encoding);
+                // ETag is the variant's (len 6), not the identity's (len 30).
+                assert!(etag.starts_with("\"6-"), "etag from the served file: {etag}");
+            }
+            StaticOutcome::NotModified { .. } => panic!("expected the file"),
+        }
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Only gzip on offer, or only gzip accepted → the `.gz` is served.
+    #[test]
+    fn gzip_is_served_when_brotli_is_absent_or_unaccepted() {
+        let root = tmpdir("precomp-gz");
+        fs::write(root.join("app.css"), b"body{}").unwrap();
+        fs::write(root.join("app.css.gz"), b"GZ").unwrap();
+        fs::write(root.join("app.css.br"), b"BR").unwrap();
+
+        // Client refuses brotli.
+        match load_static(&root, root.join("app.css"), None, Some("br;q=0, gzip")).unwrap() {
+            StaticOutcome::File { encoding, path, .. } => {
+                assert_eq!(encoding, Some("gzip"));
+                assert_eq!(std::fs::read(&path).unwrap(), b"GZ");
+            }
+            StaticOutcome::NotModified { .. } => panic!("expected the file"),
+        }
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// No variant on disk → the identity file, but still `Vary: Accept-Encoding`
+    /// so a cache does not later feed a `.br` to a client that cannot decode it.
+    #[test]
+    fn identity_is_served_when_no_variant_exists_but_still_varies() {
+        let root = tmpdir("precomp-none");
+        fs::write(root.join("app.js"), b"source").unwrap();
+
+        match load_static(&root, root.join("app.js"), None, Some("br, gzip")).unwrap() {
+            StaticOutcome::File { encoding, vary_encoding, len, .. } => {
+                assert_eq!(encoding, None, "no variant → identity");
+                assert_eq!(len, 6);
+                assert!(vary_encoding, "a negotiated resource varies even on the fallback");
+            }
+            StaticOutcome::NotModified { .. } => panic!("expected the file"),
+        }
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A binary type is never probed for a variant — no `.stat`, no `Vary` — even
+    /// if a stray `.gz` sits next to it.
+    #[test]
+    fn already_compressed_media_is_not_negotiated() {
+        let root = tmpdir("precomp-bin");
+        fs::write(root.join("logo.png"), b"\x89PNG....").unwrap();
+        fs::write(root.join("logo.png.gz"), b"NOPE").unwrap();
+
+        match load_static(&root, root.join("logo.png"), None, Some("gzip")).unwrap() {
+            StaticOutcome::File { encoding, vary_encoding, path, .. } => {
+                assert_eq!(encoding, None, "png is already compressed — serve it as-is");
+                assert!(!vary_encoding);
+                assert_eq!(std::fs::read(&path).unwrap(), b"\x89PNG....");
+            }
+            StaticOutcome::NotModified { .. } => panic!("expected the file"),
+        }
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A negotiated root with a client that sent no `Accept-Encoding` (passed as
+    /// `Some("")`) still serves identity *and* marks `Vary` — so the same URL
+    /// answers with a consistent `Vary` whether or not the header was present.
+    #[test]
+    fn an_empty_accept_encoding_still_varies_on_a_negotiated_root() {
+        let root = tmpdir("precomp-empty");
+        fs::write(root.join("app.js"), b"source").unwrap();
+        fs::write(root.join("app.js.br"), b"BR").unwrap();
+
+        match load_static(&root, root.join("app.js"), None, Some("")).unwrap() {
+            StaticOutcome::File { encoding, vary_encoding, .. } => {
+                assert_eq!(encoding, None, "no encoding accepted → identity");
+                assert!(vary_encoding, "still Vary, so a cache keys on Accept-Encoding");
+            }
+            StaticOutcome::NotModified { .. } => panic!("expected the file"),
+        }
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Precompression off (`accept_encoding = None`) → the old behaviour exactly,
+    /// no probing regardless of what sits on disk.
+    #[test]
+    fn variants_are_ignored_when_precompression_is_off() {
+        let root = tmpdir("precomp-off");
+        fs::write(root.join("app.js"), b"source").unwrap();
+        fs::write(root.join("app.js.br"), b"BROTLI").unwrap();
+
+        match load_static(&root, root.join("app.js"), None, None).unwrap() {
+            StaticOutcome::File { encoding, vary_encoding, path, .. } => {
+                assert_eq!(encoding, None);
+                assert!(!vary_encoding);
+                assert_eq!(std::fs::read(&path).unwrap(), b"source", "identity, not the .br");
+            }
+            StaticOutcome::NotModified { .. } => panic!("expected the file"),
+        }
+        fs::remove_dir_all(&root).ok();
     }
 
     // --- the real thing: static files over an actual socket ----------------
