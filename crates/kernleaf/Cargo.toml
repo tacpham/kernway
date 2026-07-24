@@ -23,6 +23,11 @@ workspace = true
 [dev-dependencies]
 criterion = { workspace = true }
 minijinja = "2"
+# Integration tests only: prove the real SecurityContext + CsrfToken flow through
+# th:authorize and auto-CSRF (not a runtime dependency — kernleaf consults the
+# Authorization trait in kernway-core, never this crate).
+kernway-security = { workspace = true }
+kernway-core = { workspace = true }
 
 [[bench]]
 name    = "render"
