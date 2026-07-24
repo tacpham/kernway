@@ -29,6 +29,8 @@ impl StatusCode {
     pub const CREATED:               Self = Self(201);
     /// `204 No Content` — success, and deliberately no body.
     pub const NO_CONTENT:            Self = Self(204);
+    /// `206 Partial Content` — a byte range of the resource; `Content-Range` set.
+    pub const PARTIAL_CONTENT:       Self = Self(206);
     /// `304 Not Modified` — the client's cached copy is current; no body sent.
     /// Answered to a conditional request whose `If-None-Match` matches.
     pub const NOT_MODIFIED:          Self = Self(304);
@@ -45,6 +47,9 @@ impl StatusCode {
     /// `422 Unprocessable Entity` — well-formed but semantically invalid;
     /// what validation failures return.
     pub const UNPROCESSABLE_ENTITY:  Self = Self(422);
+    /// `416 Range Not Satisfiable` — the requested byte range lies outside the
+    /// resource; `Content-Range: bytes */len` states the actual length.
+    pub const RANGE_NOT_SATISFIABLE: Self = Self(416);
     /// `429 Too Many Requests` — rate limit exceeded.
     pub const TOO_MANY_REQUESTS:     Self = Self(429);
     /// `500 Internal Server Error` — an unhandled failure on the server.

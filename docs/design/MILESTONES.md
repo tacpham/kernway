@@ -176,7 +176,7 @@ The symlink case is a live `curl` against a real symlink *and* the automated
 `a_symlink_escaping_the_root_is_rejected` test — the KEP-0000 §3 rule that a
 security claim is a test, so it can never silently regress.
 
-## M2b — Streaming ✅ (2026-07-24); HEAD, Range next
+## M2b — Streaming, HEAD, Range ✅ (2026-07-24)
 
 **Goal**: serve a large file without reading it all into memory, and answer
 HEAD and byte-range requests.
@@ -210,18 +210,33 @@ Verified over a real socket in `streams_a_large_file_in_chunks_over_http` and
 `serves_a_real_file_over_http` — the streaming loop crossing chunk boundaries is
 a test, not a manual check.
 
-**Still to come (HEAD, Range):**
+**HEAD and Range — done:**
 
-- HEAD: `encode_head` already takes the length, so a HEAD response is headers
-  with the file's length and an empty body — small, next.
-- `Range` → `206` + `Content-Range`, with a cap on ranges per request (range
-  amplification is a DoS vector — the cap is part of the spec, not hardening).
-- precompressed `.br`/`.gz` selection by `Accept-Encoding`.
+- HEAD: `write_response` takes an `is_head` flag and writes head-only —
+  `encode_head` already carried the length, so a HEAD sends the file's length
+  with no body and never reads the file.
+- `Range: bytes=start-end` → `206` + `Content-Range` + `Accept-Ranges`, streamed
+  from the range offset; an unsatisfiable range → `416` with `bytes */len`. A
+  multi-range request serves the full body once (§14.2 permits), so ranges
+  cannot be amplified into N responses — the DoS cap is by construction, not a
+  later pass.
 
-```bash
-curl -I localhost:8080/big.txt           # 200, content-length set, no body   (to build)
-curl -r 0-99 localhost:8080/big.txt      # 206, content-range, 100 bytes       (to build)
+**Gate — all passed over a real socket:**
+
 ```
+HEAD /a.txt              200, content-length: 5, no body, accept-ranges: bytes
+GET /f.txt Range 4-7     206, content-range: bytes 4-7/16, content-length: 4, body "4567"
+GET /f.txt Range 100-200 416, content-range: bytes */5
+GET /big.txt (200 KB)    200, streamed across 3+ chunks, intact
+```
+
+`head_returns_the_length_without_a_body_over_http`,
+`a_byte_range_returns_206_over_http`, `an_unsatisfiable_range_returns_416_over_http`,
+plus `parse_range_cases` for the parser edges — 50 server tests.
+
+**Left, and small:** precompressed `.br`/`.gz` selection by `Accept-Encoding`
+(pick the variant, then `Body::File` it), and the 64 KiB chunk size to measure
+against a large-file load test. Static serving is otherwise done.
 
 ---
 
