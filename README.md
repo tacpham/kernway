@@ -212,21 +212,24 @@ steps in [docs/design/BENCHMARKS.md](docs/design/BENCHMARKS.md).
 
 | What | Measured |
 |---|---|
-| Full request pipeline (parse→route→handle→encode) | 392 ns |
+| Full request pipeline (parse→route→handle→encode) | 363 ns |
 | DI bean lookup (`#[inject]`) | 4.2 ns |
 | `TypeId` hasher vs SipHash | 5.8× faster |
 | Parse a browser GET (8 headers) | 705 ns |
 | Encode a small JSON response | 44 ns |
 | Spawn a task | ~65 ns at 1000 tasks |
 
-Measured against the incumbent, not just ourselves. The router is currently
-**behind `matchit`** (axum's): 2.9× on static hits, up to 77× on parameterised
-ones — a radix trie is the open optimisation target. We record where we lose,
-not only where we win — see [BENCHMARKS.md](docs/design/BENCHMARKS.md).
+Measured against the incumbent, not just ourselves. The router is a radix trie
+tuned over three rounds against `matchit` (axum's): **static routing is within
+1.5×** (21 ns vs 14 ns), and parameterised routing went from 77× behind to 5.8×
+and is now flat in route count instead of O(n). The remaining param gap is an
+owned-vs-borrowed-parameters API choice, not the trie — recorded, with its
+reason, in [BENCHMARKS.md](docs/design/BENCHMARKS.md). We write down where we
+still lose, not only where we win.
 
-The static-route figure is the one that matters: routing does not get slower as
-the application grows, because a route with no `{param}` is a hash lookup, not a
-scan.
+Routing does not get slower as the application grows: every class — static hit,
+param hit, and miss — is flat in route count, because a radix trie is O(path
+length), not O(routes).
 
 **Not yet measured**, and so not claimed: requests/sec, p99 latency, or any
 comparison against another framework's throughput. Those need a load test that
