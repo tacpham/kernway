@@ -48,27 +48,104 @@
 
 use std::collections::HashMap;
 
+use kernway_core::security::{Anonymous, Authorization};
 use kernway_core::template::{TemplateEngine, TemplateError, Value};
 
 mod expr;
-use expr::Expr;
+use expr::{Env, Expr};
+
+/// The fail-closed default authorization: anonymous, no roles.
+static ANONYMOUS: Anonymous = Anonymous;
+
+/// The hidden form field the CSRF token is injected under — matches
+/// `kernway_security::csrf::FIELD` by convention (kept a plain const so the
+/// template engine does not depend on the security crate).
+const CSRF_FIELD: &str = "_csrf";
+
+/// Per-render context beyond the model: the authorization facts `th:authorize`
+/// checks, and the CSRF token auto-injected into state-changing forms. Both
+/// default to "none" — `th:authorize` then denies (fail-closed) and no CSRF field
+/// is added.
+#[derive(Default)]
+pub struct RenderContext<'a> {
+    authz: Option<&'a dyn Authorization>,
+    csrf: Option<&'a str>,
+}
+
+impl<'a> RenderContext<'a> {
+    /// An empty context — anonymous, no CSRF token.
+    pub fn new() -> Self {
+        Self { authz: None, csrf: None }
+    }
+
+    /// Supply the authorization facts `th:authorize` checks.
+    #[must_use]
+    pub fn authorize(mut self, authz: &'a dyn Authorization) -> Self {
+        self.authz = Some(authz);
+        self
+    }
+
+    /// Supply the CSRF token to inject into state-changing forms.
+    #[must_use]
+    pub fn csrf(mut self, token: &'a str) -> Self {
+        self.csrf = Some(token);
+        self
+    }
+}
 
 // ============================================================
 // IR — the parsed template DOM, cached and walked at render time
 // ============================================================
 
+/// Every template's compiled DOM, keyed by name — searched to resolve a
+/// `th:insert`/`th:replace` fragment reference.
+type Templates = HashMap<String, Vec<Dom>>;
+
+/// The deepest a fragment may nest, a backstop against a fragment that includes
+/// itself.
+const MAX_FRAGMENT_DEPTH: u16 = 32;
+
 /// A node in the parsed template. This *is* the cached IR: `add` parses to it
 /// once, `render` walks it.
 #[derive(Debug, Clone)]
 enum Dom {
-    /// Literal text, emitted verbatim (it is template author text, not data).
+    /// Literal text with no inline expressions — emitted verbatim. The common
+    /// case, and a straight `push_str` at render time.
     Text(String),
+    /// Text containing `[[${…}]]` / `[(${…})]` inline expressions, pre-split at
+    /// parse time so the request path never scans a plain text node.
+    Inline(Vec<InlinePart>),
     /// `<!-- … -->`, kept so the output stays a faithful copy.
     Comment(String),
     /// A doctype or other `<!…>` declaration, emitted verbatim.
     Declaration(String),
     /// An element, with its `th:*` directives already extracted.
     Element(Element),
+}
+
+/// One piece of an inlined text node.
+#[derive(Debug, Clone)]
+enum InlinePart {
+    /// Literal text between inline expressions.
+    Lit(String),
+    /// `[[${…}]]` — escaped per the current inline mode (HTML / JS / CSS).
+    Escaped(Expr),
+    /// `[(${…})]` — emitted raw, the explicit unescaped inline form.
+    Raw(Expr),
+}
+
+/// The escaping context for inline `[[…]]` expressions, set by `th:inline` and
+/// inherited by descendants. A `Copy` enum threaded through render — the whole
+/// mechanism for context-aware escaping without a per-character state machine on
+/// the HTML path.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum InlineMode {
+    /// Default: HTML-escape (same rule as `th:text`).
+    Html,
+    /// `th:inline="javascript"` — escape for a JS string/script context.
+    JavaScript,
+    /// `th:inline="css"` — escape for a CSS context.
+    Css,
 }
 
 /// A parsed element with its Thymeleaf directives pulled out of the raw attrs.
@@ -87,19 +164,78 @@ struct Element {
     th_each: Option<(String, Expr)>,
     th_text: Option<Expr>,
     th_utext: Option<Expr>,
+    /// `th:inline="javascript|css|text|none"` — the escape mode for `[[…]]` in
+    /// this element's subtree; `None` inherits the enclosing mode.
+    inline_mode: Option<InlineMode>,
+    /// `th:authorize="…"` — drop the element unless the check passes.
+    th_authorize: Option<AuthzExpr>,
+    /// `th:fragment="name"` — marks this element as a named, reusable fragment.
+    th_fragment: Option<String>,
+    /// `th:insert="~{tpl :: name}"` — render the fragment *inside* this element.
+    th_insert: Option<FragmentRef>,
+    /// `th:replace="~{tpl :: name}"` — replace this element *with* the fragment.
+    th_replace: Option<FragmentRef>,
     children: Vec<Dom>,
 }
 
-/// The template engine — every template's parsed DOM, keyed by name.
+/// A reference to a fragment: `tpl :: name`, `:: name` (this template), or `tpl`
+/// (a whole template). Parameterised fragments are a later addition.
+#[derive(Debug, Clone)]
+struct FragmentRef {
+    /// The template to look in; `None` means "any loaded template".
+    template: Option<String>,
+    /// The `th:fragment` name; empty means "the whole template".
+    name: String,
+}
+
+/// A parsed `th:authorize` security check — the Spring-Security expression subset.
+#[derive(Debug, Clone)]
+enum AuthzExpr {
+    /// `permitAll` — always render.
+    PermitAll,
+    /// `denyAll` — never render.
+    DenyAll,
+    /// `isAuthenticated()`.
+    IsAuthenticated,
+    /// `isAnonymous()`.
+    IsAnonymous,
+    /// `hasRole('X')`.
+    HasRole(String),
+    /// `hasAnyRole('A','B')` — true if the principal has any listed role.
+    HasAnyRole(Vec<String>),
+}
+
+impl AuthzExpr {
+    fn allows(&self, authz: &dyn kernway_core::security::Authorization) -> bool {
+        match self {
+            AuthzExpr::PermitAll => true,
+            AuthzExpr::DenyAll => false,
+            AuthzExpr::IsAuthenticated => authz.is_authenticated(),
+            AuthzExpr::IsAnonymous => !authz.is_authenticated(),
+            AuthzExpr::HasRole(r) => authz.has_role(r),
+            AuthzExpr::HasAnyRole(rs) => rs.iter().any(|r| authz.has_role(r)),
+        }
+    }
+}
+
+/// The template engine — every template's parsed DOM, keyed by name, plus the
+/// i18n message bundle that `#{...}` resolves against.
 #[derive(Default)]
 pub struct Kernleaf {
-    templates: HashMap<String, Vec<Dom>>,
+    templates: Templates,
+    messages: HashMap<String, String>,
 }
 
 impl Kernleaf {
-    /// A new engine with no templates.
+    /// A new engine with no templates and no messages.
     pub fn new() -> Self {
-        Self { templates: HashMap::new() }
+        Self { templates: HashMap::new(), messages: HashMap::new() }
+    }
+
+    /// Register an i18n message. `#{key}` resolves to `value`, with `{0}`/`{1}`
+    /// placeholders filled from the arguments in `#{key(arg0, arg1)}`.
+    pub fn message(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.messages.insert(key.into(), value.into());
     }
 
     /// Parse `source` under `name`. Parsing happens **here**, once — a malformed
@@ -117,16 +253,36 @@ impl Kernleaf {
     }
 }
 
-impl TemplateEngine for Kernleaf {
-    fn render(&self, template: &str, model: &Value<'_>) -> Result<String, TemplateError> {
+impl Kernleaf {
+    /// Render with a [`RenderContext`] — the form that supplies `th:authorize`
+    /// facts and a CSRF token.
+    pub fn render_with(
+        &self,
+        template: &str,
+        model: &Value<'_>,
+        ctx: &RenderContext<'_>,
+    ) -> Result<String, TemplateError> {
         let dom = self
             .templates
             .get(template)
             .ok_or_else(|| err(format!("no template named `{template}`")))?;
+        let env = Env {
+            model,
+            messages: &self.messages,
+            context_path: "",
+            authz: ctx.authz.unwrap_or(&ANONYMOUS),
+            csrf: ctx.csrf,
+        };
         let mut out = String::new();
         let mut scope: Vec<(&str, &Value<'_>)> = Vec::new();
-        render_nodes(dom, model, &mut scope, &mut out)?;
+        render_nodes(dom, &env, &mut scope, InlineMode::Html, &self.templates, 0, &mut out)?;
         Ok(out)
+    }
+}
+
+impl TemplateEngine for Kernleaf {
+    fn render(&self, template: &str, model: &Value<'_>) -> Result<String, TemplateError> {
+        self.render_with(template, model, &RenderContext::new())
     }
 }
 
@@ -134,67 +290,120 @@ impl TemplateEngine for Kernleaf {
 // Rendering — walk the DOM against the model
 // ============================================================
 
+#[allow(clippy::too_many_arguments)]
 fn render_nodes<'ir, 'm>(
     nodes: &'ir [Dom],
-    model: &'m Value<'m>,
+    env: &Env<'m>,
     scope: &mut Vec<(&'ir str, &'m Value<'m>)>,
+    mode: InlineMode,
+    templates: &'ir Templates,
+    depth: u16,
     out: &mut String,
 ) -> Result<(), TemplateError> {
     for node in nodes {
         match node {
             Dom::Text(t) => out.push_str(t),
+            Dom::Inline(parts) => render_inline(parts, env, scope, mode, out),
             Dom::Comment(c) => {
                 out.push_str("<!--");
                 out.push_str(c);
                 out.push_str("-->");
             }
             Dom::Declaration(d) => out.push_str(d),
-            Dom::Element(el) => render_element(el, model, scope, out)?,
+            Dom::Element(el) => render_element(el, env, scope, mode, templates, depth, out)?,
         }
     }
     Ok(())
 }
 
+/// Render a pre-split inline text node, escaping `[[…]]` parts per `mode`.
+fn render_inline<'m>(
+    parts: &[InlinePart],
+    env: &Env<'m>,
+    scope: &[(&str, &'m Value<'m>)],
+    mode: InlineMode,
+    out: &mut String,
+) {
+    for part in parts {
+        match part {
+            InlinePart::Lit(s) => out.push_str(s),
+            InlinePart::Raw(e) => expr::eval(e, env, scope).write_string(out),
+            InlinePart::Escaped(e) => {
+                let mut buf = String::new();
+                expr::eval(e, env, scope).write_string(&mut buf);
+                escape_for(mode, &buf, out);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_element<'ir, 'm>(
     el: &'ir Element,
-    model: &'m Value<'m>,
+    env: &Env<'m>,
     scope: &mut Vec<(&'ir str, &'m Value<'m>)>,
+    mode: InlineMode,
+    templates: &'ir Templates,
+    depth: u16,
     out: &mut String,
 ) -> Result<(), TemplateError> {
     // Precedence matches Thymeleaf: th:each (outer) wraps th:if (inner).
     if let Some((var, seq)) = &el.th_each {
         // A non-sequence (missing, or a scalar) is zero iterations — lenient.
-        if let Some(items) = expr::eval(seq, model, scope).as_seq() {
+        if let Some(items) = expr::eval(seq, env, scope).as_seq() {
             for item in items {
                 scope.push((var.as_str(), item));
-                let r = render_instance(el, model, scope, out);
+                let r = render_instance(el, env, scope, mode, templates, depth, out);
                 scope.pop();
                 r?;
             }
         }
         Ok(())
     } else {
-        render_instance(el, model, scope, out)
+        render_instance(el, env, scope, mode, templates, depth, out)
     }
 }
 
 /// Render one element instance (th:each already resolved for this iteration):
 /// evaluate th:if/th:unless, then open tag + attributes + body + close.
+#[allow(clippy::too_many_arguments)]
 fn render_instance<'ir, 'm>(
     el: &'ir Element,
-    model: &'m Value<'m>,
+    env: &Env<'m>,
     scope: &mut Vec<(&'ir str, &'m Value<'m>)>,
+    mode: InlineMode,
+    templates: &'ir Templates,
+    depth: u16,
     out: &mut String,
 ) -> Result<(), TemplateError> {
+    // th:authorize has the highest precedence: an unauthorized element (and its
+    // whole subtree) is never rendered. Fail-closed — no context denies.
+    if let Some(auth) = &el.th_authorize {
+        if !auth.allows(env.authz) {
+            return Ok(());
+        }
+    }
     if let Some(cond) = &el.th_if {
-        if !expr::eval(cond, model, scope).to_bool() {
+        if !expr::eval(cond, env, scope).to_bool() {
             return Ok(());
         }
     }
     if let Some(cond) = &el.th_unless {
-        if expr::eval(cond, model, scope).to_bool() {
+        if expr::eval(cond, env, scope).to_bool() {
             return Ok(());
         }
+    }
+
+    // th:replace — the fragment takes this element's place entirely (its own tag
+    // and all). Nothing of the host is emitted.
+    if let Some(fref) = &el.th_replace {
+        if depth >= MAX_FRAGMENT_DEPTH {
+            return Err(err("fragment nesting too deep — a fragment cycle?"));
+        }
+        if let Some(frag) = resolve_fragment(templates, fref) {
+            render_nodes(frag, env, scope, mode, templates, depth + 1, out)?;
+        }
+        return Ok(());
     }
 
     out.push('<');
@@ -214,7 +423,7 @@ fn render_instance<'ir, 'm>(
         out.push_str(name);
         out.push_str("=\"");
         let mut buf = String::new();
-        expr::eval(e, model, scope).write_string(&mut buf);
+        expr::eval(e, env, scope).write_string(&mut buf);
         escape_html_into(&buf, out);
         out.push('"');
     }
@@ -225,16 +434,38 @@ fn render_instance<'ir, 'm>(
     }
     out.push('>');
 
-    // Body: th:text (escaped) or th:utext (raw) replace the children; otherwise
-    // the children render (the natural-template placeholder path).
-    if let Some(e) = &el.th_text {
+    // Auto-CSRF: a state-changing <form> gets a hidden `_csrf` field injected as
+    // its first child, so a developer cannot forget it. The `env.csrf` check
+    // comes first so that when no token is in play — the common case — a plain
+    // element never pays for the `form` tag comparison.
+    if let Some(token) = env.csrf {
+        if el.tag.eq_ignore_ascii_case("form") && is_state_changing_form(el) {
+            out.push_str("<input type=\"hidden\" name=\"");
+            out.push_str(CSRF_FIELD);
+            out.push_str("\" value=\"");
+            escape_html_into(token, out);
+            out.push_str("\">");
+        }
+    }
+
+    // Body, in precedence order: th:insert (fragment inside), th:text/th:utext
+    // (expression), otherwise the children (the natural-template placeholder).
+    let child_mode = el.inline_mode.unwrap_or(mode);
+    if let Some(fref) = &el.th_insert {
+        if depth >= MAX_FRAGMENT_DEPTH {
+            return Err(err("fragment nesting too deep — a fragment cycle?"));
+        }
+        if let Some(frag) = resolve_fragment(templates, fref) {
+            render_nodes(frag, env, scope, child_mode, templates, depth + 1, out)?;
+        }
+    } else if let Some(e) = &el.th_text {
         let mut buf = String::new();
-        expr::eval(e, model, scope).write_string(&mut buf);
+        expr::eval(e, env, scope).write_string(&mut buf);
         escape_html_into(&buf, out);
     } else if let Some(e) = &el.th_utext {
-        expr::eval(e, model, scope).write_string(out); // raw — the explicit unsafe path
+        expr::eval(e, env, scope).write_string(out); // raw — the explicit unsafe path
     } else {
-        render_nodes(&el.children, model, scope, out)?;
+        render_nodes(&el.children, env, scope, child_mode, templates, depth, out)?;
     }
 
     out.push_str("</");
@@ -243,9 +474,19 @@ fn render_instance<'ir, 'm>(
     Ok(())
 }
 
+/// Escape `s` for the given inline context — the context-aware escaping the KEP
+/// calls for. HTML is the default; JS and CSS have their own rules, selected once
+/// per `th:inline` block, never a per-character state machine on the HTML path.
+fn escape_for(mode: InlineMode, s: &str, out: &mut String) {
+    match mode {
+        InlineMode::Html => escape_html_into(s, out),
+        InlineMode::JavaScript => escape_js_into(s, out),
+        InlineMode::Css => escape_css_into(s, out),
+    }
+}
+
 /// HTML-escape into `out` — the five characters that matter in element content
-/// and double-quoted attributes. URL and JS contexts need different rules and are
-/// a later slice; this does not claim them.
+/// and double-quoted attributes.
 fn escape_html_into(s: &str, out: &mut String) {
     for c in s.chars() {
         match c {
@@ -255,6 +496,41 @@ fn escape_html_into(s: &str, out: &mut String) {
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&#x27;"),
             _ => out.push(c),
+        }
+    }
+}
+
+/// Escape a value to sit inside a JS string literal in a `<script>` — the JS
+/// context. Quotes, backslash, and line terminators are backslash-escaped; the
+/// `<`/`>`/`&`/`/` that could close the script or start a tag become `\uXXXX`, so
+/// a value can never break out of the script element or the string.
+fn escape_js_into(s: &str, out: &mut String) {
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '<' => out.push_str("\\u003C"),
+            '>' => out.push_str("\\u003E"),
+            '&' => out.push_str("\\u0026"),
+            '/' => out.push_str("\\/"),
+            _ => out.push(c),
+        }
+    }
+}
+
+/// Escape a value for a CSS context — anything outside `[A-Za-z0-9]` is
+/// backslash-hex-escaped, which is safe in a CSS string or identifier.
+fn escape_css_into(s: &str, out: &mut String) {
+    use std::fmt::Write as _;
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else {
+            let _ = write!(out, "\\{:X} ", c as u32);
         }
     }
 }
@@ -305,18 +581,20 @@ impl<'a> Parser<'a> {
                     nodes.push(self.read_element()?);
                 }
             } else {
-                nodes.push(self.read_text());
+                nodes.push(self.read_text()?);
             }
         }
         Ok(nodes)
     }
 
-    fn read_text(&mut self) -> Dom {
+    fn read_text(&mut self) -> Result<Dom, TemplateError> {
         let start = self.pos;
         while !self.eof() && self.s[self.pos] != b'<' {
             self.pos += 1;
         }
-        Dom::Text(self.src[start..self.pos].to_string())
+        // The inline scan happens here, at parse time — a plain text node stays
+        // `Dom::Text` and pays nothing at render.
+        compile_text(&self.src[start..self.pos])
     }
 
     fn read_comment(&mut self) -> Result<Dom, TemplateError> {
@@ -450,6 +728,51 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Split a text run into inline parts. Plain text (no `[[…]]`/`[(…)]`) returns
+/// `Dom::Text` — the fast path, so the request never re-scans it. This is the
+/// discipline that keeps context-aware escaping off the common path: the scan is
+/// a one-time parse cost.
+fn compile_text(raw: &str) -> Result<Dom, TemplateError> {
+    if !raw.contains("[[") && !raw.contains("[(") {
+        return Ok(Dom::Text(raw.to_string()));
+    }
+    let mut parts = Vec::new();
+    let mut rest = raw;
+    loop {
+        let escaped = rest.find("[[");
+        let unescaped = rest.find("[(");
+        let (pos, is_escaped) = match (escaped, unescaped) {
+            (Some(a), Some(b)) => {
+                if a < b {
+                    (a, true)
+                } else {
+                    (b, false)
+                }
+            }
+            (Some(a), None) => (a, true),
+            (None, Some(b)) => (b, false),
+            (None, None) => {
+                if !rest.is_empty() {
+                    parts.push(InlinePart::Lit(rest.to_string()));
+                }
+                break;
+            }
+        };
+        if pos > 0 {
+            parts.push(InlinePart::Lit(rest[..pos].to_string()));
+        }
+        let after = &rest[pos + 2..];
+        let close = if is_escaped { "]]" } else { ")]" };
+        let end = after
+            .find(close)
+            .ok_or_else(|| err(format!("unclosed inline `{}`", if is_escaped { "[[" } else { "[(" })))?;
+        let expr = parse_expr(after[..end].trim())?;
+        parts.push(if is_escaped { InlinePart::Escaped(expr) } else { InlinePart::Raw(expr) });
+        rest = &after[end + 2..];
+    }
+    Ok(Dom::Inline(parts))
+}
+
 /// Split an element's raw attributes into static ones and the `th:*` directives.
 fn build_element(
     tag: String,
@@ -467,6 +790,11 @@ fn build_element(
         th_each: None,
         th_text: None,
         th_utext: None,
+        inline_mode: None,
+        th_authorize: None,
+        th_fragment: None,
+        th_insert: None,
+        th_replace: None,
         children,
     };
 
@@ -484,11 +812,125 @@ fn build_element(
                 "if" => el.th_if = Some(parse_expr(&value)?),
                 "unless" => el.th_unless = Some(parse_expr(&value)?),
                 "each" => el.th_each = Some(parse_each(&value)?),
+                "inline" => {
+                    el.inline_mode = Some(match value.trim().trim_matches('\'') {
+                        "javascript" | "js" => InlineMode::JavaScript,
+                        "css" => InlineMode::Css,
+                        _ => InlineMode::Html, // "text", "none", or anything else
+                    })
+                }
+                "authorize" => el.th_authorize = Some(parse_authorize(&value)?),
+                "fragment" => {
+                    // Drop any `(params)` — parameterised fragments are a later slice.
+                    let name = value.split('(').next().unwrap_or("").trim().to_string();
+                    el.th_fragment = Some(name);
+                }
+                "insert" => el.th_insert = Some(parse_fragment_ref(&value)),
+                "replace" => el.th_replace = Some(parse_fragment_ref(&value)),
                 attr => el.dynamic_attrs.push((attr.to_string(), parse_expr(&value)?)),
             },
         }
     }
     Ok(el)
+}
+
+/// Parse a fragment reference: `~{tpl :: name}`, `tpl :: name`, `:: name`
+/// (this-template), or `tpl` (whole template). `(params)` on the name are dropped
+/// for now (parameterised fragments are a later slice).
+fn parse_fragment_ref(value: &str) -> FragmentRef {
+    let v = value.trim();
+    // Strip an optional `~{ … }` wrapper.
+    let v = v.strip_prefix("~{").and_then(|r| r.strip_suffix('}')).unwrap_or(v).trim();
+    let (template, name) = match v.split_once("::") {
+        Some((tpl, name)) => {
+            let tpl = tpl.trim();
+            (if tpl.is_empty() { None } else { Some(tpl.to_string()) }, name.trim())
+        }
+        None => (Some(v.to_string()), ""), // a bare template name = the whole template
+    };
+    let name = name.split('(').next().unwrap_or("").trim().to_string();
+    FragmentRef { template, name }
+}
+
+/// Find a fragment's nodes for a reference. A named fragment resolves to the
+/// single element carrying `th:fragment="name"`; an empty name resolves to the
+/// whole template's nodes.
+fn resolve_fragment<'ir>(templates: &'ir Templates, frag: &FragmentRef) -> Option<&'ir [Dom]> {
+    // Which templates to search: the named one, or all of them.
+    let search: Vec<&'ir Vec<Dom>> = match &frag.template {
+        Some(tpl) => templates.get(tpl).into_iter().collect(),
+        None => templates.values().collect(),
+    };
+    if frag.name.is_empty() {
+        // A whole-template reference.
+        return search.into_iter().next().map(Vec::as_slice);
+    }
+    for nodes in search {
+        if let Some(node) = find_fragment(nodes, &frag.name) {
+            return Some(std::slice::from_ref(node));
+        }
+    }
+    None
+}
+
+/// The `Dom::Element` carrying `th:fragment="name"`, searched depth-first.
+fn find_fragment<'ir>(nodes: &'ir [Dom], name: &str) -> Option<&'ir Dom> {
+    for node in nodes {
+        if let Dom::Element(el) = node {
+            if el.th_fragment.as_deref() == Some(name) {
+                return Some(node);
+            }
+            if let Some(found) = find_fragment(&el.children, name) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// Whether a `<form>` uses a state-changing method (anything but GET/absent),
+/// so it needs a CSRF token. The method may be a static attribute (`method="post"`)
+/// or already been rendered via `th:method`; a `_csrf` field is only useful for
+/// the methods a CSRF check guards.
+fn is_state_changing_form(el: &Element) -> bool {
+    el.static_attrs
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case("method"))
+        .map(|(_, v)| !v.eq_ignore_ascii_case("get"))
+        .unwrap_or(false)
+}
+
+/// Parse a `th:authorize` security expression: `permitAll`, `denyAll`,
+/// `isAuthenticated()`, `isAnonymous()`, `hasRole('X')`, `hasAnyRole('A','B')`.
+fn parse_authorize(value: &str) -> Result<AuthzExpr, TemplateError> {
+    let v = value.trim().trim_end_matches("()").trim();
+    match v {
+        "permitAll" => return Ok(AuthzExpr::PermitAll),
+        "denyAll" => return Ok(AuthzExpr::DenyAll),
+        "isAuthenticated" => return Ok(AuthzExpr::IsAuthenticated),
+        "isAnonymous" => return Ok(AuthzExpr::IsAnonymous),
+        _ => {}
+    }
+    if let Some(args) = fn_call(value.trim(), "hasRole") {
+        let role = args.trim().trim_matches('\'').trim_matches('"');
+        return Ok(AuthzExpr::HasRole(role.to_string()));
+    }
+    if let Some(args) = fn_call(value.trim(), "hasAnyRole") {
+        let roles = args
+            .split(',')
+            .map(|r| r.trim().trim_matches('\'').trim_matches('"').to_string())
+            .filter(|r| !r.is_empty())
+            .collect();
+        return Ok(AuthzExpr::HasAnyRole(roles));
+    }
+    Err(err(format!("unsupported th:authorize expression `{value}`")))
+}
+
+/// If `s` is `name(args)`, return `args` (without the parens).
+fn fn_call<'a>(s: &'a str, name: &str) -> Option<&'a str> {
+    let rest = s.strip_prefix(name)?.trim_start();
+    let inner = rest.strip_prefix('(')?.strip_suffix(')')?;
+    Some(inner)
 }
 
 /// `item : ${items}` → (`"item"`, `Expr::Var(["items"])`).
@@ -744,6 +1186,239 @@ mod tests {
         assert_eq!(
             render("<li th:each=\"x : ${xs}\" th:text=\"${x} + 10\">n</li>", &m).unwrap(),
             "<li>11</li><li>12</li>"
+        );
+    }
+
+    // --- @{…} URLs and #{…} messages through the attributes (slice C) ------
+
+    #[test]
+    fn th_href_builds_a_url() {
+        let m = Value::map([("id", Value::from(42))]);
+        let out = render("<a th:href=\"@{/users/{id}(id=${id}, ref='home')}\">go</a>", &m).unwrap();
+        assert_eq!(out, "<a href=\"/users/42?ref=home\">go</a>");
+    }
+
+    #[test]
+    fn th_text_resolves_a_message() {
+        let mut engine = Kernleaf::new();
+        engine.message("greeting", "Xin chào, {0}!");
+        engine.add("t", "<h1 th:text=\"#{greeting(${name})}\">hi</h1>").unwrap();
+        let m = Value::map([("name", Value::from("Minh"))]);
+        assert_eq!(engine.render("t", &m).unwrap(), "<h1>Xin chào, Minh!</h1>");
+    }
+
+    #[test]
+    fn a_message_value_is_still_html_escaped_in_th_text() {
+        // The message text is data too — escaping applies on top of resolution.
+        let mut engine = Kernleaf::new();
+        engine.message("raw", "<b>{0}</b>");
+        engine.add("t", "<p th:text=\"#{raw('x')}\">y</p>").unwrap();
+        assert_eq!(engine.render("t", &Value::Null).unwrap(), "<p>&lt;b&gt;x&lt;/b&gt;</p>");
+    }
+
+    // --- th:inline / [[…]] context-aware escaping (slice E) ---------------
+
+    #[test]
+    fn inline_expression_is_html_escaped_by_default() {
+        let m = Value::map([("x", Value::from("<b>"))]);
+        assert_eq!(render("<p>Hi [[${x}]]!</p>", &m).unwrap(), "<p>Hi &lt;b&gt;!</p>");
+    }
+
+    #[test]
+    fn inline_raw_expression_is_not_escaped() {
+        let m = Value::map([("x", Value::from("<b>ok</b>"))]);
+        assert_eq!(render("<p>[(${x})]</p>", &m).unwrap(), "<p><b>ok</b></p>");
+    }
+
+    #[test]
+    fn plain_text_stays_a_fast_text_node() {
+        // No inline markers → Dom::Text, no per-render scan (the discipline).
+        assert_eq!(render("<p>just plain text &amp; ok</p>", &Value::Null).unwrap(), "<p>just plain text &amp; ok</p>");
+    }
+
+    #[test]
+    fn javascript_inline_escapes_for_a_script_context() {
+        // A value cannot break out of the JS string or close the <script>.
+        let m = Value::map([("name", Value::from("a'<b>"))]);
+        let out = render("<script th:inline=\"javascript\">var n='[[${name}]]';</script>", &m).unwrap();
+        assert_eq!(out, "<script>var n='a\\'\\u003Cb\\u003E';</script>");
+    }
+
+    #[test]
+    fn css_inline_escapes_for_a_style_context() {
+        let m = Value::map([("color", Value::from("red;}"))]);
+        let out = render("<style th:inline=\"css\">.x{color:[[${color}]]}</style>", &m).unwrap();
+        assert_eq!(out, "<style>.x{color:red\\3B \\7D }</style>");
+    }
+
+    #[test]
+    fn the_inline_mode_is_inherited_by_descendants() {
+        let m = Value::map([("x", Value::from("<"))]);
+        let out = render("<div th:inline=\"javascript\"><span>[[${x}]]</span></div>", &m).unwrap();
+        assert_eq!(out, "<div><span>\\u003C</span></div>");
+    }
+
+    // --- th:authorize + auto-CSRF (slice F) --------------------------------
+
+    struct MockAuth {
+        authed: bool,
+        roles: &'static [&'static str],
+    }
+    impl kernway_core::security::Authorization for MockAuth {
+        fn is_authenticated(&self) -> bool {
+            self.authed
+        }
+        fn has_role(&self, role: &str) -> bool {
+            self.roles.contains(&role)
+        }
+    }
+
+    #[test]
+    fn th_authorize_has_role() {
+        let mut e = Kernleaf::new();
+        e.add("t", "<div th:authorize=\"hasRole('ADMIN')\">panel</div>").unwrap();
+        let admin = MockAuth { authed: true, roles: &["ADMIN"] };
+        let user = MockAuth { authed: true, roles: &["USER"] };
+        assert_eq!(
+            e.render_with("t", &Value::Null, &RenderContext::new().authorize(&admin)).unwrap(),
+            "<div>panel</div>"
+        );
+        assert_eq!(
+            e.render_with("t", &Value::Null, &RenderContext::new().authorize(&user)).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn th_authorize_is_fail_closed_without_a_context() {
+        // A plain render() has no security context → anonymous → denied.
+        let mut e = Kernleaf::new();
+        e.add("t", "<div th:authorize=\"hasRole('ADMIN')\">secret</div>").unwrap();
+        assert_eq!(e.render("t", &Value::Null).unwrap(), "");
+    }
+
+    #[test]
+    fn th_authorize_permit_deny_and_authenticated() {
+        let mut e = Kernleaf::new();
+        e.add("permit", "<p th:authorize=\"permitAll\">ok</p>").unwrap();
+        e.add("deny", "<p th:authorize=\"denyAll\">no</p>").unwrap();
+        e.add("auth", "<p th:authorize=\"isAuthenticated()\">hi</p>").unwrap();
+        e.add("anyrole", "<p th:authorize=\"hasAnyRole('A','B')\">y</p>").unwrap();
+
+        let anon = MockAuth { authed: false, roles: &[] };
+        let logged = MockAuth { authed: true, roles: &["B"] };
+        let ctx_anon = RenderContext::new().authorize(&anon);
+        let ctx_logged = RenderContext::new().authorize(&logged);
+
+        assert_eq!(e.render_with("permit", &Value::Null, &ctx_anon).unwrap(), "<p>ok</p>");
+        assert_eq!(e.render_with("deny", &Value::Null, &ctx_logged).unwrap(), "");
+        assert_eq!(e.render_with("auth", &Value::Null, &ctx_anon).unwrap(), "");
+        assert_eq!(e.render_with("auth", &Value::Null, &ctx_logged).unwrap(), "<p>hi</p>");
+        assert_eq!(e.render_with("anyrole", &Value::Null, &ctx_logged).unwrap(), "<p>y</p>");
+    }
+
+    #[test]
+    fn auto_csrf_injects_into_a_post_form() {
+        let mut e = Kernleaf::new();
+        e.add("t", "<form method=\"post\" action=\"/save\"><button>Go</button></form>").unwrap();
+        let out = e.render_with("t", &Value::Null, &RenderContext::new().csrf("tok123")).unwrap();
+        assert_eq!(
+            out,
+            "<form method=\"post\" action=\"/save\">\
+             <input type=\"hidden\" name=\"_csrf\" value=\"tok123\">\
+             <button>Go</button></form>"
+        );
+    }
+
+    #[test]
+    fn no_csrf_on_get_forms_or_without_a_token() {
+        let mut e = Kernleaf::new();
+        e.add("get", "<form method=\"get\"><button>Go</button></form>").unwrap();
+        e.add("post", "<form method=\"post\"><button>Go</button></form>").unwrap();
+        // A GET form, even with a token → no injection (nothing to protect).
+        assert!(!e
+            .render_with("get", &Value::Null, &RenderContext::new().csrf("t"))
+            .unwrap()
+            .contains("_csrf"));
+        // A POST form with no token → no injection (nothing to inject).
+        assert!(!e.render("post", &Value::Null).unwrap().contains("_csrf"));
+    }
+
+    // --- fragments: th:fragment / th:insert / th:replace (slice G) --------
+
+    #[test]
+    fn th_replace_swaps_the_host_for_the_fragment() {
+        let mut e = Kernleaf::new();
+        e.add("frags", "<div th:fragment=\"header\"><h1>Site</h1></div>").unwrap();
+        e.add("page", "<body><div th:replace=\"frags :: header\">placeholder</div></body>").unwrap();
+        assert_eq!(e.render("page", &Value::Null).unwrap(), "<body><div><h1>Site</h1></div></body>");
+    }
+
+    #[test]
+    fn th_insert_puts_the_fragment_inside_the_host() {
+        let mut e = Kernleaf::new();
+        e.add("frags", "<span th:fragment=\"label\">Hello</span>").unwrap();
+        e.add("page", "<div th:insert=\"frags :: label\">x</div>").unwrap();
+        assert_eq!(e.render("page", &Value::Null).unwrap(), "<div><span>Hello</span></div>");
+    }
+
+    #[test]
+    fn a_fragment_sees_the_model() {
+        let mut e = Kernleaf::new();
+        e.add("frags", "<h1 th:fragment=\"title\" th:text=\"${name}\">x</h1>").unwrap();
+        e.add("page", "<div th:replace=\"frags :: title\">x</div>").unwrap();
+        let m = Value::map([("name", Value::from("Home"))]);
+        assert_eq!(e.render("page", &m).unwrap(), "<h1>Home</h1>");
+    }
+
+    #[test]
+    fn a_same_template_reference_resolves() {
+        // The fragment definition also renders in place — as Thymeleaf does when a
+        // template both defines and uses a fragment.
+        let mut e = Kernleaf::new();
+        e.add("t", "<i th:fragment=\"x\">hi</i><b th:replace=\":: x\">z</b>").unwrap();
+        assert_eq!(e.render("t", &Value::Null).unwrap(), "<i>hi</i><i>hi</i>");
+    }
+
+    #[test]
+    fn a_whole_template_reference() {
+        let mut e = Kernleaf::new();
+        e.add("part", "<p>partial</p>").unwrap();
+        e.add("page", "<main th:insert=\"part\">x</main>").unwrap();
+        assert_eq!(e.render("page", &Value::Null).unwrap(), "<main><p>partial</p></main>");
+    }
+
+    #[test]
+    fn the_tilde_brace_wrapper_is_accepted() {
+        let mut e = Kernleaf::new();
+        e.add("frags", "<p th:fragment=\"f\">ok</p>").unwrap();
+        e.add("page", "<div th:replace=\"~{frags :: f}\">x</div>").unwrap();
+        assert_eq!(e.render("page", &Value::Null).unwrap(), "<p>ok</p>");
+    }
+
+    #[test]
+    fn a_fragment_cycle_errors_instead_of_looping() {
+        // Fragment "a" inserts itself; rendering hits the depth cap and errors
+        // rather than looping forever.
+        let mut e = Kernleaf::new();
+        e.add("t", "<div th:fragment=\"a\"><div th:insert=\":: a\">x</div></div>").unwrap();
+        assert!(e.render("t", &Value::Null).is_err());
+    }
+
+    #[test]
+    fn th_with_a_utility_object() {
+        // slice D end to end: a utility call inside th:text, and one in th:if.
+        let m = Value::map([
+            ("name", Value::from("alice")),
+            ("items", Value::seq([Value::from(1), Value::from(2)])),
+        ]);
+        assert_eq!(
+            render("<span th:text=\"#strings.capitalize(${name})\">x</span>", &m).unwrap(),
+            "<span>Alice</span>"
+        );
+        assert_eq!(
+            render("<p th:if=\"#lists.size(${items}) > 1\">many</p>", &m).unwrap(),
+            "<p>many</p>"
         );
     }
 }
