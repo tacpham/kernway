@@ -109,17 +109,20 @@ filesystem, which is the property that makes the traversal defence trustworthy.
 
 ## Speed
 
-| Path | Runs | Cost | Bench |
+| Path | Runs | Measured | Bench |
 |---|---|---|---|
-| `resolve`, no `%` | every static request | one `split`, a few comparisons, no alloc beyond the result `PathBuf` | ❌ to write |
-| `resolve`, percent-encoded | requests with `%` | one extra pass to decode | ❌ to write |
-| `mime_for` | every static response | extension match, no alloc | ❌ to write |
+| `resolve`, plain | every static request | **136 ns** (one `PathBuf` alloc) | ✅ `resolve/plain` |
+| `resolve`, traversal rejected | hostile requests | 80 ns (refused before decode completes) | ✅ `resolve/…rejected` |
+| `etag` build | every 200 | 117 ns | ✅ `etag/build` |
+| `etag_matches` | every conditional request | 14 ns | ✅ `etag/matches_hit` |
+| `mime_for` | every static response | 30 ns | ✅ `mime_for` |
+
+Numbers from [BENCHMARKS.md](../BENCHMARKS.md).
 
 **Allocation policy**: `resolve` allocates exactly one `PathBuf` (the result);
 the no-`%` path avoids the decode buffer entirely by returning early. `mime_for`
 allocates nothing — it lowercases into a small stack string only when an
-extension is present. No benchmark yet; the numbers belong in
-[BENCHMARKS.md](../BENCHMARKS.md) once written.
+extension is present.
 
 ## Generic — the extension points
 

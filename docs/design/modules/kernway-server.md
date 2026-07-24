@@ -346,13 +346,14 @@ number here that is not quoted from there.
 
 | Path | Runs | Measured | Budget | Bench |
 |---|---|---|---|---|
-| `Router::find`, static route | every request | **41 ns, flat from 4 to 102 routes** | O(1), must not grow with route count | ✅ `route/static_hit` |
+| **Full pipeline, static GET** | every request | **392 ns** (parse→route→handle→encode, no I/O) | the CPU floor; a regression anywhere shows here | ✅ `pipeline/static_get` |
+| Full pipeline, param GET | every param request | 768 ns (headers + param map + JSON body) | — | ✅ `pipeline/param_get` |
+| `Router::find`, static route | every request | 41 ns, flat from 4 to 102 routes | O(1), must not grow with route count | ✅ `route/static_hit` |
 | `Router::find`, dynamic route | every request with a param | 331 ns @ 4, 2.17 µs @ 102 | — | ✅ `route/param_hit` |
 | `Router::find`, miss | every unmatched request | 80 ns @ 4, 1.87 µs @ 102 | should collapse with a mount tree | ✅ `route/miss` |
+| Static resolve + ETag | every static request | 136 ns resolve + 14 ns etag match | in `kernway-static` bench | ✅ `resolve/*`, `etag/*` |
 | Mount match | every static-asset request | — | O(log n) or better on mount count | ❌ to write |
-| Template render, cached IR | every page request | — | no disk I/O, no re-parse | ❌ to write |
-| Model → `Value` conversion | every render | — | to measure; suspected hot | ❌ to write |
-| Static file, cache hit (304) | every repeat asset request | — | no file read at all | ❌ to write |
+| Static file read (I/O) | every uncached asset | — | O(chunk) memory once `Body::File` lands (KEP-0002) | ❌ load test, not micro-bench |
 
 The static-route row is the one to defend. It is flat across route count today,
 and it is measured — the split router keeps a hash lookup off the linear scan, so

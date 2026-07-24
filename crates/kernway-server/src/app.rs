@@ -1049,4 +1049,105 @@ mod static_file_tests {
         fs::remove_dir_all(&root).ok();
         fs::remove_dir_all(&outside).ok();
     }
+
+    // --- the real thing: static files over an actual socket ----------------
+
+    /// Serve one connection with a static root over a real TCP socket, and
+    /// return exactly what the client received. This exercises the whole path a
+    /// deployed server runs — accept, parse, resolve, stat, read, encode, write
+    /// — not just `load_static` in isolation. Keep-alive off, so the client
+    /// reads to EOF.
+    fn serve_static(root: std::path::PathBuf, request: String) -> String {
+        use std::io::{Read, Write};
+
+        let ex = rt_core::Executor::new().unwrap();
+        let (mut listener, addr) = ex
+            .block_on(async {
+                let l = rt_net::AsyncTcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+                let a = l.local_addr().unwrap();
+                (l, a)
+            })
+            .unwrap();
+
+        let client = std::thread::spawn(move || {
+            let mut sock = std::net::TcpStream::connect(addr).unwrap();
+            sock.write_all(request.as_bytes()).unwrap();
+            let mut got = String::new();
+            sock.read_to_string(&mut got).unwrap();
+            got
+        });
+
+        let router = Arc::new(Router::new());
+        let context = Arc::new(AppContext::new());
+        let middlewares: Arc<Vec<Arc<dyn Middleware>>> = Arc::new(Vec::new());
+        let static_files = Some(Arc::new(StaticFiles::new(root)));
+        let keep_alive = KeepAliveConfig { enabled: false, ..Default::default() };
+        ex.block_on(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_connection(stream, router, context, middlewares, static_files, keep_alive, Shutdown::new()).await;
+        })
+        .unwrap();
+
+        client.join().unwrap()
+    }
+
+    /// The `etag:` value from a raw response, quotes included.
+    fn etag_of(response: &str) -> String {
+        response
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("etag:"))
+            .and_then(|l| l.splitn(2, ':').nth(1))
+            .map(|v| v.trim().to_string())
+            .expect("response has an etag")
+    }
+
+    #[test]
+    fn serves_a_real_file_over_http() {
+        let root = tmpdir("http-serve");
+        fs::write(root.join("index.html"), b"<h1>hi</h1>").unwrap();
+
+        let got = serve_static(root.clone(), "GET / HTTP/1.1\r\nHost: x\r\n\r\n".to_string());
+        assert!(got.starts_with("HTTP/1.1 200 OK\r\n"), "got {got:?}");
+        assert!(got.contains("content-type: text/html"), "got {got:?}");
+        assert!(got.to_ascii_lowercase().contains("etag:"), "got {got:?}");
+        assert!(got.contains("x-content-type-options: nosniff"), "got {got:?}");
+        assert!(got.ends_with("<h1>hi</h1>"), "got {got:?}");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_conditional_request_gets_304_over_http() {
+        let root = tmpdir("http-304");
+        fs::write(root.join("index.html"), b"the page").unwrap();
+
+        let first = serve_static(root.clone(), "GET / HTTP/1.1\r\nHost: x\r\n\r\n".to_string());
+        let etag = etag_of(&first);
+
+        let second = serve_static(
+            root.clone(),
+            format!("GET / HTTP/1.1\r\nHost: x\r\nIf-None-Match: {etag}\r\n\r\n"),
+        );
+        assert!(second.starts_with("HTTP/1.1 304 Not Modified\r\n"), "got {second:?}");
+        // 304 carries no body — the client's cached copy is current.
+        assert!(!second.ends_with("the page"), "304 must not send the body: {second:?}");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_traversal_attempt_over_http_is_a_404() {
+        let root = tmpdir("http-traversal");
+        fs::write(root.join("index.html"), b"x").unwrap();
+
+        // Raw, un-normalised path on the wire — the server, not a client library,
+        // must reject it.
+        let got = serve_static(
+            root.clone(),
+            "GET /%2e%2e/%2e%2e/etc/passwd HTTP/1.1\r\nHost: x\r\n\r\n".to_string(),
+        );
+        assert!(got.starts_with("HTTP/1.1 404"), "got {got:?}");
+
+        fs::remove_dir_all(&root).ok();
+    }
 }

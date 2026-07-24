@@ -17,8 +17,8 @@ Machine   Apple M2 Max, 12 cores
 OS        macOS 26.5
 rustc     1.96.0, release profile
 Tool      criterion (statistical, warmed, outlier-filtered)
-Date      2026-07-24
-Reproduce cargo bench -p di-core -p kernway-http -p kernway-server -p rt-core
+Date      2026-07-24 (routing/DI/http/runtime); static + pipeline added same day
+Reproduce cargo bench -p di-core -p kernway-http -p kernway-server -p rt-core -p kernway-static
 ```
 
 Absolute nanoseconds are specific to this machine. What carries across machines
@@ -26,7 +26,7 @@ is the **shape** — O(1) vs O(n), the ratio between two approaches — and that
 what the analysis below leans on. Re-run on your own hardware before quoting an
 absolute figure elsewhere.
 
-## Routing — the number that matters most
+## Routing — flat with application size
 
 `cargo bench -p kernway-server`
 
@@ -53,6 +53,57 @@ fast one.
 
 **Allocation**: zero for a matched static route, one `HashMap` only for a route
 that actually has parameters.
+
+## The full request pipeline — every module together
+
+`cargo bench -p kernway-server --bench pipeline`
+
+The number that matters most, and the one every module below adds up to:
+one request start to finish, in process — `kernway-http` parse → `kernway-server`
+route → the handler builds a `kernway-core` `Response` → `kernway-http` encode.
+No socket, no file I/O, so it is the CPU floor every request pays regardless of
+the network.
+
+| Benchmark | Time | What it exercises |
+|---|---|---|
+| `pipeline/static_get` | 392 ns | parse + static route + handler + encode |
+| `pipeline/param_get` | 768 ns | parse (with headers) + param route + param map + JSON build + encode |
+
+392 ns end to end for a static-route request is ~2.5 M requests/sec/core of pure
+CPU headroom — the ceiling a real deployment works down from once the network,
+the syscalls, and the scheduler are added. `param_get` costs roughly double: a
+browser request with headers to parse, a parameter map to allocate, and a
+`format!`ed JSON body.
+
+This is the guard the module benchmarks below serve: a regression in parsing,
+routing, or encoding shows up here, in the number that actually ships.
+
+**Not** an end-to-end throughput figure — that needs a load test against a
+running server, listed under "Not yet measured".
+
+## Static resolution — the per-request path, before any I/O
+
+`cargo bench -p kernway-static`
+
+Pure CPU: turning a URL into a safe file path and naming its MIME type. The file
+read is I/O and is not here.
+
+| Benchmark | Time | Notes |
+|---|---|---|
+| `resolve/plain` | 136 ns | `/assets/app.css` → a `PathBuf` under the root |
+| `resolve/index` | 103 ns | `/` → `index.html` |
+| `resolve/…traversal_rejected` | 80 ns | `%2e%2e` decoded and refused — the reject path is cheap |
+| `resolve/deep` | 229 ns | 8 segments; cost grows with depth |
+| `etag/build` | 117 ns | format the validator from len + mtime |
+| `etag/matches_hit` | 14 ns | the 304 decision on a matching request |
+| `etag/matches_in_list` | 56 ns | ours last in a 4-entry `If-None-Match` |
+| `mime_for` | 30 ns | extension → type |
+
+`resolve` allocates one `PathBuf` (the result), which is most of the ~136 ns —
+it is the one place the static path is not allocation-free, and a candidate to
+optimise if a large-file load test later shows it mattering. `etag_matches` at
+14 ns means a conditional request's 304 decision is effectively free next to the
+file `stat` it accompanies.
 
 ## DI resolution — bean lookup is nearly free
 

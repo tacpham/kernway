@@ -13,6 +13,13 @@ homepage.workspace   = true
 # The actual file read is async I/O, and lives in kernway-server.
 [dependencies]
 
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name    = "resolve"
+harness = false
+
 [lints]
 workspace = true
 
