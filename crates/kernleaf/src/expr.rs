@@ -15,9 +15,24 @@
 //! Not here (later slices): `@{...}` URLs, `#{...}` messages, `#utility` objects,
 //! method calls. See the kernleaf charter.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
+use kernway_core::security::Authorization;
 use kernway_core::template::Value;
+
+/// The immutable render environment: the model plus the resources a template may
+/// reach — the message bundle (`#{...}`), the context path for `@{...}` URLs, the
+/// authorization facts for `th:authorize`, and the CSRF token to inject into
+/// forms. The loop scope is passed separately because it changes as `th:each`
+/// pushes and pops bindings.
+pub struct Env<'m> {
+    pub model: &'m Value<'m>,
+    pub messages: &'m HashMap<String, String>,
+    pub context_path: &'m str,
+    pub authz: &'m dyn Authorization,
+    pub csrf: Option<&'m str>,
+}
 
 /// A parsed expression — the AST cached in the template DOM.
 #[derive(Debug, Clone, PartialEq)]
@@ -34,6 +49,15 @@ pub enum Expr {
     Null,
     /// `|text ${x} more|` — literal substitution, evaluated as concatenation.
     Template(Vec<Expr>),
+    /// `@{/path/{v}(v=${x}, q=${y})}` — a URL. Path variables `{v}` are
+    /// substituted (URL-encoded) into `base`; the rest become query parameters.
+    Url { base: String, params: Vec<(String, Expr)> },
+    /// `#{key(arg0, arg1)}` — an i18n message, with `{0}`/`{1}` placeholders
+    /// filled from the arguments.
+    Msg { key: String, args: Vec<Expr> },
+    /// `#strings.toUpperCase(${x})` — a utility-object method call. A *separate*
+    /// branch from `Var`, so a plain `${var}` never pays for method dispatch.
+    Util { object: String, method: String, args: Vec<Expr> },
     /// `-x`, `not x`, `!x`.
     Unary(UnOp, Box<Expr>),
     /// A binary operator.
@@ -157,14 +181,10 @@ fn value_to_string(value: &Value<'_>, out: &mut String) {
 // Evaluation
 // ============================================================
 
-/// Evaluate `e` against the model and the current loop scope.
-pub fn eval<'m>(
-    e: &Expr,
-    model: &'m Value<'m>,
-    scope: &[(&str, &'m Value<'m>)],
-) -> EvalVal<'m> {
+/// Evaluate `e` against the environment and the current loop scope.
+pub fn eval<'m>(e: &Expr, env: &Env<'m>, scope: &[(&str, &'m Value<'m>)]) -> EvalVal<'m> {
     match e {
-        Expr::Var(p) => resolve(p, model, scope).map(EvalVal::Ref).unwrap_or(EvalVal::Null),
+        Expr::Var(p) => resolve(p, env.model, scope).map(EvalVal::Ref).unwrap_or(EvalVal::Null),
         Expr::Str(s) => EvalVal::Str(s.clone()),
         Expr::Num(n) => EvalVal::Num(*n),
         Expr::Bool(b) => EvalVal::Bool(*b),
@@ -172,38 +192,199 @@ pub fn eval<'m>(
         Expr::Template(parts) => {
             let mut s = String::new();
             for part in parts {
-                eval(part, model, scope).write_string(&mut s);
+                eval(part, env, scope).write_string(&mut s);
             }
             EvalVal::Str(s)
         }
+        Expr::Url { base, params } => EvalVal::Str(eval_url(base, params, env, scope)),
+        Expr::Msg { key, args } => EvalVal::Str(eval_msg(key, args, env, scope)),
+        Expr::Util { object, method, args } => {
+            let vals: Vec<EvalVal> = args.iter().map(|a| eval(a, env, scope)).collect();
+            eval_util(object, method, &vals)
+        }
         Expr::Unary(op, x) => {
-            let v = eval(x, model, scope);
+            let v = eval(x, env, scope);
             match op {
                 UnOp::Not => EvalVal::Bool(!v.to_bool()),
                 UnOp::Neg => EvalVal::Num(-v.as_num().unwrap_or(0.0)),
             }
         }
         Expr::Ternary(c, a, b) => {
-            if eval(c, model, scope).to_bool() {
-                eval(a, model, scope)
+            if eval(c, env, scope).to_bool() {
+                eval(a, env, scope)
             } else {
-                eval(b, model, scope)
+                eval(b, env, scope)
             }
         }
         Expr::Elvis(a, b) => {
-            let av = eval(a, model, scope);
+            let av = eval(a, env, scope);
             if av.to_bool() {
                 av
             } else {
-                eval(b, model, scope)
+                eval(b, env, scope)
             }
         }
         Expr::Binary(op, l, r) => {
-            let lv = eval(l, model, scope);
-            let rv = eval(r, model, scope);
+            let lv = eval(l, env, scope);
+            let rv = eval(r, env, scope);
             eval_binary(*op, lv, rv)
         }
     }
+}
+
+/// Build a URL: substitute `{name}` path variables (URL-encoded), append the rest
+/// as a query string, and prepend the context path. Encoding a value is the URL
+/// escape context — distinct from HTML escaping.
+fn eval_url<'m>(
+    base: &str,
+    params: &[(String, Expr)],
+    env: &Env<'m>,
+    scope: &[(&str, &'m Value<'m>)],
+) -> String {
+    let mut url = base.to_string();
+    let mut query: Vec<(String, String)> = Vec::new();
+    for (name, vexpr) in params {
+        let mut val = String::new();
+        eval(vexpr, env, scope).write_string(&mut val);
+        let placeholder = format!("{{{name}}}");
+        if url.contains(&placeholder) {
+            url = url.replace(&placeholder, &url_encode(&val));
+        } else {
+            query.push((name.clone(), val));
+        }
+    }
+    if !query.is_empty() {
+        url.push('?');
+        for (i, (k, v)) in query.iter().enumerate() {
+            if i > 0 {
+                url.push('&');
+            }
+            url.push_str(&url_encode(k));
+            url.push('=');
+            url.push_str(&url_encode(v));
+        }
+    }
+    if env.context_path.is_empty() {
+        url
+    } else {
+        format!("{}{}", env.context_path, url)
+    }
+}
+
+/// Resolve a message: look up the key, fill `{0}`/`{1}` from the arguments. A
+/// missing key renders `??key??`, as Thymeleaf does, so it is visible in the page.
+fn eval_msg<'m>(
+    key: &str,
+    args: &[Expr],
+    env: &Env<'m>,
+    scope: &[(&str, &'m Value<'m>)],
+) -> String {
+    let mut text = match env.messages.get(key) {
+        Some(t) => t.clone(),
+        None => return format!("??{key}??"),
+    };
+    for (i, arg) in args.iter().enumerate() {
+        let mut a = String::new();
+        eval(arg, env, scope).write_string(&mut a);
+        text = text.replace(&format!("{{{i}}}"), &a);
+    }
+    text
+}
+
+/// Dispatch a utility-object method. A curated, extensible subset of Thymeleaf's
+/// `#strings`/`#numbers`/`#lists`/`#bools`; an unknown call is `Null` (visible as
+/// empty) rather than a hard error, so a template is not broken by a typo in a
+/// rarely-used helper. Reached only for a `#util` node — never for a plain `${x}`.
+fn eval_util<'m>(object: &str, method: &str, args: &[EvalVal<'m>]) -> EvalVal<'m> {
+    let text = |i: usize| args.get(i).map(EvalVal::to_text).unwrap_or_default();
+    let num = |i: usize| args.get(i).and_then(EvalVal::as_num).unwrap_or(0.0);
+    match (object, method) {
+        // #strings
+        ("strings", "toUpperCase") => EvalVal::Str(text(0).to_uppercase()),
+        ("strings", "toLowerCase") => EvalVal::Str(text(0).to_lowercase()),
+        ("strings", "trim") => EvalVal::Str(text(0).trim().to_string()),
+        ("strings", "length") => EvalVal::Num(text(0).chars().count() as f64),
+        ("strings", "isEmpty") => EvalVal::Bool(text(0).is_empty()),
+        ("strings", "contains") => EvalVal::Bool(text(0).contains(&text(1))),
+        ("strings", "capitalize") => EvalVal::Str(capitalize(&text(0))),
+        ("strings", "defaultString") => {
+            let s = text(0);
+            EvalVal::Str(if s.is_empty() { text(1) } else { s })
+        }
+        // #numbers
+        ("numbers", "abs") => EvalVal::Num(num(0).abs()),
+        ("numbers", "formatInteger") => EvalVal::Str(format_decimal(num(0), args.get(1).and_then(EvalVal::as_num).unwrap_or(1.0) as usize, 0)),
+        ("numbers", "formatDecimal") => EvalVal::Str(format_decimal(
+            num(0),
+            args.get(1).and_then(EvalVal::as_num).unwrap_or(1.0) as usize,
+            num(2) as usize,
+        )),
+        // #lists
+        ("lists", "size") => EvalVal::Num(args.first().and_then(EvalVal::as_seq).map_or(0, <[_]>::len) as f64),
+        ("lists", "isEmpty") => {
+            EvalVal::Bool(args.first().and_then(EvalVal::as_seq).map_or(true, <[_]>::is_empty))
+        }
+        ("lists", "contains") => {
+            let found = args
+                .first()
+                .and_then(EvalVal::as_seq)
+                .map(|xs| {
+                    let needle = text(1);
+                    xs.iter().any(|v| {
+                        let mut s = String::new();
+                        value_to_string(v, &mut s);
+                        s == needle
+                    })
+                })
+                .unwrap_or(false);
+            EvalVal::Bool(found)
+        }
+        // #bools
+        ("bools", "isTrue") => EvalVal::Bool(args.first().map(EvalVal::to_bool).unwrap_or(false)),
+        _ => EvalVal::Null,
+    }
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
+
+/// Format `n` with `decimals` fractional digits and at least `min_int` integer
+/// digits (zero-padded). `#numbers.formatDecimal(3.14159, 1, 2)` → "3.14".
+fn format_decimal(n: f64, min_int: usize, decimals: usize) -> String {
+    let sign = if n < 0.0 { "-" } else { "" };
+    let s = format!("{:.*}", decimals, n.abs());
+    let (int_part, frac_part) = match s.split_once('.') {
+        Some((i, f)) => (i.to_string(), Some(f.to_string())),
+        None => (s, None),
+    };
+    let padded = if int_part.len() < min_int {
+        format!("{}{}", "0".repeat(min_int - int_part.len()), int_part)
+    } else {
+        int_part
+    };
+    match frac_part {
+        Some(f) => format!("{sign}{padded}.{f}"),
+        None => format!("{sign}{padded}"),
+    }
+}
+
+/// Percent-encode a string as a URL component (RFC 3986 unreserved kept).
+fn url_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => {
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out
 }
 
 fn eval_binary<'m>(op: BinOp, l: EvalVal<'m>, r: EvalVal<'m>) -> EvalVal<'m> {
@@ -291,6 +472,8 @@ enum Tok {
     Str(String),
     Ident(String), // a dotted path
     TemplateRaw(String),
+    UrlRaw(String), // the inside of @{ … }
+    MsgRaw(String), // the inside of #{ … }
     True,
     False,
     Null,
@@ -316,6 +499,7 @@ enum Tok {
     Question,
     Colon,
     Elvis, // ?:
+    Comma,
 }
 
 fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
@@ -352,6 +536,30 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
                 }
                 toks.push(Tok::TemplateRaw(s[start..j].to_string()));
                 i = j + 1;
+            }
+            b'@' if i + 1 < b.len() && b[i + 1] == b'{' => {
+                let (inner, next) = scan_braced(s, b, i + 1).ok_or("unclosed `@{`")?;
+                toks.push(Tok::UrlRaw(inner));
+                i = next;
+            }
+            b'#' if i + 1 < b.len() && b[i + 1] == b'{' => {
+                let (inner, next) = scan_braced(s, b, i + 1).ok_or("unclosed `#{`")?;
+                toks.push(Tok::MsgRaw(inner));
+                i = next;
+            }
+            b'#' => {
+                // A utility object like `#strings.toUpperCase` — `#` plus an
+                // identifier path. (The `#{` message form was handled above.)
+                let start = i;
+                i += 1;
+                while i < b.len() && is_ident_part(b[i]) {
+                    i += 1;
+                }
+                toks.push(Tok::Ident(s[start..i].to_string()));
+            }
+            b',' => {
+                toks.push(Tok::Comma);
+                i += 1;
             }
             b'$' if i + 1 < b.len() && b[i + 1] == b'{' => {
                 toks.push(Tok::DollarOpen);
@@ -485,6 +693,28 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
     Ok(toks)
 }
 
+/// Given `b[open] == '{'`, return the content up to the matching `}` (counting
+/// nested braces, so a `${…}` inside does not close early) and the index after it.
+fn scan_braced(s: &str, b: &[u8], open: usize) -> Option<(String, usize)> {
+    let start = open + 1;
+    let mut depth = 1;
+    let mut j = start;
+    while j < b.len() {
+        match b[j] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((s[start..j].to_string(), j + 1));
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    None
+}
+
 fn is_ident_start(c: u8) -> bool {
     c.is_ascii_alphabetic() || c == b'_'
 }
@@ -528,6 +758,24 @@ impl<'a> P<'a> {
         } else {
             false
         }
+    }
+
+    /// Parse `(a, b, c)` argument lists — the `(` is already consumed.
+    fn arg_list(&mut self) -> Result<Vec<Expr>, String> {
+        let mut args = Vec::new();
+        if self.eat(&Tok::RParen) {
+            return Ok(args);
+        }
+        loop {
+            args.push(self.ternary()?);
+            if self.eat(&Tok::RParen) {
+                break;
+            }
+            if !self.eat(&Tok::Comma) {
+                return Err("expected `,` or `)` in argument list".into());
+            }
+        }
+        Ok(args)
     }
 
     fn ternary(&mut self) -> Result<Expr, String> {
@@ -657,11 +905,31 @@ impl<'a> P<'a> {
             }
             Tok::Ident(path) => {
                 self.pos += 1;
-                Ok(Expr::Var(split_path(&path)?))
+                if let Some(util) = path.strip_prefix('#') {
+                    // `#object.method(args)` — a utility call.
+                    let (object, method) = util
+                        .rsplit_once('.')
+                        .ok_or_else(|| format!("utility `#{util}` needs a `.method`"))?;
+                    if !self.eat(&Tok::LParen) {
+                        return Err(format!("utility `#{util}` needs `(`"));
+                    }
+                    let args = self.arg_list()?;
+                    Ok(Expr::Util { object: object.to_string(), method: method.to_string(), args })
+                } else {
+                    Ok(Expr::Var(split_path(&path)?))
+                }
             }
             Tok::TemplateRaw(raw) => {
                 self.pos += 1;
                 Ok(parse_template(&raw)?)
+            }
+            Tok::UrlRaw(raw) => {
+                self.pos += 1;
+                Ok(parse_url(&raw)?)
+            }
+            Tok::MsgRaw(raw) => {
+                self.pos += 1;
+                Ok(parse_msg(&raw)?)
             }
             Tok::DollarOpen | Tok::StarOpen => {
                 // `${ … }` / `*{ … }` — a transparent wrapper around an expression.
@@ -691,6 +959,76 @@ fn split_path(s: &str) -> Result<Vec<String>, String> {
         return Err(format!("malformed path `{s}`"));
     }
     Ok(path)
+}
+
+/// Parse the inside of a `@{…}`: `base` optionally followed by `(name=expr, …)`.
+/// A `name` that appears as `{name}` in the base is a path variable; the rest are
+/// query parameters.
+fn parse_url(raw: &str) -> Result<Expr, String> {
+    let raw = raw.trim();
+    let (base, params_src) = match raw.find('(') {
+        Some(open) if raw.ends_with(')') => (&raw[..open], &raw[open + 1..raw.len() - 1]),
+        _ => (raw, ""),
+    };
+    let mut params = Vec::new();
+    for part in split_top_commas(params_src) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (name, value) = part
+            .split_once('=')
+            .ok_or_else(|| format!("URL parameter needs `name=value`: `{part}`"))?;
+        params.push((name.trim().to_string(), parse(value.trim())?));
+    }
+    Ok(Expr::Url { base: base.trim().to_string(), params })
+}
+
+/// Parse the inside of a `#{…}`: `key` optionally followed by `(arg, …)`.
+fn parse_msg(raw: &str) -> Result<Expr, String> {
+    let raw = raw.trim();
+    let (key, args_src) = match raw.find('(') {
+        Some(open) if raw.ends_with(')') => (&raw[..open], &raw[open + 1..raw.len() - 1]),
+        _ => (raw, ""),
+    };
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("empty message key `#{}`".into());
+    }
+    let mut args = Vec::new();
+    for part in split_top_commas(args_src) {
+        let part = part.trim();
+        if !part.is_empty() {
+            args.push(parse(part)?);
+        }
+    }
+    Ok(Expr::Msg { key: key.to_string(), args })
+}
+
+/// Split on commas that are at the top level — not inside `${…}`, `(…)`, or a
+/// `'…'` string. Used for `@{}`/`#{}` parameter lists.
+fn split_top_commas(s: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut start = 0;
+    let b = s.as_bytes();
+    for (i, &c) in b.iter().enumerate() {
+        match c {
+            b'\'' => in_str = !in_str,
+            b'{' | b'(' if !in_str => depth += 1,
+            b'}' | b')' if !in_str => depth -= 1,
+            b',' if !in_str && depth == 0 => {
+                parts.push(s[start..i].to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < s.len() || !s.is_empty() {
+        parts.push(s[start..].to_string());
+    }
+    parts
 }
 
 /// Parse the inside of a `|…|`: literal text with `${…}` embeds → a `Template`.
@@ -723,21 +1061,31 @@ mod tests {
             ("name", Value::from("Alice")),
             ("flag", Value::from(true)),
             ("user", Value::map([("age", Value::from(20)), ("admin", Value::from(false))])),
+            ("items", Value::seq([Value::from(1), Value::from(2), Value::from(3)])),
         ])
     }
 
     fn ev(src: &str) -> String {
+        eval_with(src, &HashMap::new())
+    }
+
+    fn eval_with(src: &str, messages: &HashMap<String, String>) -> String {
         let e = parse(src).unwrap_or_else(|err| panic!("parse `{src}`: {err}"));
         let m = model();
+        let anon = kernway_core::security::Anonymous;
+        let env = Env { model: &m, messages, context_path: "", authz: &anon, csrf: None };
         let mut out = String::new();
-        eval(&e, &m, &[]).write_string(&mut out);
+        eval(&e, &env, &[]).write_string(&mut out);
         out
     }
 
     fn ev_bool(src: &str) -> bool {
         let e = parse(src).unwrap();
         let m = model();
-        eval(&e, &m, &[]).to_bool()
+        let messages = HashMap::new();
+        let anon = kernway_core::security::Anonymous;
+        let env = Env { model: &m, messages: &messages, context_path: "", authz: &anon, csrf: None };
+        eval(&e, &env, &[]).to_bool()
     }
 
     #[test]
@@ -812,6 +1160,83 @@ mod tests {
     fn whole_number_math_has_no_trailing_zero() {
         assert_eq!(ev("${n} + 1"), "4");
         assert_eq!(ev("10 / 4"), "2.5");
+    }
+
+    // --- @{…} URLs (slice C) ----------------------------------------------
+
+    #[test]
+    fn plain_url_passes_through() {
+        assert_eq!(ev("@{/home}"), "/home");
+    }
+
+    #[test]
+    fn url_path_variable_is_substituted() {
+        // ${n} = 3
+        assert_eq!(ev("@{/users/{id}(id=${n})}"), "/users/3");
+    }
+
+    #[test]
+    fn url_query_params_are_appended_and_encoded() {
+        assert_eq!(ev("@{/search(q='a b&c', page=2)}"), "/search?q=a%20b%26c&page=2");
+    }
+
+    #[test]
+    fn url_mixes_path_and_query() {
+        assert_eq!(ev("@{/u/{id}/posts(id=${n}, sort='new')}"), "/u/3/posts?sort=new");
+    }
+
+    // --- #{…} messages (slice C) ------------------------------------------
+
+    #[test]
+    fn message_lookup_with_arguments() {
+        let mut msgs = HashMap::new();
+        msgs.insert("greeting".to_string(), "Hello, {0}! You have {1}.".to_string());
+        assert_eq!(eval_with("#{greeting(${name}, '2 msgs')}", &msgs), "Hello, Alice! You have 2 msgs.");
+    }
+
+    #[test]
+    fn a_missing_message_is_visible() {
+        assert_eq!(ev("#{no.such.key}"), "??no.such.key??");
+    }
+
+    // --- #utility objects (slice D) ---------------------------------------
+
+    #[test]
+    fn string_utilities() {
+        assert_eq!(ev("#strings.toUpperCase(${name})"), "ALICE");
+        assert_eq!(ev("#strings.toLowerCase(${name})"), "alice");
+        assert_eq!(ev("#strings.length(${name})"), "5");
+        assert_eq!(ev("#strings.capitalize('hello')"), "Hello");
+        assert_eq!(ev("#strings.trim('  hi  ')"), "hi");
+        assert!(ev_bool("#strings.contains(${name}, 'lic')"));
+        assert_eq!(ev("#strings.defaultString(${missing}, 'anon')"), "anon");
+    }
+
+    #[test]
+    fn number_utilities() {
+        assert_eq!(ev("#numbers.formatDecimal(3.14159, 1, 2)"), "3.14");
+        assert_eq!(ev("#numbers.formatInteger(5, 3)"), "005");
+        assert_eq!(ev("#numbers.abs(-${n})"), "3");
+    }
+
+    #[test]
+    fn list_utilities() {
+        assert_eq!(ev("#lists.size(${items})"), "3");
+        assert!(!ev_bool("#lists.isEmpty(${items})"));
+        assert!(ev_bool("#lists.contains(${items}, '2')"));
+        assert!(!ev_bool("#lists.contains(${items}, '9')"));
+    }
+
+    #[test]
+    fn an_unknown_utility_is_null_not_a_crash() {
+        assert_eq!(ev("#strings.noSuchMethod('x')"), "");
+    }
+
+    #[test]
+    fn utilities_compose_with_operators() {
+        // A utility result flows into the rest of the expression.
+        assert_eq!(ev("#strings.length(${name}) + ${n}"), "8");
+        assert_eq!(ev("#lists.size(${items}) > 2 ? 'many' : 'few'"), "many");
     }
 
     #[test]

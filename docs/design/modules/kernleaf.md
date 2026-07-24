@@ -12,10 +12,12 @@ A template is parsed **once** into a cached DOM (`add`) and rendered by walking
 that DOM — parsing never touches the request path. It is **HTML-safe by default**:
 `th:text` escapes, and only the explicit `th:utext` emits raw HTML.
 
-**Not** in scope (yet): `@{}` link URLs, `#{}` messages, utility objects
-(`#strings`, `#dates`, …), JS/CSS inlining, security attributes, fragments, and the
-hot-reload loader. Those are the slices below. This charter covers slice A (the
-attribute engine) and slice B (the Standard Expression language).
+**Not** in scope (yet): parameterised fragments and the hot-reload loader (M5).
+This charter covers slices A–G — the full Thymeleaf Standard Dialect core: the
+attribute engine, the Standard Expression language, `@{}` URLs / `#{}` messages,
+the `#`-utility objects, context-aware escaping, security (`th:authorize` +
+auto-CSRF), and fragments (`th:fragment`/`th:insert`/`th:replace`). This completes
+the kernleaf part of milestone **M4**.
 
 ## Status
 
@@ -30,16 +32,26 @@ As of 2026-07-24. M4 slice A.
 | `th:each="x : ${xs}"`, nested, correct precedence | ✅ | `th:each` wraps `th:if` per item, as Thymeleaf orders them |
 | `th:<attr>` (`th:href`, `th:value`, `th:class`, …) | ✅ | sets that attribute from an expression, escaped |
 | `xmlns:th` declaration stripped from output | ✅ | as Thymeleaf does |
-| **Standard Expression** — vars, literals, arithmetic, comparison, boolean, ternary/elvis, `\|…\|` | ✅ B | full grammar in `expr.rs`; 17 tests |
-| Benchmarked vs minijinja | ✅ | **1.72× faster** on render (see Speed) |
-| `@{}` URLs, `#{}` messages | ❌ | slice C |
+| **Standard Expression** — vars, literals, arithmetic, comparison, boolean, ternary/elvis, `\|…\|` | ✅ B | full grammar in `expr.rs` |
+| **`@{}` link URLs** — path vars, query params, URL-encoding | ✅ C | `@{/u/{id}(id=${x}, q=${y})}`; encoding is the URL escape context |
+| **`#{}` i18n messages** — bundle lookup, `{0}` args | ✅ C | `.message(key, value)`; missing key → `??key??` |
+| **Utility objects** — `#strings`/`#numbers`/`#lists`/`#bools` methods | ✅ D | separate `Util` branch — baseline `${var}` unaffected (measured) |
+| **Context-aware escaping** — `th:inline` js/css + `[[…]]`/`[(…)]` | ✅ E | HTML default, JS/CSS per `th:inline`; inline scan at parse time |
+| **`th:authorize`** — `hasRole`/`hasAnyRole`/`isAuthenticated`/`permitAll`/`denyAll` | ✅ F | consults `kernway-core`'s `Authorization`; fail-closed |
+| **Auto-CSRF** — inject `_csrf` into state-changing forms | ✅ F | only for `method != get` when a token is supplied |
+| **Fragments** — `th:fragment` + `th:insert`/`th:replace`, cross/same/whole-template | ✅ G | resolves against loaded templates; depth-capped against cycles |
+| Benchmarked vs minijinja | ✅ | **~1.7× faster** on render (see Speed) |
+| Parameterised fragments (`th:fragment="card(a,b)"`) | ❌ | later — needs a scope that binds computed args |
+| Hot-reload loader | ❌ | M5 |
 | Utility objects (`#strings`, `#numbers`, …) | ❌ | slice D — Thymeleaf's answer to "filters" |
 | `th:inline` JS/CSS escape contexts | ❌ | slice E |
 | `th:authorize` + auto-CSRF, fragments | ❌ | slice F, with `kernway-security` and [`kernway-htmx`](kernway-htmx.md) |
 | Loader + hot reload | ❌ | M5 — `add` is what the watcher calls on change |
 
 **Today**: `Kernleaf::new()`, `.add(name, source)?` to parse, then
-`.render(name, &model)` (the [`TemplateEngine`] trait). 36 unit tests + a doctest.
+`.render(name, &model)` (the [`TemplateEngine`] trait), or `.render_with(name,
+&model, &RenderContext)` to supply `th:authorize` facts and a CSRF token. 69 unit
+tests + a doctest.
 
 ## Standards / safety
 
@@ -49,13 +61,18 @@ As of 2026-07-24. M4 slice A.
 | Raw HTML is explicit | only `th:utext` emits unescaped, and its name says so | ✅ `th_utext_is_raw…` |
 | Attribute injection | `th:<attr>` values escaped (`"` `'` `<` `>` `&`) | ✅ `attribute_values_are_escaped` |
 | Malformed template | reported at `add`, not silently at render | ✅ error paths in `add` |
+| JS breakout in `<script>` | `th:inline="javascript"` `\uXXXX`-escapes `< > & /`, so a value cannot close the script or the string | ✅ `javascript_inline_escapes…` |
+| CSS injection | `th:inline="css"` backslash-hex-escapes non-alphanumerics | ✅ `css_inline_escapes…` |
+| Unauthorized content leak | `th:authorize` drops the element + subtree, fail-closed (no context → denied) | ✅ `th_authorize_is_fail_closed…` |
+| CSRF (forgotten token) | a state-changing `<form>` auto-injects the `_csrf` field — the developer cannot forget it | ✅ `auto_csrf_injects…` |
 
 Escaping-by-default is the load-bearing rule
 ([KEP-0000 §3](../../kep/0000-principles.md#3-solid--correct-at-the-edges-or-not-correct)):
-`th:text` is the safe path, `th:utext` the single explicit exception. This escape
-covers HTML body and double-quoted attributes; URL (`@{}`) and JS (`th:inline`)
-contexts have their own rules and are later slices — the charter does not claim
-them yet.
+the escaping is **context-aware** — HTML body/attribute, URL (`@{}`), JS and CSS
+(`th:inline`) each get their own rule, and the rule is chosen at parse time so the
+common HTML path stays a straight escape (never a per-character state machine).
+`th:text`/`[[…]]` are the safe paths; `th:utext`/`[(…)]` are the explicit raw
+exceptions, and their names say so.
 
 ## Architecture
 
@@ -85,9 +102,19 @@ pub struct Kernleaf { /* name → cached DOM */ }
 impl Kernleaf {
     pub fn new() -> Self;
     pub fn add(&mut self, name: impl Into<String>, source: &str) -> Result<(), TemplateError>;
+    pub fn message(&mut self, key: impl Into<String>, value: impl Into<String>); // #{key}
     pub fn is_compiled(&self, name: &str) -> bool;
+    pub fn render_with(&self, name, model, ctx: &RenderContext) -> Result<String, _>; // th:authorize + CSRF
 }
 impl TemplateEngine for Kernleaf { /* render(&self, name, &Value) -> Result<String, _> */ }
+
+// The security context for a render.
+pub struct RenderContext<'a> { /* … */ }
+impl<'a> RenderContext<'a> {
+    pub fn new() -> Self;
+    pub fn authorize(self, authz: &'a dyn Authorization) -> Self; // for th:authorize
+    pub fn csrf(self, token: &'a str) -> Self;                    // injected into forms
+}
 ```
 
 **Stability**: the trait impl is the contract (`kernway-core`'s `TemplateEngine`).
@@ -122,13 +149,26 @@ disk (M5) is separate, kept out so the engine stays unit-testable without I/O.
 
 Numbers from [BENCHMARKS.md](../BENCHMARKS.md). kernleaf renders faster by walking
 a parsed DOM directly over a minimal `Value`, where minijinja runs a bytecode VM —
-and it is faster *while* doing real Thymeleaf attribute processing and a full
-expression evaluator. **Honest caveat**: kernleaf still does less of the Standard
-Dialect today (no `@{}`/`#{}`, no utility objects, one escaping context), and the
-gap will narrow as those land; the benchmark is rerun each slice, not quoted as a
-permanent ratio. The request path
-itself is a DOM walk with no parsing, no disk, and allocation only for the output
-`String` and the transient loop scope.
+and it is faster *while* doing the whole Standard Dialect core — attribute
+processing, a full expression evaluator, `@{}`/`#{}`, `#`-utility objects,
+context-aware escaping, `th:authorize`, and fragments. The benchmark is rerun each
+slice, not quoted as a permanent ratio.
+
+The lead held across the build, and where it moved is recorded, not hidden:
+- **Slices C, D, E, G cost nothing measurable** (render held ~3.0 µs). `@{}`/`#{}`/
+  `#util` are separate branches; the `[[…]]` inline scan runs at parse time so
+  plain text stays a fast `Text` node; fragment threading is two extra reference
+  params. A template that does not use a feature does not pay for it — the
+  pay-for-what-you-use discipline, verified. (Slice E was the second danger flagged
+  earlier — an escaper taxing the HTML path — measured and avoided.)
+- **Slice F is the one slice that added a small cost** — render 3.0 → ~3.1 µs
+  (~2-3%). `th:authorize` is a *per-element* gate that no branching removes, though
+  it is a cheap `Option` match, not a string compare or allocation. This is exactly
+  the lead-shrinkage predicted when generality rises — the honest ~1.7× that
+  remains, not a claim that every feature is free.
+
+The request path itself is a DOM walk with no parsing, no disk, and allocation only
+for the output `String` and the transient loop scope.
 
 ## Generic — the extension points
 
@@ -142,10 +182,12 @@ methods (slice D), not speculative engine knobs now.
 |---|---|---|
 | A | attribute engine: `th:text/utext/if/unless/each/<attr>`, `${}`/literals, natural templates, escaping, cache | — (done) |
 | B | Standard Expression: operators, comparison, boolean, ternary/elvis, literal substitution `\|…\|` | — (done) |
-| C | `@{...}` link URLs (URL-encoding context), `#{...}` i18n messages | a message source |
-| D | utility objects (`#strings`, `#numbers`, `#dates`, `#lists`) — Thymeleaf's "filters" | — |
-| E | `th:inline` JS/CSS escape contexts | — |
-| F | `th:authorize` + auto-CSRF, fragment addressing for htmx | `kernway-security`, [`kernway-htmx`](kernway-htmx.md) |
+| C | `@{...}` link URLs (URL-encoding context), `#{...}` i18n messages | — (done) |
+| D | utility objects (`#strings`, `#numbers`, `#lists`, `#bools`) — Thymeleaf's "filters" | — (done) |
+| E | `th:inline` JS/CSS escape contexts, `[[…]]`/`[(…)]` inline expressions | — (done) |
+| F | `th:authorize` (via `kernway-core`'s `Authorization`) + auto-CSRF | `kernway-security` — (done) |
+| G | fragment addressing (`th:insert`/`th:replace`) for layouts + htmx | — (done) |
+| later | parameterised fragments (`card(a,b)`) — a scope that binds computed args | a scope redesign |
 | M5 | a loader + watcher that calls `add` on file change (<10 ms) | a file watcher |
 
 ## Open questions
