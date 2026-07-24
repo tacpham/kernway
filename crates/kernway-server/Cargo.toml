@@ -16,6 +16,9 @@ thiserror      = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+# Benchmark-only: the radix-trie router axum uses, as the incumbent to measure
+# our own router against (KEP-0000 §2, the per-core loop). Never a real dep.
+matchit   = "0.8"
 
 [[bench]]
 name    = "routing"
@@ -23,6 +26,10 @@ harness = false
 
 [[bench]]
 name    = "pipeline"
+harness = false
+
+[[bench]]
+name    = "vs_matchit"
 harness = false
 
 [lints]

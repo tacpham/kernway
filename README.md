@@ -212,12 +212,17 @@ steps in [docs/design/BENCHMARKS.md](docs/design/BENCHMARKS.md).
 
 | What | Measured |
 |---|---|
-| Static route match | **41 ns — flat from 4 to 102 routes** (O(1)) |
+| Full request pipeline (parse→route→handle→encode) | 392 ns |
 | DI bean lookup (`#[inject]`) | 4.2 ns |
 | `TypeId` hasher vs SipHash | 5.8× faster |
 | Parse a browser GET (8 headers) | 705 ns |
 | Encode a small JSON response | 44 ns |
 | Spawn a task | ~65 ns at 1000 tasks |
+
+Measured against the incumbent, not just ourselves. The router is currently
+**behind `matchit`** (axum's): 2.9× on static hits, up to 77× on parameterised
+ones — a radix trie is the open optimisation target. We record where we lose,
+not only where we win — see [BENCHMARKS.md](docs/design/BENCHMARKS.md).
 
 The static-route figure is the one that matters: routing does not get slower as
 the application grows, because a route with no `{param}` is a hash lookup, not a
