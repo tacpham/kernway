@@ -8,6 +8,7 @@ members = [
     "crates/kernway-http",
     "crates/kernway-web",
     "crates/kernway-htmx",
+    "crates/kernleaf",
     "crates/kernway-server",
     "crates/kernway-static",
     "crates/kernway-orm-core",
@@ -90,6 +91,7 @@ kernway-core         = { path = "crates/kernway-core" }
 kernway-http         = { path = "crates/kernway-http" }
 kernway-web          = { path = "crates/kernway-web" }
 kernway-htmx         = { path = "crates/kernway-htmx" }
+kernleaf             = { path = "crates/kernleaf" }
 kernway-server       = { path = "crates/kernway-server" }
 kernway-static       = { path = "crates/kernway-static" }
 kernway-orm-core     = { path = "crates/kernway-orm-core" }
