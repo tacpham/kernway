@@ -502,8 +502,8 @@ request header is attacker-controlled.
 
 | Phase | Goal | In this crate? | Blocked by |
 |---|---|---|---|
-| **0** | KEP-0005: static binary — async handlers, `Body`, tiered hot reload, link-time extensions | — | — |
-| **1** | Async handlers, `Body::File`, router mounts, `kernway-static` | **yes** | KEP-0005 |
+| **0** | KEP-0002 (Accepted): `Body` enum. Async handlers, hot reload, link-time extensions are separate later KEPs | — | — |
+| **1** | `Body::File`, HEAD, Range, router mounts, `kernway-static` | **yes** | KEP-0002 |
 | **2** | Real hooks on `KernwayPlugin`; overridable 404 | **yes** | Phase 1 |
 | **3** | `kernway-htmx`: `Htmx` extractor + `HX-*` builder | no — its own crate | Phase 1 |
 | **4** | `kernleaf`: parse → IR → render, context-aware escaping | no — its own crate | Phase 1 |
