@@ -34,6 +34,7 @@ members = [
     "examples/todo-app",
     "examples/todo-sqlite",
     "examples/web-docker",
+    "examples/login-htmx",
 ]
 resolver = "2"
 
