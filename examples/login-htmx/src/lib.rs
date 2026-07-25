@@ -151,11 +151,13 @@ pub fn build_app(addr: &str) -> KernwayApp {
             let p = Arc::clone(&p_beat);
             async move { do_heartbeat(&ctx, p.as_ref()).await }
         })
-        // Who's online now — the fragment the protected page polls.
-        .get("/who", move |_req: Request, _scope: &RequestScope| {
+        // Who's online now — the fragment the protected page polls. Behind auth:
+        // the online list is activity information, not for anonymous callers.
+        .get("/who", move |_req: Request, scope: &RequestScope| {
+            let ctx = scope.get::<SecurityContext>().expect("auth middleware set a SecurityContext");
             let p = Arc::clone(&p_who);
             let e = Arc::clone(&e_who);
-            async move { show_who(p.as_ref(), &e).await }
+            async move { show_who(&ctx, p.as_ref(), &e).await }
         })
         .post("/logout", move |req: Request, _scope: &RequestScope| {
             let s = Arc::clone(&s_logout);
@@ -175,8 +177,12 @@ async fn do_heartbeat(ctx: &SecurityContext, presence: &dyn Presence) -> Respons
     Response::new(StatusCode::NO_CONTENT)
 }
 
-/// GET /who — render the online list as a kernleaf fragment (`th:each`).
-async fn show_who(presence: &dyn Presence, engine: &Kernleaf) -> Response {
+/// GET /who — the online list as a kernleaf fragment (`th:each`), for authenticated
+/// callers only (the list is activity information, not public).
+async fn show_who(ctx: &SecurityContext, presence: &dyn Presence, engine: &Kernleaf) -> Response {
+    if !ctx.is_authenticated() {
+        return html_response("<p>Log in to see who's online.</p>".to_string());
+    }
     let users = presence.online(now()).await.unwrap_or_default();
     let count = users.len();
     let model = Value::map([
