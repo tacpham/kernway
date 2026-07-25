@@ -34,7 +34,7 @@ fn routes(pairs: usize) -> Vec<(String, bool)> {
 
 fn kernway_router(pairs: usize) -> Router {
     let mut r = Router::new();
-    let h: Handler = Arc::new(|_req, _ctx| Response::new(StatusCode::OK));
+    let h: Handler = Arc::new(|_req, _ctx| Box::pin(async { Response::new(StatusCode::OK) }));
     for (pattern, _) in routes(pairs) {
         r.add("GET", &pattern, Arc::clone(&h));
     }
