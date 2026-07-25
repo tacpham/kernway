@@ -23,6 +23,7 @@ members = [
     "crates/kernway-openapi",
     "crates/kernway-sse",
     "crates/kernway-multipart",
+    "crates/kernway-log",
     "crates/kernway",
     "examples/echo-server",
     "examples/hello-di",
@@ -36,6 +37,7 @@ members = [
     "examples/todo-sqlite",
     "examples/web-docker",
     "examples/login-htmx",
+    "examples/hello-log",
 ]
 resolver = "2"
 
@@ -109,6 +111,7 @@ kernway-redis        = { path = "crates/kernway-redis" }
 kernway-openapi      = { path = "crates/kernway-openapi" }
 kernway-sse          = { path = "crates/kernway-sse" }
 kernway-multipart    = { path = "crates/kernway-multipart" }
+kernway-log          = { path = "crates/kernway-log" }
 rt-core              = { path = "crates/rt-core" }
 rt-net               = { path = "crates/rt-net" }
 di-core              = { path = "crates/di-core" }
