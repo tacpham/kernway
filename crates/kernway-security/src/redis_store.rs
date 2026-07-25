@@ -13,13 +13,14 @@
 //! - `kw:user:{user}` — a set of the user's `sid`s, for `sessions_of` / `remove_user`.
 //! - `kw:sess:index` — a set of every live `sid`, for the `len` capacity check.
 //!
-//! ## Errors are fail-safe
+//! ## Errors are reported, not swallowed
 //!
-//! The [`SessionStore`] trait is infallible (it grew up in-memory), so a Redis error
-//! has no channel to return on. This backend logs the error and degrades safely:
-//! `get`/`sessions_of` treat a failure as "no session" (→ anonymous, never a false
-//! login), and writes are best-effort. A fallible `SessionStore` is the natural next
-//! step; until then, "solid" here means failing closed.
+//! Every method returns [`Result`]: a Redis failure surfaces as
+//! [`StoreError::Backend`] rather than being hidden. The *policy* for a failure
+//! lives in the [`SessionManager`](crate::session::SessionManager), not here —
+//! `login` fails loudly (no token for an unstored session), while `authenticate`
+//! fails closed (a registry it cannot reach means "not authenticated"). This
+//! backend's only job is to talk to Redis and report honestly what happened.
 //!
 //! [KEP-0006]: https://github.com/tacpham/kernway/blob/main/docs/kep/0006-async-handlers.md
 
@@ -29,7 +30,7 @@ use std::time::Duration;
 use kernway_core::layer::BoxFuture;
 use kernway_redis::{Pool, RedisError};
 
-use crate::session::{SessionRecord, SessionStore};
+use crate::session::{SessionRecord, SessionStore, StoreError};
 
 /// The set holding every live `sid`, for `len`.
 const INDEX_KEY: &str = "kw:sess:index";
@@ -56,8 +57,9 @@ impl RedisSessionStore {
     }
 }
 
-fn log_err(op: &str, err: &RedisError) {
-    eprintln!("kernway-security: redis session store `{op}` failed: {err}");
+/// Map the client's error to the trait's backend-agnostic [`StoreError`].
+fn to_store(err: RedisError) -> StoreError {
+    StoreError::Backend(err.to_string())
 }
 
 fn sess_key(sid: &str) -> String {
@@ -69,7 +71,7 @@ fn user_key(user: &str) -> String {
 }
 
 impl SessionStore for RedisSessionStore {
-    fn insert(&self, sid: &str, record: SessionRecord) -> BoxFuture<'_, ()> {
+    fn insert(&self, sid: &str, record: SessionRecord) -> BoxFuture<'_, Result<(), StoreError>> {
         let sid = sid.to_string();
         let user = record.user.clone();
         let bytes = encode_record(&record);
@@ -77,8 +79,7 @@ impl SessionStore for RedisSessionStore {
         Box::pin(async move {
             let sk = sess_key(&sid);
             let uk = user_key(&user);
-            let result = self
-                .pool
+            self.pool
                 .with(async |c| {
                     c.set_ex(&sk, &bytes, ttl).await?;
                     c.sadd(&uk, &sid).await?;
@@ -86,33 +87,24 @@ impl SessionStore for RedisSessionStore {
                     c.sadd(INDEX_KEY, &sid).await?;
                     Ok(())
                 })
-                .await;
-            if let Err(err) = result {
-                log_err("insert", &err);
-            }
+                .await
+                .map_err(to_store)
         })
     }
 
-    fn get(&self, sid: &str) -> BoxFuture<'_, Option<SessionRecord>> {
+    fn get(&self, sid: &str) -> BoxFuture<'_, Result<Option<SessionRecord>, StoreError>> {
         let sk = sess_key(sid);
         Box::pin(async move {
-            match self.pool.with(async |c| c.get(&sk).await).await {
-                Ok(Some(bytes)) => decode_record(&bytes),
-                Ok(None) => None,
-                Err(err) => {
-                    log_err("get", &err);
-                    None // fail closed: a store error is "no session", never a login
-                }
-            }
+            let bytes = self.pool.with(async |c| c.get(&sk).await).await.map_err(to_store)?;
+            Ok(bytes.and_then(|b| decode_record(&b)))
         })
     }
 
-    fn touch(&self, sid: &str, at: u64) -> BoxFuture<'_, ()> {
+    fn touch(&self, sid: &str, at: u64) -> BoxFuture<'_, Result<(), StoreError>> {
         let sk = sess_key(sid);
         let ttl = self.ttl_secs;
         Box::pin(async move {
-            let result = self
-                .pool
+            self.pool
                 .with(async |c| {
                     if let Some(bytes) = c.get(&sk).await? {
                         if let Some(mut record) = decode_record(&bytes) {
@@ -122,19 +114,16 @@ impl SessionStore for RedisSessionStore {
                     }
                     Ok(())
                 })
-                .await;
-            if let Err(err) = result {
-                log_err("touch", &err);
-            }
+                .await
+                .map_err(to_store)
         })
     }
 
-    fn remove(&self, sid: &str) -> BoxFuture<'_, ()> {
+    fn remove(&self, sid: &str) -> BoxFuture<'_, Result<(), StoreError>> {
         let sid = sid.to_string();
         Box::pin(async move {
             let sk = sess_key(&sid);
-            let result = self
-                .pool
+            self.pool
                 .with(async |c| {
                     // Find the owning user first, to clean its index.
                     let user = c.get(&sk).await?.and_then(|b| decode_record(&b)).map(|r| r.user);
@@ -145,18 +134,15 @@ impl SessionStore for RedisSessionStore {
                     c.srem(INDEX_KEY, &sid).await?;
                     Ok(())
                 })
-                .await;
-            if let Err(err) = result {
-                log_err("remove", &err);
-            }
+                .await
+                .map_err(to_store)
         })
     }
 
-    fn remove_user(&self, user: &str) -> BoxFuture<'_, ()> {
+    fn remove_user(&self, user: &str) -> BoxFuture<'_, Result<(), StoreError>> {
         let uk = user_key(user);
         Box::pin(async move {
-            let result = self
-                .pool
+            self.pool
                 .with(async |c| {
                     for sid in c.smembers(&uk).await? {
                         c.del(&[sess_key(&sid).as_str()]).await?;
@@ -165,18 +151,15 @@ impl SessionStore for RedisSessionStore {
                     c.del(&[uk.as_str()]).await?;
                     Ok(())
                 })
-                .await;
-            if let Err(err) = result {
-                log_err("remove_user", &err);
-            }
+                .await
+                .map_err(to_store)
         })
     }
 
-    fn sessions_of(&self, user: &str) -> BoxFuture<'_, Vec<(String, SessionRecord)>> {
+    fn sessions_of(&self, user: &str) -> BoxFuture<'_, Result<Vec<(String, SessionRecord)>, StoreError>> {
         let uk = user_key(user);
         Box::pin(async move {
-            let result = self
-                .pool
+            self.pool
                 .with(async |c| {
                     let mut out = Vec::new();
                     for sid in c.smembers(&uk).await? {
@@ -188,26 +171,15 @@ impl SessionStore for RedisSessionStore {
                     }
                     Ok(out)
                 })
-                .await;
-            match result {
-                Ok(list) => list,
-                Err(err) => {
-                    log_err("sessions_of", &err);
-                    Vec::new()
-                }
-            }
+                .await
+                .map_err(to_store)
         })
     }
 
-    fn len(&self) -> BoxFuture<'_, usize> {
+    fn len(&self) -> BoxFuture<'_, Result<usize, StoreError>> {
         Box::pin(async move {
-            match self.pool.with(async |c| c.scard(INDEX_KEY).await).await {
-                Ok(n) => n.max(0) as usize,
-                Err(err) => {
-                    log_err("len", &err);
-                    0
-                }
-            }
+            let n = self.pool.with(async |c| c.scard(INDEX_KEY).await).await.map_err(to_store)?;
+            Ok(n.max(0) as usize)
         })
     }
 }

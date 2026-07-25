@@ -32,12 +32,12 @@ async fn login_flow(mgr: &SessionManager, user: &str) {
     assert!(ctx.has_role("ADMIN"), "roles come from the token");
 
     // The registry knows this one session.
-    assert_eq!(mgr.sessions_of(user).await.len(), 1);
+    assert_eq!(mgr.sessions_of(user).await.unwrap().len(), 1);
 
     // Logout revokes it in the registry: the same token is now anonymous.
-    mgr.logout_token(&token).await;
+    mgr.logout_token(&token).await.unwrap();
     assert!(!mgr.authenticate(Some(&token)).await.is_authenticated(), "revoked → anonymous");
-    assert_eq!(mgr.sessions_of(user).await.len(), 0);
+    assert_eq!(mgr.sessions_of(user).await.unwrap().len(), 0);
 }
 
 #[test]
@@ -74,7 +74,7 @@ mod redis {
             .unwrap()
             .block_on(async {
                 // Clean slate in case a prior aborted run left state.
-                mgr.logout_user("redis-alice").await;
+                mgr.logout_user("redis-alice").await.unwrap();
                 login_flow(&mgr, "redis-alice").await;
             })
             .unwrap();
@@ -88,17 +88,17 @@ mod redis {
             .unwrap()
             .block_on(async {
                 let user = "redis-bob";
-                mgr.logout_user(user).await;
+                mgr.logout_user(user).await.unwrap();
 
                 let phone = mgr.login(user, vec![], "phone").await.unwrap();
                 let laptop = mgr.login(user, vec![], "laptop").await.unwrap();
-                assert_eq!(mgr.sessions_of(user).await.len(), 2, "two devices logged in");
+                assert_eq!(mgr.sessions_of(user).await.unwrap().len(), 2, "two devices logged in");
 
                 // One call revokes every session of the user (logout everywhere / ban).
-                mgr.logout_user(user).await;
+                mgr.logout_user(user).await.unwrap();
                 assert!(!mgr.authenticate(Some(&phone)).await.is_authenticated());
                 assert!(!mgr.authenticate(Some(&laptop)).await.is_authenticated());
-                assert_eq!(mgr.sessions_of(user).await.len(), 0);
+                assert_eq!(mgr.sessions_of(user).await.unwrap().len(), 0);
             })
             .unwrap();
     }
