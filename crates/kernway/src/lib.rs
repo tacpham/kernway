@@ -36,8 +36,9 @@
 //! | Feature | Brings in | Adds to the prelude |
 //! |---|---|---|
 //! | `htmx` | typed `HX-*` request extraction and response headers (htmx 2.0.x) | `Htmx`, `HtmxResponse`, `Swap` |
-//! | `security` | CSRF tokens, security headers, sessions (KEP-0004), presence | `SecurityContext`, `SecurityHeaders`, `Presence`, `InMemoryPresence` |
-//! | `redis` | Redis-backed session store and presence (implies `security`) | + `RedisSessionStore`, `RedisPresence` |
+//! | `security` | CSRF tokens, security headers, sessions (KEP-0004) | `SecurityContext`, `SecurityHeaders` |
+//! | `presence` | heartbeat / who is online now | `Presence`, `InMemoryPresence` |
+//! | `redis` | Redis-backed session store, and presence when `presence` is on too (implies `security`) | + `RedisSessionStore` (`+ RedisPresence`) |
 
 // --- HTTP vocabulary (kernway-core) ---
 pub use kernway_core::prelude::*;
@@ -56,14 +57,19 @@ pub use kernway_web::{Html, Json, Path, ProblemDetail, Query};
 #[cfg(feature = "htmx")]
 pub use kernway_htmx::{Htmx, HtmxResponse, Swap};
 
-// --- security: CSRF, headers, sessions, presence (feature = "security") ---
+// --- security: CSRF, headers, sessions (feature = "security") ---
 #[cfg(feature = "security")]
-pub use kernway_security::{
-    self, csrf, presence, session, InMemoryPresence, Presence, SecurityContext, SecurityHeaders,
-};
-// The Redis-backed backends (feature = "redis", which implies "security").
+pub use kernway_security::{csrf, session, SecurityContext, SecurityHeaders};
+// The Redis-backed session store (feature = "redis", which implies "security").
 #[cfg(feature = "redis")]
-pub use kernway_security::{RedisPresence, RedisSessionStore};
+pub use kernway_security::RedisSessionStore;
+
+// --- presence: heartbeat / who is online (feature = "presence") ---
+#[cfg(feature = "presence")]
+pub use kernway_security::{presence, InMemoryPresence, Presence};
+// The Redis-backed presence tracker needs both features.
+#[cfg(all(feature = "presence", feature = "redis"))]
+pub use kernway_security::RedisPresence;
 
 // --- DI ---
 pub use di_core::{AppContext, BeanEntry, DiError};
@@ -91,7 +97,10 @@ pub mod prelude {
     pub use crate::{Htmx, HtmxResponse, Swap};
     // security (feature = "security")
     #[cfg(feature = "security")]
-    pub use crate::{InMemoryPresence, Presence, SecurityContext, SecurityHeaders};
+    pub use crate::{SecurityContext, SecurityHeaders};
+    // presence (feature = "presence")
+    #[cfg(feature = "presence")]
+    pub use crate::{InMemoryPresence, Presence};
     // DI
     pub use crate::{AppContext, BeanEntry, DiError, KernwayComponent, KernwayController};
     // Macros

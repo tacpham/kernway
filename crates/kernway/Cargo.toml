@@ -29,10 +29,12 @@ kernway-security = { workspace = true, optional = true }   # CSRF, headers, sess
 default = []
 ## Typed `HX-*` request extraction and response headers (htmx 2.0.x).
 htmx = ["dep:kernway-htmx"]
-## Security: CSRF tokens, security headers, sessions (KEP-0004), and presence.
+## Security: CSRF tokens, security headers, and sessions (KEP-0004).
 security = ["dep:kernway-security"]
-## Redis-backed session store and presence — a shared registry for a
-## multi-instance deployment. Implies `security`.
+## Presence / heartbeat — who is online now. Independent of `security`.
+presence = ["dep:kernway-security", "kernway-security/presence"]
+## Redis-backed session store — a shared registry for a multi-instance
+## deployment. Implies `security`. With `presence`, also the Redis presence tracker.
 redis = ["security", "kernway-security/redis"]
 
 [lints]

@@ -18,5 +18,5 @@ path = "src/main.rs"
 kernway-core     = { workspace = true }
 kernway-server   = { workspace = true }
 kernleaf         = { workspace = true }
-kernway-security = { workspace = true }
+kernway-security = { workspace = true, features = ["presence"] }
 kernway-htmx     = { workspace = true }

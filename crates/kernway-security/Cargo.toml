@@ -22,7 +22,11 @@ getrandom = "0.2"
 kernway-redis = { workspace = true, optional = true }
 
 [features]
+# Presence / heartbeat — who is online now (KEP-0004 sibling). Off by default:
+# an app that does not need it compiles none of it.
+presence = []
 # A distributed SessionStore backed by Redis, for multi-instance deployments.
+# With `presence`, also brings the Redis-backed presence tracker.
 redis = ["dep:kernway-redis"]
 
 [dev-dependencies]
