@@ -148,6 +148,7 @@
 
 pub mod context;
 pub mod container;
+pub mod scope;
 pub mod bean;
 pub mod error;
 pub mod marker;
@@ -155,6 +156,7 @@ pub mod buildable;
 
 pub use context::AppContext;
 pub use container::Container;
+pub use scope::RequestScope;
 pub use bean::{BeanEntry, BeanOrigin};
 pub use error::DiError;
 pub use marker::{KernwayComponent, KernwayController};
