@@ -307,7 +307,7 @@ impl KernwayApp {
     pub fn run(self) -> io::Result<()> {
         let shutdown = self.shutdown.clone();
         if let Err(e) = rt_core::on_interrupt(move || shutdown.trigger()) {
-            eprintln!("kernway: Ctrl+C will not shut down gracefully ({e})");
+            kernway_log::warn!(target: "kernway_server", "Ctrl+C will not shut down gracefully: {e}");
         }
         self.run_until_shutdown()
     }

@@ -10,8 +10,9 @@ homepage.workspace   = true
 rust-version.workspace = true
 
 [dependencies]
-rt-core = { workspace = true }
-mio     = { workspace = true }
+rt-core     = { workspace = true }
+mio         = { workspace = true }
+kernway-log = { workspace = true }   # advisory shard warnings
 
 # Platform layer (`sys/`) — SO_REUSEPORT before bind.
 [target.'cfg(unix)'.dependencies]

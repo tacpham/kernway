@@ -10,6 +10,7 @@ homepage.workspace   = true
 
 [dependencies]
 kernway-core = { workspace = true } # Request/Response/Layer integration
+kernway-log  = { workspace = true } # store-error warnings on the auth path
 
 # `getrandom` is the one third-party primitive here, and a deliberate exception to
 # KEP-0000 §1: a CSRF token must be unpredictable, and rolling our own CSPRNG is
