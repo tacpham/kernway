@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 kernway-config = { workspace = true }
 kernway-log    = { workspace = true }
+di-macro       = { workspace = true }   # the #[configuration] derive
 
 [lints]
 workspace = true

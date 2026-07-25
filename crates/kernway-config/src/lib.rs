@@ -23,11 +23,26 @@
 
 #![forbid(unsafe_code)]
 
+// Let `#[configuration]`-generated `::kernway_config::…` paths resolve inside this
+// crate's own tests (the same self-alias serde uses for its derive).
+extern crate self as kernway_config;
+
 use std::collections::HashMap;
 use std::str::FromStr;
 
 /// The `KW_` prefix that marks an environment variable as configuration.
 const ENV_PREFIX: &str = "KW_";
+
+/// A typed view over a section of [`Config`], built by `#[configuration]`.
+///
+/// The derive reads each field from `{prefix}.{field-name}` (underscores become
+/// hyphens): an `Option<T>` field is left `None` when the key is absent, any other
+/// field falls back to `Default`. Register the result as a DI bean and inject it
+/// like any other.
+pub trait FromConfig: Sized {
+    /// Build this configuration from `config`.
+    fn from_config(config: &Config) -> Self;
+}
 
 /// Resolved configuration: a flat map of dotted keys to string values. Values stay
 /// strings until [`get`](Config::get) parses them.
@@ -302,6 +317,35 @@ mod tests {
         assert_eq!(server.get_str("port"), Some("8080"));
         assert_eq!(server.get_str("host"), Some("0.0.0.0"));
         assert!(!server.contains("other"), "only the server.* subtree");
+    }
+
+    use di_macro::configuration;
+
+    #[configuration(prefix = "server")]
+    #[derive(Debug, PartialEq)]
+    struct ServerConfig {
+        port: u16,
+        host: String,
+        keep_alive_secs: Option<u64>, // → server.keep-alive-secs, optional
+    }
+
+    #[test]
+    fn configuration_macro_binds_a_section() {
+        // All present.
+        let c = Config::builder()
+            .parse("server.port = 9090\nserver.host = 0.0.0.0\nserver.keep-alive-secs = 30")
+            .build();
+        assert_eq!(
+            ServerConfig::from_config(&c),
+            ServerConfig { port: 9090, host: "0.0.0.0".into(), keep_alive_secs: Some(30) }
+        );
+
+        // Missing keys: non-Option falls back to Default, Option is None.
+        let c2 = Config::builder().parse("server.port = 80").build();
+        assert_eq!(
+            ServerConfig::from_config(&c2),
+            ServerConfig { port: 80, host: String::new(), keep_alive_secs: None }
+        );
     }
 
     #[test]

@@ -393,6 +393,7 @@ dependencies = [
 name = "hello-config"
 version = "0.1.0"
 dependencies = [
+ "di-macro",
  "kernway-config",
  "kernway-log",
 ]
@@ -539,8 +540,10 @@ version = "0.1.0"
 dependencies = [
  "di-core",
  "di-macro",
+ "kernway-config",
  "kernway-core",
  "kernway-htmx",
+ "kernway-log",
  "kernway-security",
  "kernway-server",
  "kernway-web",
@@ -572,6 +575,9 @@ dependencies = [
 [[package]]
 name = "kernway-config"
 version = "0.1.0"
+dependencies = [
+ "di-macro",
+]
 
 [[package]]
 name = "kernway-core"
@@ -686,6 +692,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "di-core",
+ "kernway-config",
  "kernway-core",
  "kernway-http",
  "kernway-log",
