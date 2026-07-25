@@ -296,20 +296,31 @@ impl AppBuilder {
 
 /// Install the process logger from config — `logging.level` is the default level,
 /// each `logging.level.<module>` an override, `logging.format` picks Pretty/JSON.
-/// A no-op if a logger was already installed (an explicit `kernway_log::init`).
+/// The `KW_LOG` env var, if set, is the explicit top override (a quick full spec,
+/// like `RUST_LOG`) and wins over the config-derived filter. A no-op if a logger
+/// was already installed (an explicit `kernway_log::init`).
 fn init_logging_from_config(config: &Config) {
-    let mut spec = config.get_str("logging.level").unwrap_or("info").to_string();
-    for (module, level) in config.with_prefix("logging.level.") {
-        spec.push(',');
-        spec.push_str(module);
-        spec.push('=');
-        spec.push_str(level);
-    }
+    let filter = match std::env::var("KW_LOG") {
+        // KW_LOG is the deliberate override — use it verbatim.
+        Ok(spec) if !spec.trim().is_empty() => kernway_log::Filter::parse(&spec),
+        // Otherwise build the spec from `logging.level` + each `logging.level.*`.
+        // (Per-module env overrides still arrive via KW_LOGGING__LEVEL__* → config.)
+        _ => {
+            let mut spec = config.get_str("logging.level").unwrap_or("info").to_string();
+            for (module, level) in config.with_prefix("logging.level.") {
+                spec.push(',');
+                spec.push_str(module);
+                spec.push('=');
+                spec.push_str(level);
+            }
+            kernway_log::Filter::parse(&spec)
+        }
+    };
     let format = match config.get_str("logging.format") {
         Some("json") => kernway_log::Format::Json,
         _ => kernway_log::Format::Pretty,
     };
-    kernway_log::init(kernway_log::Logger::new(kernway_log::Filter::parse(&spec), format));
+    kernway_log::init(kernway_log::Logger::new(filter, format));
 }
 
 /// A listen address from config: `server.address`, else `server.host:server.port`
