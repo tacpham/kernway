@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use di_core::AppContext;
+use di_core::{AppContext, RequestScope};
 use kernway_core::{error::StatusCode, request::Request, response::{Body, Response}};
 use kernway_http::{encode_head, encode_response, encode_response_with, parse_bytes, Connection, Parsed};
 use kernway_static::{mime_for, StaticFiles};
@@ -50,10 +50,13 @@ impl Default for KeepAliveConfig {
 fn apply_middleware(
     middlewares: &[Arc<dyn Middleware>],
     req: &mut Request,
+    scope: &RequestScope,
     endpoint: &dyn Fn(&mut Request) -> Response,
 ) -> Response {
     match middlewares.split_first() {
-        Some((first, rest)) => first.handle(req, &|next_req| apply_middleware(rest, next_req, endpoint)),
+        Some((first, rest)) => {
+            first.handle(req, scope, &|next_req| apply_middleware(rest, next_req, scope, endpoint))
+        }
         None => endpoint(req),
     }
 }
@@ -187,31 +190,31 @@ impl AppBuilder {
     }
 
     /// Register a GET route.
-    pub fn get(mut self, pattern: &str, handler: impl Fn(&Request, &AppContext) -> Response + Send + Sync + 'static) -> Self {
+    pub fn get(mut self, pattern: &str, handler: impl Fn(&Request, &RequestScope) -> Response + Send + Sync + 'static) -> Self {
         self.router.add("GET", pattern, Arc::new(handler));
         self
     }
 
     /// Register a POST route.
-    pub fn post(mut self, pattern: &str, handler: impl Fn(&Request, &AppContext) -> Response + Send + Sync + 'static) -> Self {
+    pub fn post(mut self, pattern: &str, handler: impl Fn(&Request, &RequestScope) -> Response + Send + Sync + 'static) -> Self {
         self.router.add("POST", pattern, Arc::new(handler));
         self
     }
 
     /// Register a PUT route.
-    pub fn put(mut self, pattern: &str, handler: impl Fn(&Request, &AppContext) -> Response + Send + Sync + 'static) -> Self {
+    pub fn put(mut self, pattern: &str, handler: impl Fn(&Request, &RequestScope) -> Response + Send + Sync + 'static) -> Self {
         self.router.add("PUT", pattern, Arc::new(handler));
         self
     }
 
     /// Register a DELETE route.
-    pub fn delete(mut self, pattern: &str, handler: impl Fn(&Request, &AppContext) -> Response + Send + Sync + 'static) -> Self {
+    pub fn delete(mut self, pattern: &str, handler: impl Fn(&Request, &RequestScope) -> Response + Send + Sync + 'static) -> Self {
         self.router.add("DELETE", pattern, Arc::new(handler));
         self
     }
 
     /// Register a PATCH route.
-    pub fn patch(mut self, pattern: &str, handler: impl Fn(&Request, &AppContext) -> Response + Send + Sync + 'static) -> Self {
+    pub fn patch(mut self, pattern: &str, handler: impl Fn(&Request, &RequestScope) -> Response + Send + Sync + 'static) -> Self {
         self.router.add("PATCH", pattern, Arc::new(handler));
         self
     }
@@ -890,10 +893,13 @@ fn handle(
     context: &AppContext,
     middlewares: &[Arc<dyn Middleware>],
 ) -> Response {
+    // One request scope per request (KEP-0005), over the application context.
+    // Middleware may set request-scoped beans on it; the handler resolves them.
+    let scope = RequestScope::new(context);
     let endpoint = |req: &mut Request| match router.find(&req.method, &req.path) {
         Some((handler, params)) => {
             req.path_params = params;
-            handler(req, context)
+            handler(req, &scope)
         }
         None => Response::new(StatusCode::NOT_FOUND)
             .content_type("application/json")
@@ -901,7 +907,7 @@ fn handle(
     };
 
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        apply_middleware(middlewares, &mut request, &endpoint)
+        apply_middleware(middlewares, &mut request, &scope, &endpoint)
     }))
     .unwrap_or_else(|_| {
         Response::new(StatusCode::INTERNAL_SERVER_ERROR)
@@ -940,7 +946,7 @@ mod tests {
     #[test]
     fn path_params_reach_the_handler() {
         let mut router = Router::new();
-        router.add("GET", "/users/{id}", Arc::new(|req: &Request, _ctx: &AppContext| {
+        router.add("GET", "/users/{id}", Arc::new(|req: &Request, _ctx: &RequestScope| {
             Response::new(StatusCode::OK).body(req.path_params["id"].clone().into_bytes())
         }));
         let response = handle(get("/users/42"), &router, &AppContext::new(), &[]);
@@ -964,7 +970,7 @@ mod tests {
         struct Tag;
         impl Middleware for Tag {
             fn name(&self) -> &'static str { "Tag" }
-            fn handle(&self, req: &mut Request, next: &dyn Fn(&mut Request) -> Response) -> Response {
+            fn handle(&self, req: &mut Request, _scope: &RequestScope, next: &dyn Fn(&mut Request) -> Response) -> Response {
                 let mut resp = next(req);
                 resp.headers.insert("x-tag", "seen");
                 resp
@@ -1037,7 +1043,7 @@ mod tests {
     #[test]
     fn serves_a_post_body_to_the_handler() {
         let mut router = Router::new();
-        router.add("POST", "/echo", Arc::new(|req: &Request, _ctx: &AppContext| {
+        router.add("POST", "/echo", Arc::new(|req: &Request, _ctx: &RequestScope| {
             Response::new(StatusCode::OK).body(req.body.clone())
         }));
 
