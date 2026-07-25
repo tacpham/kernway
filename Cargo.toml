@@ -19,6 +19,7 @@ members = [
     "crates/kernway-cache-core",
     "crates/kernway-cache-macro",
     "crates/kernway-cache-memory",
+    "crates/kernway-redis",
     "crates/kernway-openapi",
     "crates/kernway-sse",
     "crates/kernway-multipart",

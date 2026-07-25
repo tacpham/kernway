@@ -1,0 +1,24 @@
+[package]
+name        = "kernway-redis"
+description = "Kernway Redis — a minimal async RESP client on the Kernway runtime (rt-net)"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+homepage.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+# The client speaks RESP over Kernway's own async TCP — so it is driven by the
+# same per-core reactor as the server, not tokio (KEP-0006). That is the whole
+# reason this crate exists rather than pulling in `redis`/`fred`.
+rt-net  = { workspace = true }
+rt-core = { workspace = true }
+
+[lints]
+workspace = true
+
+# docs.rs builds with every feature on, so feature-gated items still appear.
+[package.metadata.docs.rs]
+all-features = true
