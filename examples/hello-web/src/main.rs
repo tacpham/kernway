@@ -5,8 +5,9 @@
 //!       curl http://localhost:8080/users/99
 //!       curl http://localhost:8080/health
 
-use di_core::AppContext;
+use di_core::{AppContext, RequestScope};
 use di_macro::Component;
+use kernway_core::request::Request;
 use kernway_core::response::IntoResponse;
 use kernway_server::KernwayApp;
 use kernway_web::{Json, Path, ProblemDetail};
@@ -88,27 +89,29 @@ fn main() {
         .context(ctx)
 
         // GET /health
-        .get("/health", |_req, _ctx| {
+        .get("/health", |_req: Request, _ctx: &RequestScope| async {
             Json(serde_json::json!({ "status": "UP", "version": "0.3.0" })).into_response()
         })
 
         // GET /users — list all
-        .get("/users", |_req, ctx| {
+        .get("/users", |_req: Request, ctx: &RequestScope| {
             let svc = ctx.get::<UserService>().unwrap();
-            Json(svc.list_users()).into_response()
+            async move { Json(svc.list_users()).into_response() }
         })
 
         // GET /users/{id} — get one
-        .get("/users/{id}", |req, ctx| {
-            let id = match Path::<u64>::from_request(req, "id") {
-                Ok(p)  => *p,
-                Err(e) => return ProblemDetail::bad_request(e),
-            };
-
+        .get("/users/{id}", |req: Request, ctx: &RequestScope| {
             let svc = ctx.get::<UserService>().unwrap();
-            match svc.get_user(id) {
-                Some(user) => Json(user).into_response(),
-                None       => ProblemDetail::not_found(format!("user {} not found", id)),
+            async move {
+                let id = match Path::<u64>::from_request(&req, "id") {
+                    Ok(p)  => *p,
+                    Err(e) => return ProblemDetail::bad_request(e),
+                };
+
+                match svc.get_user(id) {
+                    Some(user) => Json(user).into_response(),
+                    None       => ProblemDetail::not_found(format!("user {} not found", id)),
+                }
             }
         })
 

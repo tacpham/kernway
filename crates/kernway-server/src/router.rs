@@ -17,15 +17,44 @@ use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 
+use std::future::Future;
+
 use di_core::RequestScope;
+use kernway_core::layer::BoxFuture;
 use kernway_core::{request::Request, response::Response};
 
-/// Handler function type — receives a request and the per-request DI scope
-/// ([KEP-0005]), returns a response. The scope resolves request-scoped beans
-/// (a `SecurityContext`, a CSRF token) and falls back to the application singletons.
+/// Handler function type — an **async** handler ([KEP-0006]). It receives the
+/// request by value and the per-request DI scope ([KEP-0005]), and returns a boxed
+/// future. Taking the request by value lets the returned future be `'static` (it
+/// owns the request and whatever it pulled out of the scope), which is what keeps
+/// the type free of higher-ranked-lifetime gymnastics.
 ///
 /// [KEP-0005]: https://github.com/tacpham/kernway/blob/main/docs/kep/0005-request-scoped-beans.md
-pub type Handler = Arc<dyn Fn(&Request, &RequestScope) -> Response + Send + Sync>;
+/// [KEP-0006]: https://github.com/tacpham/kernway/blob/main/docs/kep/0006-async-handlers.md
+pub type Handler = Arc<dyn Fn(Request, &RequestScope) -> BoxFuture<'static, Response> + Send + Sync>;
+
+/// Turn a handler closure into a boxed [`Handler`].
+///
+/// A handler is `Fn(Request, &RequestScope) -> impl Future<Output = Response>`: pull
+/// what you need out of the scope synchronously, then `async move` a future that
+/// owns it. `IntoHandler` boxes that future, so the author writes the `async` block
+/// rather than the `Box::pin`.
+pub trait IntoHandler<Marker>: Send + Sync + 'static {
+    /// Box this into the stored [`Handler`] form.
+    fn into_handler(self) -> Handler;
+}
+
+impl<F, Fut> IntoHandler<()> for F
+where
+    F: Fn(Request, &RequestScope) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Response> + Send + 'static,
+{
+    fn into_handler(self) -> Handler {
+        Arc::new(move |req: Request, scope: &RequestScope| {
+            Box::pin(self(req, scope)) as BoxFuture<'static, Response>
+        })
+    }
+}
 
 /// FNV-1a, for hashing path segments in the trie's static children.
 ///
@@ -216,8 +245,10 @@ mod tests {
         let mut router = Router::new();
         for (method, pattern, label) in routes {
             let label = *label;
-            router.add(method, pattern, Arc::new(move |_req, _ctx| {
-                Response::new(kernway_core::error::StatusCode::OK).body(label.as_bytes().to_vec())
+            router.add(method, pattern, Arc::new(move |_req: Request, _scope: &RequestScope| {
+                Box::pin(async move {
+                    Response::new(kernway_core::error::StatusCode::OK).body(label.as_bytes().to_vec())
+                }) as BoxFuture<'static, Response>
             }));
         }
         router
@@ -228,7 +259,8 @@ mod tests {
         let (handler, params) = router.find(method, path)?;
         let app = AppContext::new();
         let scope = RequestScope::new(&app);
-        let resp = handler(&Request::new(method, path), &scope);
+        let fut = handler(Request::new(method, path), &scope);
+        let resp = rt_core::Executor::new().unwrap().block_on(fut).unwrap();
         Some((String::from_utf8(resp.body_bytes().to_vec()).unwrap(), params))
     }
 
@@ -366,8 +398,9 @@ mod tests {
     #[test]
     fn find_returns_none_for_unregistered() {
         let mut router = Router::new();
-        router.add("GET", "/ping", Arc::new(|_req, _ctx| {
-            Response::new(kernway_core::error::StatusCode::OK)
+        router.add("GET", "/ping", Arc::new(|_req: Request, _scope: &RequestScope| {
+            Box::pin(async { Response::new(kernway_core::error::StatusCode::OK) })
+                as BoxFuture<'static, Response>
         }));
         assert!(router.find("GET", "/ping").is_some());
         assert!(router.find("POST", "/ping").is_none());

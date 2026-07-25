@@ -35,7 +35,7 @@ fn main() -> std::io::Result<()> {
         // A JSON API route, to prove routing and static coexist: the router is
         // tried first, so /api/ping is dynamic and everything else falls through
         // to the filesystem.
-        .get("/api/ping", |_req, _ctx| {
+        .get("/api/ping", |_req: Request, _ctx: &RequestScope| async {
             Response::new(StatusCode::OK)
                 .content_type("application/json; charset=utf-8")
                 .body(br#"{"message":"pong"}"#.to_vec())
@@ -45,8 +45,8 @@ fn main() -> std::io::Result<()> {
         // and a full page for a plain browser hit — the same URL, two shapes,
         // and `respond` sets `Vary: HX-Request` so a cache never mixes them up.
         // It also fires a client-side `greeted` event via `HX-Trigger`.
-        .get("/htmx/greet", |req, _ctx| {
-            Htmx::from(req)
+        .get("/htmx/greet", |req: Request, _ctx: &RequestScope| async move {
+            Htmx::from(&req)
                 .respond(
                     || "<div id=\"greeting\">Hello from an htmx fragment 👋</div>".to_string(),
                     || "<!doctype html><title>Greet</title>\
@@ -58,7 +58,7 @@ fn main() -> std::io::Result<()> {
         })
         // Liveness: "the process is up". Kubernetes restarts the pod if this
         // fails. It must stay trivially true and touch nothing external.
-        .get("/health", |_req, _ctx| {
+        .get("/health", |_req: Request, _ctx: &RequestScope| async {
             Response::new(StatusCode::OK)
                 .content_type("application/json; charset=utf-8")
                 .body(br#"{"status":"ok"}"#.to_vec())
@@ -67,7 +67,7 @@ fn main() -> std::io::Result<()> {
         // dependency being slow should stop traffic, not restart the pod. In M1
         // there are no dependencies, so it is a constant; it grows a real check
         // when there is something to check.
-        .get("/ready", |_req, _ctx| {
+        .get("/ready", |_req: Request, _ctx: &RequestScope| async {
             Response::new(StatusCode::OK)
                 .content_type("application/json; charset=utf-8")
                 .body(br#"{"ready":true}"#.to_vec())

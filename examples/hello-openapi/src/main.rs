@@ -7,9 +7,9 @@
 //!   curl http://localhost:8080/events
 //!   curl -X POST http://localhost:8080/users -H "Content-Type: application/json" -d '{"name":"Dave"}'
 
-use di_core::AppContext;
+use di_core::{AppContext, RequestScope};
 use di_macro::Component;
-use kernway_core::{error::StatusCode, response::IntoResponse};
+use kernway_core::{error::StatusCode, request::Request, response::IntoResponse};
 use kernway_openapi::{OpenApiRegistry, RouteDoc};
 use kernway_server::{
     middleware::{LoggingMiddleware, RequestIdMiddleware},
@@ -122,48 +122,60 @@ fn main() {
         .layer(LoggingMiddleware)
         .get("/openapi.json", {
             let json = Arc::clone(&openapi_json);
-            move |_req, _ctx| {
-                kernway_core::response::Response::new(StatusCode::OK)
-                    .content_type("application/json; charset=utf-8")
-                    .body(json.as_bytes().to_vec())
+            move |_req: Request, _ctx: &RequestScope| {
+                let json = Arc::clone(&json);
+                async move {
+                    kernway_core::response::Response::new(StatusCode::OK)
+                        .content_type("application/json; charset=utf-8")
+                        .body(json.as_bytes().to_vec())
+                }
             }
         })
-        .get("/users", |_req, ctx| {
+        .get("/users", |_req: Request, ctx: &RequestScope| {
             let svc = ctx.get::<UserService>().unwrap();
-            Json(svc.list()).into_response()
+            async move { Json(svc.list()).into_response() }
         })
-        .get("/users/{id}", |req, ctx| {
-            let id = match Path::<u64>::from_request(req, "id") {
-                Ok(p) => *p,
-                Err(e) => return ProblemDetail::bad_request(e),
-            };
-            match ctx.get::<UserService>().unwrap().get(id) {
-                Some(u) => Json(u).into_response(),
-                None => ProblemDetail::not_found(format!("user {} not found", id)),
+        .get("/users/{id}", |req: Request, ctx: &RequestScope| {
+            let svc = ctx.get::<UserService>().unwrap();
+            async move {
+                let id = match Path::<u64>::from_request(&req, "id") {
+                    Ok(p) => *p,
+                    Err(e) => return ProblemDetail::bad_request(e),
+                };
+                match svc.get(id) {
+                    Some(u) => Json(u).into_response(),
+                    None => ProblemDetail::not_found(format!("user {} not found", id)),
+                }
             }
         })
-        .post("/users", |req, ctx| {
-            let body: CreateUser = match serde_json::from_slice(&req.body) {
-                Ok(b) => b,
-                Err(e) => return ProblemDetail::bad_request(format!("invalid body: {}", e)),
-            };
-            let user = ctx.get::<UserService>().unwrap().create(body.name);
-            let mut resp = Json(user).into_response();
-            resp.status = StatusCode::CREATED;
-            resp
-        })
-        .delete("/users/{id}", |req, ctx| {
-            let id = match Path::<u64>::from_request(req, "id") {
-                Ok(p) => *p,
-                Err(e) => return ProblemDetail::bad_request(e),
-            };
-            if ctx.get::<UserService>().unwrap().delete(id) {
-                StatusCode::NO_CONTENT.into_response()
-            } else {
-                ProblemDetail::not_found(format!("user {} not found", id))
+        .post("/users", |req: Request, ctx: &RequestScope| {
+            let svc = ctx.get::<UserService>().unwrap();
+            async move {
+                let body: CreateUser = match serde_json::from_slice(&req.body) {
+                    Ok(b) => b,
+                    Err(e) => return ProblemDetail::bad_request(format!("invalid body: {}", e)),
+                };
+                let user = svc.create(body.name);
+                let mut resp = Json(user).into_response();
+                resp.status = StatusCode::CREATED;
+                resp
             }
         })
-        .get("/events", |_req, _ctx| {
+        .delete("/users/{id}", |req: Request, ctx: &RequestScope| {
+            let svc = ctx.get::<UserService>().unwrap();
+            async move {
+                let id = match Path::<u64>::from_request(&req, "id") {
+                    Ok(p) => *p,
+                    Err(e) => return ProblemDetail::bad_request(e),
+                };
+                if svc.delete(id) {
+                    StatusCode::NO_CONTENT.into_response()
+                } else {
+                    ProblemDetail::not_found(format!("user {} not found", id))
+                }
+            }
+        })
+        .get("/events", |_req: Request, _ctx: &RequestScope| async {
             SseStream::new(vec![
                 SseEvent::data("connected").retry(5000),
                 SseEvent::with_id("1", "user.created", r#"{"id":3,"name":"Charlie"}"#),
