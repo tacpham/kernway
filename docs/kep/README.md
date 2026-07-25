@@ -79,6 +79,7 @@ to keep.
 | [0003](0003-template-model.md) | A template model an engine can actually render | Accepted |
 | [0004](0004-sessions.md) | Sessions — a signed token backed by a revocable registry | Accepted |
 | [0005](0005-request-scoped-beans.md) | Request-scoped DI beans — a per-request scope over the app context | Accepted |
+| [0006](0006-async-handlers.md) | Async handlers — a handler that can await | Accepted |
 
 ## The first two are different from the rest
 
