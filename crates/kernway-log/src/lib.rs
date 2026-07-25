@@ -28,8 +28,12 @@
 
 #![forbid(unsafe_code)]
 
+use std::cell::RefCell;
+use std::future::Future;
 use std::io::Write;
-use std::sync::{Mutex, OnceLock};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::task::{Context as TaskCx, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Severity, most severe first. Ordered by verbosity: `Error < Warn < Info <
@@ -158,6 +162,86 @@ pub enum Format {
     Json,
 }
 
+// --- MDC: per-request diagnostic context ----------------------------------
+//
+// The "who am I logging for" that every line should carry — a request id, maybe a
+// user — set once at the start of a request and attached to *every* log emitted
+// during it, however deep the call stack, without threading it through by hand
+// (Spring's MDC).
+//
+// The mechanism is a future combinator, not a task-local in the executor: [`scope`]
+// wraps a request's future so each *poll* sets a thread-local to that request's
+// context and restores the previous value after. On a thread-per-core runtime only
+// one task is polled at a time on a thread, so the thread-local always reflects the
+// task currently executing — correct even with many requests interleaved on one
+// thread, where a plain thread-local would leak one request's id into another's.
+
+/// A set of `key = value` fields carried alongside every log line for the duration
+/// of a [`scope`]. Ordered; typically just `("req", id)`, plus a user or tenant.
+#[derive(Debug, Clone, Default)]
+pub struct Context {
+    fields: Vec<(String, String)>,
+}
+
+impl Context {
+    /// An empty context.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a field (e.g. `("req", id)`), returning the context for chaining.
+    #[must_use]
+    pub fn with(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.fields.push((key.into(), value.into()));
+        self
+    }
+
+    /// Whether the context has no fields.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
+}
+
+thread_local! {
+    /// The context active on this thread *right now* — i.e. of the task currently
+    /// being polled. `None` outside any [`scope`].
+    static CURRENT: RefCell<Option<Arc<Context>>> = const { RefCell::new(None) };
+}
+
+/// Run `future` with `context` active: every log emitted while it (or anything it
+/// awaits) runs carries the context's fields. Wrap a request's future once, at the
+/// top of the chain, and the whole request's logs correlate.
+pub fn scope<'a, T>(context: Context, future: Pin<Box<dyn Future<Output = T> + Send + 'a>>) -> Scoped<'a, T> {
+    Scoped { context: Arc::new(context), future }
+}
+
+/// The future returned by [`scope`]. Sets the thread-local context around each poll
+/// of the wrapped future and restores the prior value after (so scopes nest).
+pub struct Scoped<'a, T> {
+    context: Arc<Context>,
+    future: Pin<Box<dyn Future<Output = T> + Send + 'a>>,
+}
+
+impl<T> Future for Scoped<'_, T> {
+    type Output = T;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut TaskCx<'_>) -> Poll<T> {
+        // `Scoped` is `Unpin` (an `Arc` and a `Pin<Box<…>>`), so no unsafe needed.
+        let this = self.as_mut().get_mut();
+        let previous = CURRENT.with(|current| current.borrow_mut().replace(Arc::clone(&this.context)));
+        let result = this.future.as_mut().poll(cx);
+        CURRENT.with(|current| *current.borrow_mut() = previous);
+        result
+    }
+}
+
+/// The context active on this thread now, if any.
+fn current() -> Option<Arc<Context>> {
+    CURRENT.with(|current| current.borrow().clone())
+}
+
 /// The logger: a filter, a format, and a sink. Built once and installed with
 /// [`init`], or used directly via [`emit`](Logger::emit).
 pub struct Logger {
@@ -231,17 +315,43 @@ fn now_millis() -> u64 {
 }
 
 fn format_pretty(millis: u64, level: Level, target: &str, args: std::fmt::Arguments) -> String {
-    format!("{} {} {target}: {args}", iso8601(millis), level.padded())
+    format!("{} {} {}{target}: {args}", iso8601(millis), level.padded(), context_pretty())
 }
 
 fn format_json(millis: u64, level: Level, target: &str, args: std::fmt::Arguments) -> String {
     format!(
-        "{{\"ts\":\"{}\",\"level\":\"{}\",\"target\":\"{}\",\"msg\":\"{}\"}}",
+        "{{\"ts\":\"{}\",\"level\":\"{}\",{}\"target\":\"{}\",\"msg\":\"{}\"}}",
         iso8601(millis),
         level.name(),
+        context_json(),
         json_escape(target),
         json_escape(&args.to_string()),
     )
+}
+
+/// The active context as a `[k=v k=v] ` prefix for Pretty, or empty if none.
+fn context_pretty() -> String {
+    match current() {
+        Some(context) if !context.fields.is_empty() => {
+            let pairs: Vec<String> = context.fields.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            format!("[{}] ", pairs.join(" "))
+        }
+        _ => String::new(),
+    }
+}
+
+/// The active context as `"k":"v",` JSON pairs (inserted before `target`), or empty.
+fn context_json() -> String {
+    match current() {
+        Some(context) if !context.fields.is_empty() => {
+            let mut out = String::new();
+            for (key, value) in &context.fields {
+                out.push_str(&format!("\"{}\":\"{}\",", json_escape(key), json_escape(value)));
+            }
+            out
+        }
+        _ => String::new(),
+    }
 }
 
 /// UTC ISO-8601 with millis, formatted from unix millis with no date dependency
@@ -429,5 +539,44 @@ mod tests {
         let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
         assert!(out.contains("app: shown"), "info passes: {out}");
         assert!(!out.contains("hidden"), "debug is filtered: {out}");
+    }
+
+    #[test]
+    fn scope_activates_the_context_during_a_poll_and_restores_after() {
+        use std::future::Future;
+        assert!(current().is_none(), "no context outside a scope");
+
+        // The wrapped future reads the context that is active while it is polled.
+        let fut = scope(
+            Context::new().with("req", "abc123"),
+            Box::pin(async { current().map(|c| c.fields.clone()) }),
+        );
+        let mut fut = Box::pin(fut);
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        let seen = match fut.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(value) => value,
+            std::task::Poll::Pending => unreachable!("the inner future is ready"),
+        };
+
+        assert_eq!(seen, Some(vec![("req".to_string(), "abc123".to_string())]));
+        assert!(current().is_none(), "the context is restored after the scope");
+    }
+
+    #[test]
+    fn the_formats_carry_the_active_context() {
+        use std::sync::Arc;
+        CURRENT.with(|c| *c.borrow_mut() = Some(Arc::new(Context::new().with("req", "abc"))));
+
+        assert_eq!(
+            format_pretty(1_609_459_200_000, Level::Info, "web", format_args!("hi")),
+            "2021-01-01T00:00:00.000Z INFO  [req=abc] web: hi"
+        );
+        assert_eq!(
+            format_json(1_609_459_200_000, Level::Info, "web", format_args!("hi")),
+            r#"{"ts":"2021-01-01T00:00:00.000Z","level":"INFO","req":"abc","target":"web","msg":"hi"}"#
+        );
+
+        CURRENT.with(|c| *c.borrow_mut() = None); // do not leak into other tests
     }
 }
