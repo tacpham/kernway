@@ -83,13 +83,13 @@ impl Middleware for LoggingMiddleware {
             let method = req.method.clone();
             let path = req.path.clone();
             let resp = next.run(req, scope).await;
-            println!(
-                "[{}] {} {} {} {}ms",
+            // The access log line, through the framework logger (KW_LOG controls it).
+            kernway_log::info!(
+                target: "kernway_server",
+                "{method} {path} -> {} ({}ms) req={}",
                 resp.status.0,
-                method,
-                path,
+                start.elapsed().as_millis(),
                 resp.headers.get("x-request-id").unwrap_or("-"),
-                start.elapsed().as_millis()
             );
             resp
         })

@@ -663,6 +663,7 @@ dependencies = [
  "criterion",
  "getrandom",
  "kernway-core",
+ "kernway-log",
  "kernway-redis",
  "rt-core",
 ]
@@ -675,6 +676,7 @@ dependencies = [
  "di-core",
  "kernway-core",
  "kernway-http",
+ "kernway-log",
  "kernway-static",
  "matchit",
  "rt-core",
@@ -736,6 +738,7 @@ dependencies = [
  "kernleaf",
  "kernway-core",
  "kernway-htmx",
+ "kernway-log",
  "kernway-security",
  "kernway-server",
 ]
@@ -879,6 +882,7 @@ dependencies = [
 name = "rt-net"
 version = "0.1.0"
 dependencies = [
+ "kernway-log",
  "libc",
  "mio",
  "rt-core",

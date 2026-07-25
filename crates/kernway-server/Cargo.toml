@@ -9,6 +9,7 @@ license.workspace    = true
 kernway-core   = { workspace = true }
 kernway-http   = { workspace = true }
 kernway-static = { workspace = true }
+kernway-log    = { workspace = true }   # access logs + startup warnings
 rt-net         = { workspace = true }
 rt-core        = { workspace = true }
 di-core        = { workspace = true }

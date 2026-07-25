@@ -19,4 +19,5 @@ kernway-core     = { workspace = true }
 kernway-server   = { workspace = true }
 kernleaf         = { workspace = true }
 kernway-security = { workspace = true, features = ["presence"] }
+kernway-log      = { workspace = true }
 kernway-htmx     = { workspace = true }

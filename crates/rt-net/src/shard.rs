@@ -207,7 +207,7 @@ where
         // Advisory: unpinned shards are correct, just less cache-friendly, so a
         // platform that cannot pin must not fail to start.
         if let Err(e) = rt_core::pin_current_thread_to_core(index) {
-            eprintln!("kernway: shard {index} runs unpinned ({e})");
+            kernway_log::warn!(target: "rt_net", "shard {index} runs unpinned: {e}");
         }
     }
 
@@ -228,9 +228,9 @@ where
 
         let abandoned = drain(config.drain_timeout).await;
         if abandoned > 0 {
-            eprintln!(
-                "kernway: shard {index} gave up on {abandoned} connection(s) after \
-                 {:?} of draining",
+            kernway_log::warn!(
+                target: "rt_net",
+                "shard {index} gave up on {abandoned} connection(s) after {:?} of draining",
                 config.drain_timeout
             );
         }

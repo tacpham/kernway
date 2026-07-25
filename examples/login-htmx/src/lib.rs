@@ -169,7 +169,7 @@ async fn do_heartbeat(ctx: &SecurityContext, presence: &dyn Presence) -> Respons
     if let Some(user) = ctx.principal() {
         // Best-effort: a presence-store hiccup should not fail the page.
         if let Err(err) = presence.heartbeat(user, now()).await {
-            eprintln!("login-htmx: heartbeat failed: {err}");
+            kernway_log::warn!(target: "login_htmx", "heartbeat failed: {err}");
         }
     }
     Response::new(StatusCode::NO_CONTENT)
@@ -258,7 +258,7 @@ async fn do_logout(req: &Request, sessions: &SessionManager) -> Response {
         // Best-effort server-side revocation: if the store is down we still clear
         // the cookie below (client-side logout), but log that the session lingers.
         if let Err(err) = sessions.logout_token(token).await {
-            eprintln!("login-htmx: logout could not revoke the session: {err}");
+            kernway_log::warn!(target: "login_htmx", "logout could not revoke the session: {err}");
         }
     }
     let mut resp = HtmxResponse::new("").redirect("/login").into_response();
