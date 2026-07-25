@@ -1,5 +1,5 @@
-use di_core::AppContext;
-use kernway_core::{error::StatusCode, response::IntoResponse};
+use di_core::{AppContext, RequestScope};
+use kernway_core::{error::StatusCode, request::Request, response::IntoResponse};
 use kernway_orm_core::repository::Repository;
 use kernway_orm_macro::entity;
 use kernway_orm_sqlite::SqliteRepository;
@@ -115,54 +115,63 @@ fn main() {
         .bind("0.0.0.0:8080")
         .context(ctx)
         .layer(LoggingMiddleware)
-        .get("/todos", |_req, ctx| {
+        .get("/todos", |_req: Request, ctx: &RequestScope| {
             let svc = ctx.get::<TodoService>().unwrap();
-            Json(svc.list()).into_response()
+            async move { Json(svc.list()).into_response() }
         })
-        .post("/todos", |req, ctx| {
-            let body = match Json::<CreateTodo>::from_request(req) {
-                Ok(Json(body)) => body,
-                Err(err) => return ProblemDetail::bad_request(err),
-            };
-
+        .post("/todos", |req: Request, ctx: &RequestScope| {
             let svc = ctx.get::<TodoService>().unwrap();
-            (StatusCode::CREATED, Json(svc.create(body.title))).into_response()
-        })
-        .patch("/todos/{id}/done", |req, ctx| {
-            let id = match Path::<u64>::from_request(req, "id") {
-                Ok(path) => *path,
-                Err(err) => return ProblemDetail::bad_request(err),
-            };
+            async move {
+                let body = match Json::<CreateTodo>::from_request(&req) {
+                    Ok(Json(body)) => body,
+                    Err(err) => return ProblemDetail::bad_request(err),
+                };
 
-            let svc = ctx.get::<TodoService>().unwrap();
-            match svc.mark_done(id) {
-                Some(todo) => Json(todo).into_response(),
-                None => ProblemDetail::not_found(format!("todo {} not found", id)),
+                (StatusCode::CREATED, Json(svc.create(body.title))).into_response()
             }
         })
-        .delete("/todos/{id}", |req, ctx| {
-            let id = match Path::<u64>::from_request(req, "id") {
-                Ok(path) => *path,
-                Err(err) => return ProblemDetail::bad_request(err),
-            };
-
+        .patch("/todos/{id}/done", |req: Request, ctx: &RequestScope| {
             let svc = ctx.get::<TodoService>().unwrap();
-            if svc.delete(id) {
-                StatusCode::NO_CONTENT.into_response()
-            } else {
-                ProblemDetail::not_found(format!("todo {} not found", id))
+            async move {
+                let id = match Path::<u64>::from_request(&req, "id") {
+                    Ok(path) => *path,
+                    Err(err) => return ProblemDetail::bad_request(err),
+                };
+
+                match svc.mark_done(id) {
+                    Some(todo) => Json(todo).into_response(),
+                    None => ProblemDetail::not_found(format!("todo {} not found", id)),
+                }
+            }
+        })
+        .delete("/todos/{id}", |req: Request, ctx: &RequestScope| {
+            let svc = ctx.get::<TodoService>().unwrap();
+            async move {
+                let id = match Path::<u64>::from_request(&req, "id") {
+                    Ok(path) => *path,
+                    Err(err) => return ProblemDetail::bad_request(err),
+                };
+
+                if svc.delete(id) {
+                    StatusCode::NO_CONTENT.into_response()
+                } else {
+                    ProblemDetail::not_found(format!("todo {} not found", id))
+                }
             }
         })
         .get("/db-info", {
             let db_path = db_info_path.clone();
-            move |_req, ctx| {
+            move |_req: Request, ctx: &RequestScope| {
                 let svc = ctx.get::<TodoService>().unwrap();
-                Json(serde_json::json!({
-                    "backend": "sqlite",
-                    "db_path": db_path,
-                    "count": svc.count(),
-                }))
-                .into_response()
+                let db_path = db_path.clone();
+                async move {
+                    Json(serde_json::json!({
+                        "backend": "sqlite",
+                        "db_path": db_path,
+                        "count": svc.count(),
+                    }))
+                    .into_response()
+                }
             }
         })
         .build()

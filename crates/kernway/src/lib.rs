@@ -13,7 +13,7 @@
 //!
 //! KernwayApp::builder()
 //!     .static_files("public")
-//!     .get("/health", |_req, _ctx| Response::new(StatusCode::OK))
+//!     .get("/health", |_req: Request, _ctx: &RequestScope| async { Response::new(StatusCode::OK) })
 //!     .build()
 //!     .run()
 //!     .unwrap();
@@ -42,7 +42,10 @@ pub use kernway_core::prelude::*;
 pub use kernway_core::{error, error as http_error, request, response};
 
 // --- server: the builder, router, middleware, static files ---
-pub use kernway_server::{AppBuilder, KernwayApp, Router};
+pub use kernway_server::{AppBuilder, BoxFuture, KernwayApp, Router};
+
+// --- the per-request DI scope a handler receives (KEP-0005) ---
+pub use di_core::RequestScope;
 
 // --- web: extractors and response types ---
 pub use kernway_web::{Html, Json, Path, ProblemDetail, Query};
@@ -63,8 +66,11 @@ pub mod prelude {
     // Server
     pub use crate::{AppBuilder, KernwayApp, Router};
     // HTTP types
+    pub use crate::request::Request;
     pub use crate::response::Response;
     pub use kernway_core::error::StatusCode;
+    // The per-request DI scope and the async handler future type (KEP-0005/0006)
+    pub use crate::{BoxFuture, RequestScope};
     // Traits
     pub use crate::{IntoResponse, FromRequest, Layer, Next, DbPool, TemplateEngine, KernwayPlugin};
     // Extractors and response types

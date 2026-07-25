@@ -9,12 +9,12 @@
 //!        curl http://localhost:8080/cache/stats  # hit/miss stats
 //!        curl -X DELETE http://localhost:8080/users/1/cache  # evict
 
-use di_core::AppContext;
+use di_core::{AppContext, RequestScope};
 use di_macro::Component;
 use kernway_cache_core::{Cache, Ttl};
 use kernway_cache_macro::{cache_evict, cacheable};
 use kernway_cache_memory::InMemoryCache;
-use kernway_core::{error::StatusCode, response::IntoResponse};
+use kernway_core::{error::StatusCode, request::Request, response::IntoResponse};
 use kernway_server::{
     middleware::{LoggingMiddleware, RequestIdMiddleware},
     KernwayApp,
@@ -107,35 +107,41 @@ fn main() {
         .context(ctx)
         .layer(RequestIdMiddleware)
         .layer(LoggingMiddleware)
-        .get("/users/{id}", |req, ctx| {
-            let id = match Path::<u64>::from_request(req, "id") {
-                Ok(p) => *p,
-                Err(e) => return ProblemDetail::bad_request(e),
-            };
+        .get("/users/{id}", |req: Request, ctx: &RequestScope| {
             let svc = ctx.get::<UserService>().unwrap();
-            match svc.get_user(id) {
-                Some(u) => Json(u).into_response(),
-                None => ProblemDetail::not_found(format!("user {} not found", id)),
+            async move {
+                let id = match Path::<u64>::from_request(&req, "id") {
+                    Ok(p) => *p,
+                    Err(e) => return ProblemDetail::bad_request(e),
+                };
+                match svc.get_user(id) {
+                    Some(u) => Json(u).into_response(),
+                    None => ProblemDetail::not_found(format!("user {} not found", id)),
+                }
             }
         })
-        .delete("/users/{id}/cache", |req, ctx| {
-            let id = match Path::<u64>::from_request(req, "id") {
-                Ok(p) => *p,
-                Err(e) => return ProblemDetail::bad_request(e),
-            };
+        .delete("/users/{id}/cache", |req: Request, ctx: &RequestScope| {
             let svc = ctx.get::<UserService>().unwrap();
-            svc.invalidate_user(id);
-            StatusCode::NO_CONTENT.into_response()
+            async move {
+                let id = match Path::<u64>::from_request(&req, "id") {
+                    Ok(p) => *p,
+                    Err(e) => return ProblemDetail::bad_request(e),
+                };
+                svc.invalidate_user(id);
+                StatusCode::NO_CONTENT.into_response()
+            }
         })
-        .get("/cache/stats", |_req, ctx| {
+        .get("/cache/stats", |_req: Request, ctx: &RequestScope| {
             let svc = ctx.get::<UserService>().unwrap();
-            let s = svc.cache_stats();
-            Json(serde_json::json!({
-                "hits": s.hits,
-                "misses": s.misses,
-                "entries": s.entries,
-                "hit_ratio": s.hit_ratio(),
-            })).into_response()
+            async move {
+                let s = svc.cache_stats();
+                Json(serde_json::json!({
+                    "hits": s.hits,
+                    "misses": s.misses,
+                    "entries": s.entries,
+                    "hit_ratio": s.hit_ratio(),
+                })).into_response()
+            }
         })
         .build()
         .run()

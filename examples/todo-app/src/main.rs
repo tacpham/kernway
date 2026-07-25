@@ -15,10 +15,10 @@
 //!   DELETE /todos/{id}          — delete todo
 //!   GET    /events              — SSE stream of change events
 
-use di_core::AppContext;
+use di_core::{AppContext, RequestScope};
 use kernway_cache_core::{Cache, Ttl};
 use kernway_cache_memory::InMemoryCache;
-use kernway_core::{error::StatusCode, response::IntoResponse};
+use kernway_core::{error::StatusCode, request::Request, response::IntoResponse};
 use kernway_openapi::{OpenApiRegistry, RouteDoc};
 use kernway_orm_core::repository::Repository;
 use kernway_orm_macro::entity;
@@ -330,104 +330,130 @@ fn main() {
         .context(ctx)
         .layer(RequestIdMiddleware)
         .layer(LoggingMiddleware)
-        .get("/health", move |_req, ctx| {
+        .get("/health", move |_req: Request, ctx: &RequestScope| {
             let svc = ctx.get::<TodoService>().unwrap();
-            let uptime = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-                .saturating_sub(start_time);
-            Json(serde_json::json!({
-                "status": "UP",
-                "version": "1.0.0",
-                "uptime_s": uptime,
-                "todos": svc.count(),
-            }))
-            .into_response()
+            async move {
+                let uptime = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .saturating_sub(start_time);
+                Json(serde_json::json!({
+                    "status": "UP",
+                    "version": "1.0.0",
+                    "uptime_s": uptime,
+                    "todos": svc.count(),
+                }))
+                .into_response()
+            }
         })
         .get("/openapi.json", {
             let json = Arc::clone(&openapi_json);
-            move |_req, _ctx| {
-                kernway_core::response::Response::new(StatusCode::OK)
-                    .content_type("application/json; charset=utf-8")
-                    .body(json.as_bytes().to_vec())
+            move |_req: Request, _ctx: &RequestScope| {
+                let json = Arc::clone(&json);
+                async move {
+                    kernway_core::response::Response::new(StatusCode::OK)
+                        .content_type("application/json; charset=utf-8")
+                        .body(json.as_bytes().to_vec())
+                }
             }
         })
-        .get("/todos", |req, ctx| {
-            let done_filter = req.query.get("done").and_then(|value| match value {
-                "true" => Some(true),
-                "false" => Some(false),
-                _ => None,
-            });
-            Json(ctx.get::<TodoService>().unwrap().list(done_filter)).into_response()
-        })
-        .get("/todos/{id}", |req, ctx| {
-            let id = match Path::<u64>::from_request(req, "id") {
-                Ok(path) => *path,
-                Err(err) => return ProblemDetail::bad_request(err),
-            };
-            match ctx.get::<TodoService>().unwrap().get(id) {
-                Some(todo) => Json(todo).into_response(),
-                None => ProblemDetail::not_found(format!("todo {} not found", id)),
+        .get("/todos", |req: Request, ctx: &RequestScope| {
+            let svc = ctx.get::<TodoService>().unwrap();
+            async move {
+                let done_filter = req.query.get("done").and_then(|value| match value {
+                    "true" => Some(true),
+                    "false" => Some(false),
+                    _ => None,
+                });
+                Json(svc.list(done_filter)).into_response()
             }
         })
-        .post("/todos", |req, ctx| {
-            let body: CreateTodo = match serde_json::from_slice(&req.body) {
-                Ok(body) => body,
-                Err(err) => return ProblemDetail::bad_request(format!("invalid body: {}", err)),
-            };
-            let todo = ctx.get::<TodoService>().unwrap().create(body);
-            let mut resp = Json(todo).into_response();
-            resp.status = StatusCode::CREATED;
-            resp
-        })
-        .put("/todos/{id}", |req, ctx| {
-            let id = match Path::<u64>::from_request(req, "id") {
-                Ok(path) => *path,
-                Err(err) => return ProblemDetail::bad_request(err),
-            };
-            let body: UpdateTodo = match serde_json::from_slice(&req.body) {
-                Ok(body) => body,
-                Err(err) => return ProblemDetail::bad_request(format!("invalid body: {}", err)),
-            };
-            match ctx.get::<TodoService>().unwrap().update(id, body) {
-                Some(todo) => Json(todo).into_response(),
-                None => ProblemDetail::not_found(format!("todo {} not found", id)),
+        .get("/todos/{id}", |req: Request, ctx: &RequestScope| {
+            let svc = ctx.get::<TodoService>().unwrap();
+            async move {
+                let id = match Path::<u64>::from_request(&req, "id") {
+                    Ok(path) => *path,
+                    Err(err) => return ProblemDetail::bad_request(err),
+                };
+                match svc.get(id) {
+                    Some(todo) => Json(todo).into_response(),
+                    None => ProblemDetail::not_found(format!("todo {} not found", id)),
+                }
             }
         })
-        .patch("/todos/{id}/complete", |req, ctx| {
-            let id = match Path::<u64>::from_request(req, "id") {
-                Ok(path) => *path,
-                Err(err) => return ProblemDetail::bad_request(err),
-            };
-            match ctx.get::<TodoService>().unwrap().complete(id) {
-                Some(todo) => Json(todo).into_response(),
-                None => ProblemDetail::not_found(format!("todo {} not found", id)),
+        .post("/todos", |req: Request, ctx: &RequestScope| {
+            let svc = ctx.get::<TodoService>().unwrap();
+            async move {
+                let body: CreateTodo = match serde_json::from_slice(&req.body) {
+                    Ok(body) => body,
+                    Err(err) => return ProblemDetail::bad_request(format!("invalid body: {}", err)),
+                };
+                let todo = svc.create(body);
+                let mut resp = Json(todo).into_response();
+                resp.status = StatusCode::CREATED;
+                resp
             }
         })
-        .delete("/todos/{id}", |req, ctx| {
-            let id = match Path::<u64>::from_request(req, "id") {
-                Ok(path) => *path,
-                Err(err) => return ProblemDetail::bad_request(err),
-            };
-            if ctx.get::<TodoService>().unwrap().delete(id) {
-                StatusCode::NO_CONTENT.into_response()
-            } else {
-                ProblemDetail::not_found(format!("todo {} not found", id))
+        .put("/todos/{id}", |req: Request, ctx: &RequestScope| {
+            let svc = ctx.get::<TodoService>().unwrap();
+            async move {
+                let id = match Path::<u64>::from_request(&req, "id") {
+                    Ok(path) => *path,
+                    Err(err) => return ProblemDetail::bad_request(err),
+                };
+                let body: UpdateTodo = match serde_json::from_slice(&req.body) {
+                    Ok(body) => body,
+                    Err(err) => return ProblemDetail::bad_request(format!("invalid body: {}", err)),
+                };
+                match svc.update(id, body) {
+                    Some(todo) => Json(todo).into_response(),
+                    None => ProblemDetail::not_found(format!("todo {} not found", id)),
+                }
             }
         })
-        .get("/events", |_req, ctx| {
-            let events = ctx.get::<EventBus>().unwrap().drain();
-            let mut all = vec![SseEvent::named(
-                "connected",
-                r#"{"service":"todo-api","version":"1.0.0"}"#,
-            )];
-            let sse_events = events.iter().enumerate().map(|(i, event)| {
-                let (event_type, data) = event.split_once(':').unwrap_or(("event", event.as_str()));
-                SseEvent::with_id((i + 1).to_string(), event_type, data)
-            });
-            all.extend(sse_events);
-            SseStream::new(all).into_response()
+        .patch("/todos/{id}/complete", |req: Request, ctx: &RequestScope| {
+            let svc = ctx.get::<TodoService>().unwrap();
+            async move {
+                let id = match Path::<u64>::from_request(&req, "id") {
+                    Ok(path) => *path,
+                    Err(err) => return ProblemDetail::bad_request(err),
+                };
+                match svc.complete(id) {
+                    Some(todo) => Json(todo).into_response(),
+                    None => ProblemDetail::not_found(format!("todo {} not found", id)),
+                }
+            }
+        })
+        .delete("/todos/{id}", |req: Request, ctx: &RequestScope| {
+            let svc = ctx.get::<TodoService>().unwrap();
+            async move {
+                let id = match Path::<u64>::from_request(&req, "id") {
+                    Ok(path) => *path,
+                    Err(err) => return ProblemDetail::bad_request(err),
+                };
+                if svc.delete(id) {
+                    StatusCode::NO_CONTENT.into_response()
+                } else {
+                    ProblemDetail::not_found(format!("todo {} not found", id))
+                }
+            }
+        })
+        .get("/events", |_req: Request, ctx: &RequestScope| {
+            let bus = ctx.get::<EventBus>().unwrap();
+            async move {
+                let events = bus.drain();
+                let mut all = vec![SseEvent::named(
+                    "connected",
+                    r#"{"service":"todo-api","version":"1.0.0"}"#,
+                )];
+                let sse_events = events.iter().enumerate().map(|(i, event)| {
+                    let (event_type, data) = event.split_once(':').unwrap_or(("event", event.as_str()));
+                    SseEvent::with_id((i + 1).to_string(), event_type, data)
+                });
+                all.extend(sse_events);
+                SseStream::new(all).into_response()
+            }
         })
         .build()
         .run()

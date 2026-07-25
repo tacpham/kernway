@@ -44,8 +44,10 @@ pub mod app;
 pub mod middleware;
 
 pub use app::{AppBuilder, KeepAliveConfig, KernwayApp};
-pub use middleware::Middleware;
+pub use middleware::{Middleware, Next};
 pub use router::Router;
+// The async handler/middleware future type (KEP-0006).
+pub use kernway_core::layer::BoxFuture;
 // The per-request DI scope handlers receive (KEP-0005), re-exported so a handler
 // signature `|req, scope| …` needs only kernway-server in scope.
 pub use di_core::RequestScope;

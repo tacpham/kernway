@@ -48,8 +48,8 @@ fn htmx_endpoint_serves_fragment_vs_page_over_a_socket() {
 
     let app = KernwayApp::builder()
         .bind(&format!("127.0.0.1:{port}"))
-        .get("/htmx/greet", |req, _ctx| {
-            Htmx::from(req)
+        .get("/htmx/greet", |req: Request, _ctx: &RequestScope| async move {
+            Htmx::from(&req)
                 .respond(
                     || "<div id=\"greeting\">FRAGMENT</div>".to_string(),
                     || "<!doctype html><div id=\"greeting\">PAGE</div>".to_string(),

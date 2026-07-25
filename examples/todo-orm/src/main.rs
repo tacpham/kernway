@@ -1,5 +1,6 @@
-use di_core::AppContext;
+use di_core::{AppContext, RequestScope};
 use di_macro::Component;
+use kernway_core::request::Request;
 use kernway_core::response::IntoResponse;
 use kernway_orm_core::repository::Repository;
 use kernway_orm_macro::entity;
@@ -100,56 +101,64 @@ fn main() {
         .context(ctx)
         .layer(RequestIdMiddleware)
         .layer(LoggingMiddleware)
-        .get("/todos", |_req, ctx| {
+        .get("/todos", |_req: Request, ctx: &RequestScope| {
             let svc = ctx.get::<TodoService>().unwrap();
-            Json(svc.list()).into_response()
+            async move { Json(svc.list()).into_response() }
         })
-        .get("/todos/{id}", |req, ctx| {
-            let id = match Path::<u64>::from_request(req, "id") {
-                Ok(path) => *path,
-                Err(err) => return ProblemDetail::bad_request(err),
-            };
+        .get("/todos/{id}", |req: Request, ctx: &RequestScope| {
             let svc = ctx.get::<TodoService>().unwrap();
-            match svc.get(id) {
-                Some(todo) => Json(todo).into_response(),
-                None => ProblemDetail::not_found(format!("todo {} not found", id)),
-            }
-        })
-        .post("/todos", |req, ctx| {
-            #[derive(Deserialize)]
-            struct CreateTodo {
-                title: String,
-            }
-
-            let body: CreateTodo = match serde_json::from_slice(&req.body) {
-                Ok(body) => body,
-                Err(err) => {
-                    return ProblemDetail::bad_request(format!("invalid body: {}", err));
+            async move {
+                let id = match Path::<u64>::from_request(&req, "id") {
+                    Ok(path) => *path,
+                    Err(err) => return ProblemDetail::bad_request(err),
+                };
+                match svc.get(id) {
+                    Some(todo) => Json(todo).into_response(),
+                    None => ProblemDetail::not_found(format!("todo {} not found", id)),
                 }
-            };
-
-            let svc = ctx.get::<TodoService>().unwrap();
-            Json(svc.create(body.title)).into_response()
-        })
-        .put("/todos/{id}/complete", |req, ctx| {
-            let id = match Path::<u64>::from_request(req, "id") {
-                Ok(path) => *path,
-                Err(err) => return ProblemDetail::bad_request(err),
-            };
-            let svc = ctx.get::<TodoService>().unwrap();
-            match svc.complete(id) {
-                Some(todo) => Json(todo).into_response(),
-                None => ProblemDetail::not_found(format!("todo {} not found", id)),
             }
         })
-        .delete("/todos/{id}", |req, ctx| {
-            let id = match Path::<u64>::from_request(req, "id") {
-                Ok(path) => *path,
-                Err(err) => return ProblemDetail::bad_request(err),
-            };
+        .post("/todos", |req: Request, ctx: &RequestScope| {
             let svc = ctx.get::<TodoService>().unwrap();
-            svc.delete(id);
-            kernway_core::error::StatusCode::NO_CONTENT.into_response()
+            async move {
+                #[derive(Deserialize)]
+                struct CreateTodo {
+                    title: String,
+                }
+
+                let body: CreateTodo = match serde_json::from_slice(&req.body) {
+                    Ok(body) => body,
+                    Err(err) => {
+                        return ProblemDetail::bad_request(format!("invalid body: {}", err));
+                    }
+                };
+
+                Json(svc.create(body.title)).into_response()
+            }
+        })
+        .put("/todos/{id}/complete", |req: Request, ctx: &RequestScope| {
+            let svc = ctx.get::<TodoService>().unwrap();
+            async move {
+                let id = match Path::<u64>::from_request(&req, "id") {
+                    Ok(path) => *path,
+                    Err(err) => return ProblemDetail::bad_request(err),
+                };
+                match svc.complete(id) {
+                    Some(todo) => Json(todo).into_response(),
+                    None => ProblemDetail::not_found(format!("todo {} not found", id)),
+                }
+            }
+        })
+        .delete("/todos/{id}", |req: Request, ctx: &RequestScope| {
+            let svc = ctx.get::<TodoService>().unwrap();
+            async move {
+                let id = match Path::<u64>::from_request(&req, "id") {
+                    Ok(path) => *path,
+                    Err(err) => return ProblemDetail::bad_request(err),
+                };
+                svc.delete(id);
+                kernway_core::error::StatusCode::NO_CONTENT.into_response()
+            }
         })
         .build()
         .run()
