@@ -68,7 +68,14 @@ impl Config {
     pub fn load_from(dir: &str) -> Config {
         let mut map = HashMap::new();
 
-        // 1. Base file — the committed defaults.
+        // 1. Base files — the committed defaults. With the `yaml` feature, a
+        // `.yml` is read first and `.properties` overrides it (the native format
+        // wins if both exist; most projects use one).
+        #[cfg(feature = "yaml")]
+        {
+            read_yaml_into(&format!("{dir}/application.yml"), &mut map);
+            read_yaml_into(&format!("{dir}/application.yaml"), &mut map);
+        }
         read_into(&format!("{dir}/application.properties"), &mut map);
 
         // Resolve the active profile: env wins over a property in the base file.
@@ -77,8 +84,13 @@ impl Config {
             .filter(|s| !s.is_empty())
             .or_else(|| map.get("kernway.profiles.active").cloned());
 
-        // 2. Profile file — overrides the base for this environment.
+        // 2. Profile files — override the base for this environment.
         if let Some(profile) = &profile {
+            #[cfg(feature = "yaml")]
+            {
+                read_yaml_into(&format!("{dir}/application-{profile}.yml"), &mut map);
+                read_yaml_into(&format!("{dir}/application-{profile}.yaml"), &mut map);
+            }
             read_into(&format!("{dir}/application-{profile}.properties"), &mut map);
         }
 
@@ -188,6 +200,14 @@ impl ConfigBuilder {
         self
     }
 
+    /// Parse YAML text and layer it in, flattened to dotted keys (feature = `yaml`).
+    #[cfg(feature = "yaml")]
+    #[must_use]
+    pub fn yaml(mut self, contents: &str) -> Self {
+        parse_yaml(contents, &mut self.map);
+        self
+    }
+
     /// Layer in a `.properties` file if it exists (a missing file is a no-op).
     #[must_use]
     pub fn file(mut self, path: &str) -> Self {
@@ -236,6 +256,71 @@ fn parse_properties(contents: &str, map: &mut HashMap<String, String>) {
 fn read_into(path: &str, map: &mut HashMap<String, String>) {
     if let Ok(contents) = std::fs::read_to_string(path) {
         parse_properties(&contents, map);
+    }
+}
+
+// --- YAML (feature = "yaml") -----------------------------------------------
+//
+// YAML is flattened into the *same* dotted-key map, so everything downstream —
+// `get`, `with_prefix`, `#[configuration]`, the logging bridge — is unchanged. A
+// nested map becomes `a.b.c`; a sequence becomes indexed keys (`a.0`, `a.1`), the
+// documented limit until Config grows a real list type.
+
+/// Parse YAML text and flatten every document into `map`.
+#[cfg(feature = "yaml")]
+fn parse_yaml(contents: &str, map: &mut HashMap<String, String>) {
+    if let Ok(docs) = yaml_rust2::YamlLoader::load_from_str(contents) {
+        for doc in &docs {
+            flatten_yaml(doc, "", map);
+        }
+    }
+}
+
+/// Walk a YAML node, writing scalars at their dotted path.
+#[cfg(feature = "yaml")]
+fn flatten_yaml(node: &yaml_rust2::Yaml, prefix: &str, map: &mut HashMap<String, String>) {
+    use yaml_rust2::Yaml;
+    let joined = |key: &str| if prefix.is_empty() { key.to_string() } else { format!("{prefix}.{key}") };
+    match node {
+        Yaml::Hash(hash) => {
+            for (key, value) in hash {
+                if let Some(key) = yaml_scalar(key) {
+                    flatten_yaml(value, &joined(&key), map);
+                }
+            }
+        }
+        Yaml::Array(items) => {
+            for (index, value) in items.iter().enumerate() {
+                flatten_yaml(value, &joined(&index.to_string()), map);
+            }
+        }
+        // A scalar at the leaf: record it. Null is treated as absent.
+        scalar => {
+            if let Some(value) = yaml_scalar(scalar) {
+                map.insert(prefix.to_string(), value);
+            }
+        }
+    }
+}
+
+/// A YAML scalar as a string (`None` for null, a container, or a bad value).
+#[cfg(feature = "yaml")]
+fn yaml_scalar(node: &yaml_rust2::Yaml) -> Option<String> {
+    use yaml_rust2::Yaml;
+    match node {
+        Yaml::String(s) => Some(s.clone()),
+        Yaml::Integer(i) => Some(i.to_string()),
+        Yaml::Real(r) => Some(r.clone()),
+        Yaml::Boolean(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// Read a YAML file into `map` if it exists (missing file = no-op).
+#[cfg(feature = "yaml")]
+fn read_yaml_into(path: &str, map: &mut HashMap<String, String>) {
+    if let Ok(contents) = std::fs::read_to_string(path) {
+        parse_yaml(&contents, map);
     }
 }
 
@@ -346,6 +431,43 @@ mod tests {
             ServerConfig::from_config(&c2),
             ServerConfig { port: 80, host: String::new(), keep_alive_secs: None }
         );
+    }
+
+    #[cfg(feature = "yaml")]
+    #[test]
+    fn yaml_flattens_into_the_same_dotted_keys() {
+        let c = Config::builder()
+            .yaml(
+                "server:\n  \
+                   port: 8080\n  \
+                   host: 0.0.0.0\n\
+                 logging:\n  \
+                   level:\n    \
+                     kernway_redis: debug\n\
+                 cors:\n  \
+                   origins:\n    \
+                     - https://a.com\n    \
+                     - https://b.com\n",
+            )
+            .build();
+        // Nested map → dotted keys; typed access works as for properties.
+        assert_eq!(c.get::<u16>("server.port"), Some(8080));
+        assert_eq!(c.get_str("server.host"), Some("0.0.0.0"));
+        assert_eq!(c.get_str("logging.level.kernway_redis"), Some("debug"));
+        // A sequence → indexed keys (the documented list limitation).
+        assert_eq!(c.get_str("cors.origins.0"), Some("https://a.com"));
+        assert_eq!(c.get_str("cors.origins.1"), Some("https://b.com"));
+    }
+
+    #[cfg(feature = "yaml")]
+    #[test]
+    fn properties_override_yaml_in_the_same_layer() {
+        // Mirrors load_from's order: yaml first, then properties on top.
+        let c = Config::builder()
+            .yaml("server:\n  port: 8080")
+            .parse("server.port = 9090")
+            .build();
+        assert_eq!(c.get_or("server.port", 0u16), 9090, "properties wins over yaml");
     }
 
     #[test]
