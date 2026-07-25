@@ -118,6 +118,31 @@ fn the_full_login_protected_logout_flow() {
 }
 
 #[test]
+fn a_heartbeat_makes_the_user_show_up_online() {
+    with_server(|port| {
+        // Nobody has beaten yet → the online fragment shows zero.
+        let before = get(port, "/who", "");
+        assert!(before.contains("<strong>0</strong>"), "nobody online yet: {before}");
+
+        // Log in for a session cookie.
+        let login = get(port, "/login", "");
+        let csrf = extract(&login, "name=\"_csrf\" value=\"", "\"");
+        let body = format!("username=alice&password=secret&_csrf={csrf}");
+        let login_post = post(port, "/login", &format!("kw_csrf={csrf}"), &body);
+        let session = extract(&login_post, "set-cookie: kw_session=", ";");
+
+        // The tab beats.
+        let beat = post(port, "/heartbeat", &format!("kw_session={session}"), "");
+        assert!(beat.starts_with("HTTP/1.1 204"), "heartbeat accepted: {beat}");
+
+        // Now the online fragment lists alice, count one — rendered by th:each.
+        let who = get(port, "/who", &format!("kw_session={session}"));
+        assert!(who.contains("<strong>1</strong>"), "one user online: {who}");
+        assert!(who.contains("<li>alice</li>"), "alice is listed online: {who}");
+    });
+}
+
+#[test]
 fn a_post_without_a_csrf_token_is_forbidden() {
     // No kw_csrf cookie, no _csrf field → CSRF check fails.
     let resp = with_server(|port| post(port, "/login", "", "username=alice&password=secret"));

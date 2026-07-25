@@ -15,7 +15,7 @@
 //! the injectable request-scoped `SecurityContext` is KEP-0005, later.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use kernway_core::error::StatusCode;
 use kernway_core::request::Request;
@@ -23,9 +23,14 @@ use kernway_core::response::{IntoResponse, Response};
 use kernway_core::template::Value;
 use kernway_htmx::HtmxResponse;
 use kernway_security::session::{self, SessionConfig, SessionManager, MemorySessionStore};
-use kernway_security::{csrf, SecurityContext, SecurityHeaders};
+use kernway_security::{csrf, InMemoryPresence, Presence, SecurityContext, SecurityHeaders};
 use kernway_server::{BoxFuture, KernwayApp, Middleware, Next, RequestScope};
 use kernleaf::{Kernleaf, RenderContext};
+
+/// Unix seconds now — the clock for heartbeats.
+fn now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
 
 /// The auth middleware (KEP-0005/0006): every request, turn the session cookie into
 /// a `SecurityContext` and put it in the request scope. Downstream handlers and the
@@ -65,18 +70,38 @@ const LOGIN_PAGE: &str = r##"<!doctype html>
 </body></html>"##;
 
 const PROTECTED_PAGE: &str = r##"<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Home</title></head>
+<html lang="en"><head><meta charset="utf-8"><title>Home</title>
+<script src="https://unpkg.com/htmx.org@2.0.3"></script></head>
 <body>
 <h1>Welcome, <span th:text="${user}">user</span></h1>
 <div th:authorize="hasRole('ADMIN')"><p>Admin panel — you can see this.</p></div>
+
+<!-- Presence: POST a heartbeat on load and every 10s, so the server knows this
+     tab is alive. hx-swap="none" — the 204 reply changes nothing on the page. -->
+<div hx-post="/heartbeat" hx-trigger="load, every 10s" hx-swap="none"></div>
+
+<!-- Who is online right now — a fragment refreshed every 5s (htmx polling). -->
+<section>
+  <h2>Who's online</h2>
+  <div id="online" hx-get="/who" hx-trigger="load, every 5s">Loading…</div>
+</section>
+
 <form method="post" action="/logout" hx-post="/logout"><button>Log out</button></form>
 </body></html>"##;
+
+/// The `/who` fragment — the online list, rendered with kernleaf's `th:each`
+/// (standard Thymeleaf iteration). Swapped into `#online` by the poll above.
+const WHO_FRAGMENT: &str = r##"<p><strong th:text="${count}">0</strong> online</p>
+<ul>
+  <li th:each="u : ${users}" th:text="${u}">name</li>
+</ul>"##;
 
 /// Build the app bound to `addr`. Shared by the binary and the socket tests.
 pub fn build_app(addr: &str) -> KernwayApp {
     let mut engine = Kernleaf::new();
     engine.add("login", LOGIN_PAGE).expect("login template");
     engine.add("protected", PROTECTED_PAGE).expect("protected template");
+    engine.add("who", WHO_FRAGMENT).expect("who template");
     let engine = Arc::new(engine);
 
     // The session subsystem: an in-memory registry, a signing key, hour-long tokens.
@@ -87,10 +112,18 @@ pub fn build_app(addr: &str) -> KernwayApp {
         SessionConfig { token_ttl: Duration::from_secs(3600), ..SessionConfig::default() },
     ));
 
+    // Presence: who is *online* (beat within 30s), separate from who has a session.
+    // In-memory here; swap `InMemoryPresence` for `RedisPresence` to share liveness
+    // across instances — the handlers only see the `Presence` trait.
+    let presence: Arc<dyn Presence> = Arc::new(InMemoryPresence::new(Duration::from_secs(30)));
+
     let e_login = Arc::clone(&engine);
     let e_prot = Arc::clone(&engine);
+    let e_who = Arc::clone(&engine);
     let s_post = Arc::clone(&sessions);
     let s_logout = Arc::clone(&sessions);
+    let p_beat = Arc::clone(&presence);
+    let p_who = Arc::clone(&presence);
 
     KernwayApp::builder()
         .bind(addr)
@@ -111,11 +144,49 @@ pub fn build_app(addr: &str) -> KernwayApp {
             let e = Arc::clone(&e_prot);
             async move { show_protected(&ctx, &e) }
         })
+        // Heartbeat: the logged-in user's tab beating. Reads the SecurityContext
+        // from the scope; anonymous requests are a no-op.
+        .post("/heartbeat", move |_req: Request, scope: &RequestScope| {
+            let ctx = scope.get::<SecurityContext>().expect("auth middleware set a SecurityContext");
+            let p = Arc::clone(&p_beat);
+            async move { do_heartbeat(&ctx, p.as_ref()).await }
+        })
+        // Who's online now — the fragment the protected page polls.
+        .get("/who", move |_req: Request, _scope: &RequestScope| {
+            let p = Arc::clone(&p_who);
+            let e = Arc::clone(&e_who);
+            async move { show_who(p.as_ref(), &e).await }
+        })
         .post("/logout", move |req: Request, _scope: &RequestScope| {
             let s = Arc::clone(&s_logout);
             async move { do_logout(&req, &s).await }
         })
         .build()
+}
+
+/// POST /heartbeat — mark the authenticated user alive as of now.
+async fn do_heartbeat(ctx: &SecurityContext, presence: &dyn Presence) -> Response {
+    if let Some(user) = ctx.principal() {
+        // Best-effort: a presence-store hiccup should not fail the page.
+        if let Err(err) = presence.heartbeat(user, now()).await {
+            eprintln!("login-htmx: heartbeat failed: {err}");
+        }
+    }
+    Response::new(StatusCode::NO_CONTENT)
+}
+
+/// GET /who — render the online list as a kernleaf fragment (`th:each`).
+async fn show_who(presence: &dyn Presence, engine: &Kernleaf) -> Response {
+    let users = presence.online(now()).await.unwrap_or_default();
+    let count = users.len();
+    let model = Value::map([
+        ("count", Value::Int(count as i64)),
+        ("users", Value::seq(users.into_iter().map(Value::from))),
+    ]);
+    let html = engine
+        .render_with("who", &model, &RenderContext::new())
+        .unwrap_or_else(|e| format!("<p>template error: {e}</p>"));
+    html_response(html)
 }
 
 /// GET /login — the form, with a fresh CSRF token in both the field and the cookie.
