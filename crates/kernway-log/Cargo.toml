@@ -1,0 +1,20 @@
+[package]
+name        = "kernway-log"
+description = "Kernway logging — a small, dependency-free facade with levels, per-module filters, and Pretty/JSON output"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+homepage.workspace   = true
+rust-version.workspace = true
+
+# No dependencies: the facade is ours (KEP-0000 §1). A logger is a level check,
+# a format, and a write — not a reason to pull in `tracing`/`log` and their trees.
+[dependencies]
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true

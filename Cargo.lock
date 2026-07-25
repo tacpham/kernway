@@ -415,6 +415,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hello-log"
+version = "0.1.0"
+dependencies = [
+ "kernway-log",
+]
+
+[[package]]
 name = "hello-openapi"
 version = "0.1.0"
 dependencies = [
@@ -583,6 +590,10 @@ dependencies = [
  "kernway-core",
  "thiserror",
 ]
+
+[[package]]
+name = "kernway-log"
+version = "0.1.0"
 
 [[package]]
 name = "kernway-multipart"
