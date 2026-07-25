@@ -390,6 +390,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "hello-config"
+version = "0.1.0"
+dependencies = [
+ "kernway-config",
+ "kernway-log",
+]
+
+[[package]]
 name = "hello-di"
 version = "0.1.0"
 dependencies = [
@@ -560,6 +568,10 @@ version = "0.1.0"
 dependencies = [
  "kernway-cache-core",
 ]
+
+[[package]]
+name = "kernway-config"
+version = "0.1.0"
 
 [[package]]
 name = "kernway-core"
