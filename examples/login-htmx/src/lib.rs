@@ -39,13 +39,15 @@ impl Middleware for Authenticate {
         "Authenticate"
     }
     fn handle<'a>(&'a self, req: Request, scope: &'a RequestScope, next: Next<'a>) -> BoxFuture<'a, Response> {
-        // Compute the context before moving the request into the chain.
-        let ctx = {
-            let token = req.header("cookie").and_then(session::token_from_cookie);
-            self.sessions.authenticate(token)
-        };
-        scope.set(ctx);
-        next.run(req, scope)
+        Box::pin(async move {
+            // Authenticate (awaits the session store) before moving the request on.
+            let ctx = {
+                let token = req.header("cookie").and_then(session::token_from_cookie);
+                self.sessions.authenticate(token).await
+            };
+            scope.set(ctx);
+            next.run(req, scope).await
+        })
     }
 }
 
@@ -100,7 +102,7 @@ pub fn build_app(addr: &str) -> KernwayApp {
         })
         .post("/login", move |req: Request, _scope: &RequestScope| {
             let s = Arc::clone(&s_post);
-            async move { do_login(&req, &s) }
+            async move { do_login(&req, &s).await }
         })
         // /protected reads the SecurityContext the middleware set — pulled from the
         // scope synchronously, then owned by the future.
@@ -111,7 +113,7 @@ pub fn build_app(addr: &str) -> KernwayApp {
         })
         .post("/logout", move |req: Request, _scope: &RequestScope| {
             let s = Arc::clone(&s_logout);
-            async move { do_logout(&req, &s) }
+            async move { do_logout(&req, &s).await }
         })
         .build()
 }
@@ -129,7 +131,7 @@ fn render_login(engine: &Kernleaf) -> Response {
 }
 
 /// POST /login — verify CSRF, check credentials, issue a session.
-fn do_login(req: &Request, sessions: &SessionManager) -> Response {
+async fn do_login(req: &Request, sessions: &SessionManager) -> Response {
     // CSRF first: a state-changing request must carry a matching token.
     if !csrf::verify_request(req) {
         return (StatusCode::FORBIDDEN, "CSRF check failed").into_response();
@@ -143,7 +145,7 @@ fn do_login(req: &Request, sessions: &SessionManager) -> Response {
         return HtmxResponse::new("<p id=\"result\">Wrong username or password.</p>").into_response();
     }
 
-    let token = match sessions.login("alice", vec!["ADMIN".to_string()], "web") {
+    let token = match sessions.login("alice", vec!["ADMIN".to_string()], "web").await {
         Ok(t) => t,
         Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "too many sessions").into_response(),
     };
@@ -173,9 +175,9 @@ fn show_protected(ctx: &SecurityContext, engine: &Kernleaf) -> Response {
 }
 
 /// POST /logout — revoke the session and clear the cookie.
-fn do_logout(req: &Request, sessions: &SessionManager) -> Response {
+async fn do_logout(req: &Request, sessions: &SessionManager) -> Response {
     if let Some(token) = req.header("cookie").and_then(session::token_from_cookie) {
-        sessions.logout_token(token);
+        sessions.logout_token(token).await;
     }
     let mut resp = HtmxResponse::new("").redirect("/login").into_response();
     resp.headers.insert("set-cookie", &session::clear_cookie());
