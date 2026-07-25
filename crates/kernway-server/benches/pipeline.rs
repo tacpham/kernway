@@ -12,9 +12,11 @@
 //! exists this measures the floor, not the ceiling.
 
 use std::sync::Arc;
+use std::task::{Context, Poll, Waker};
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use di_core::AppContext;
+use di_core::{AppContext, RequestScope};
+use kernway_core::layer::BoxFuture;
 use kernway_core::{error::StatusCode, request::Request, response::Response};
 use kernway_http::{encode_response_with, parse_bytes, writer::Connection, Parsed};
 use kernway_server::router::{Handler, Router};
@@ -26,21 +28,38 @@ const PARAM_GET: &[u8] =
 
 fn app() -> (Router, AppContext) {
     let mut router = Router::new();
-    let ok: Handler = Arc::new(|_req, _ctx| {
-        Response::new(StatusCode::OK)
-            .content_type("application/json; charset=utf-8")
-            .body(br#"{"status":"ok"}"#.to_vec())
+    let ok: Handler = Arc::new(|_req: Request, _ctx: &RequestScope| {
+        Box::pin(async {
+            Response::new(StatusCode::OK)
+                .content_type("application/json; charset=utf-8")
+                .body(br#"{"status":"ok"}"#.to_vec())
+        }) as BoxFuture<'static, Response>
     });
-    let echo: Handler = Arc::new(|req: &Request, _ctx| {
+    let echo: Handler = Arc::new(|req: Request, _ctx: &RequestScope| {
         // Touch a path param, the way a real handler does.
         let id = req.path_params.get("id").cloned().unwrap_or_default();
-        Response::new(StatusCode::OK)
-            .content_type("application/json; charset=utf-8")
-            .body(format!(r#"{{"user":"{id}"}}"#).into_bytes())
+        Box::pin(async move {
+            Response::new(StatusCode::OK)
+                .content_type("application/json; charset=utf-8")
+                .body(format!(r#"{{"user":"{id}"}}"#).into_bytes())
+        }) as BoxFuture<'static, Response>
     });
     router.add("GET", "/health", ok);
     router.add("GET", "/users/{id}/posts/{post}", echo);
     (router, AppContext::new())
+}
+
+/// Drive a handler's future to its (immediate) result. The handlers here do no
+/// I/O, so they resolve on the first poll — this measures the box-allocate + poll
+/// a real request pays (KEP-0006), without the executor scheduling that a live
+/// server layers on top.
+fn drive(mut fut: BoxFuture<'static, Response>) -> Response {
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    match fut.as_mut().poll(&mut cx) {
+        Poll::Ready(response) => response,
+        Poll::Pending => unreachable!("a synchronous handler resolves on the first poll"),
+    }
 }
 
 /// One request, start to finish, in process: parse → route → handle → encode.
@@ -53,7 +72,8 @@ fn run_once(router: &Router, ctx: &AppContext, raw: &[u8]) -> Vec<u8> {
         .find(&request.method, &request.path)
         .expect("a route matches the fixture");
     request.path_params = params;
-    let response = handler(&request, ctx);
+    let scope = RequestScope::new(ctx);
+    let response = drive(handler(request, &scope));
     encode_response_with(&response, Connection::KeepAlive)
 }
 

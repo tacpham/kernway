@@ -211,7 +211,13 @@ common real handler in the cold.
 
 ## Unresolved questions
 
-- **Box vs enum**, decided by the pipeline benchmark after the first cut lands.
+- **Box vs enum** — *resolved: keep the box.* With the first cut landed, the
+  `pipeline` bench measures the full parse → route → handle → encode path at
+  ~404 ns (static) / ~668 ns (param), the boxed future + request scope + a single
+  poll included. The box is a small, bounded addition that leaves the pipeline in
+  the same ~400 ns range it sat in before, and the dynamic router needs *a* boxed
+  future regardless — an enum would not remove the allocation, only the vtable.
+  Not worth the complexity.
 - **Async closures vs macro boxing** — whether `.get(|req, scope| async { … })`
   relies on stable async closures or the `#[route]` macro wraps a plain `async fn`.
   Leaning on async closures where the toolchain allows, with the macro for the

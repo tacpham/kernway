@@ -15,7 +15,8 @@ use kernway_server::router::{Handler, Router};
 /// parameterised, spread over several resources.
 fn router_with(pairs: usize) -> Router {
     let mut router = Router::new();
-    let handler: Handler = Arc::new(|_req, _ctx| Response::new(StatusCode::OK));
+    let handler: Handler =
+        Arc::new(|_req, _ctx| Box::pin(async { Response::new(StatusCode::OK) }));
     for i in 0..pairs {
         router.add("GET", &format!("/resource{i}/items"), Arc::clone(&handler));
         router.add("GET", &format!("/resource{i}/items/{{id}}"), Arc::clone(&handler));
