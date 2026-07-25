@@ -460,6 +460,19 @@ mod tests {
     }
 
     #[test]
+    fn the_idle_timeout_logs_out_an_inactive_session() {
+        let mgr = manager();
+        mgr.reconfigure(|c| {
+            c.token_ttl = Duration::from_secs(10_000);
+            c.absolute_timeout = Duration::from_secs(10_000); // not the cause here
+            c.idle_timeout = Some(Duration::from_secs(100)); // 100s of inactivity
+        });
+        let token = block(mgr.login_at("alice", vec![], "d", 1000)).unwrap();
+        assert!(block(mgr.authenticate_at(Some(&token), 1000 + 50)).is_authenticated(), "still active");
+        assert!(!block(mgr.authenticate_at(Some(&token), 1000 + 101)).is_authenticated(), "idle past 100s → out");
+    }
+
+    #[test]
     fn max_sessions_refuses_a_new_login() {
         let mgr = manager();
         mgr.reconfigure(|c| c.max_sessions = Some(1));
@@ -518,5 +531,144 @@ mod tests {
         // A role change bumps the version → the old token's version no longer matches.
         accounts.0.lock().unwrap().get_mut("alice").unwrap().version = 2;
         assert!(!block(mgr.authenticate(Some(&token))).is_authenticated(), "account change → logged out");
+    }
+
+    // --- the same force-logout conditions, over a real Redis registry -------
+    //
+    // These prove that revocation-by-condition (timeout, idle, subscription
+    // expiry, deactivation, version bump) still logs a session out when the
+    // registry is Redis, not just in-memory — the whole point of the distributed
+    // backend. They need a server, so they are `#[ignore]`d; run with:
+    //
+    //   docker run -d --rm --name kw-redis -p 6380:6379 redis:alpine
+    //   KW_REDIS_ADDR=127.0.0.1:6380 cargo test -p kernway-security --features redis \
+    //     session::tests::redis_seam -- --ignored
+    //
+    // Each uses a distinct username and cleans up first, so a re-run is idempotent.
+    #[cfg(feature = "redis")]
+    mod redis_seam {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        use crate::session::{Account, AccountStatus, SessionConfig, SessionManager};
+        use crate::RedisSessionStore;
+
+        /// Drive a real (network-backed) future to completion on rt-core.
+        fn block<T>(fut: impl std::future::Future<Output = T>) -> T {
+            rt_core::Executor::new().unwrap().block_on(fut).unwrap()
+        }
+
+        fn addr() -> std::net::SocketAddr {
+            std::env::var("KW_REDIS_ADDR")
+                .unwrap_or_else(|_| "127.0.0.1:6379".to_string())
+                .parse()
+                .expect("KW_REDIS_ADDR must be host:port")
+        }
+
+        fn redis_manager() -> SessionManager {
+            let store = RedisSessionStore::new(addr(), Duration::from_secs(3600));
+            SessionManager::new(Box::new(store), "redis-seam-key", SessionConfig::default())
+        }
+
+        struct Accounts(Mutex<HashMap<String, Account>>);
+        impl AccountStatus for Accounts {
+            fn account(&self, user: &str) -> Option<Account> {
+                self.0.lock().unwrap().get(user).cloned()
+            }
+        }
+
+        fn redis_manager_with_account(user: &str, acc: Account) -> (SessionManager, Arc<Accounts>) {
+            let mut map = HashMap::new();
+            map.insert(user.to_string(), acc);
+            let accounts = Arc::new(Accounts(Mutex::new(map)));
+            struct Fwd(Arc<Accounts>);
+            impl AccountStatus for Fwd {
+                fn account(&self, u: &str) -> Option<Account> {
+                    self.0.account(u)
+                }
+            }
+            let store = RedisSessionStore::new(addr(), Duration::from_secs(3600));
+            let mgr = SessionManager::new(Box::new(store), "redis-seam-key", SessionConfig::default())
+                .with_accounts(Box::new(Fwd(accounts.clone())));
+            (mgr, accounts)
+        }
+
+        #[test]
+        #[ignore = "needs a Redis server (set KW_REDIS_ADDR or run one on 127.0.0.1:6379)"]
+        fn absolute_timeout_logs_out_over_redis() {
+            let mgr = redis_manager();
+            block(async {
+                let user = "seam-abs";
+                mgr.logout_user(user).await;
+                mgr.reconfigure(|c| {
+                    c.token_ttl = Duration::from_secs(10_000);
+                    c.absolute_timeout = Duration::from_secs(300);
+                });
+                let token = mgr.login_at(user, vec![], "d", 1000).await.unwrap();
+                assert!(mgr.authenticate_at(Some(&token), 1000 + 299).await.is_authenticated(), "within 5 min");
+                assert!(!mgr.authenticate_at(Some(&token), 1000 + 301).await.is_authenticated(), "past 5 min → out");
+            });
+        }
+
+        #[test]
+        #[ignore = "needs a Redis server (set KW_REDIS_ADDR or run one on 127.0.0.1:6379)"]
+        fn idle_timeout_logs_out_over_redis() {
+            let mgr = redis_manager();
+            block(async {
+                let user = "seam-idle";
+                mgr.logout_user(user).await;
+                mgr.reconfigure(|c| {
+                    c.token_ttl = Duration::from_secs(10_000);
+                    c.absolute_timeout = Duration::from_secs(10_000);
+                    c.idle_timeout = Some(Duration::from_secs(100));
+                });
+                let token = mgr.login_at(user, vec![], "d", 1000).await.unwrap();
+                assert!(mgr.authenticate_at(Some(&token), 1000 + 50).await.is_authenticated(), "still active");
+                assert!(!mgr.authenticate_at(Some(&token), 1000 + 101).await.is_authenticated(), "idle past 100s → out");
+            });
+        }
+
+        #[test]
+        #[ignore = "needs a Redis server (set KW_REDIS_ADDR or run one on 127.0.0.1:6379)"]
+        fn expired_subscription_logs_out_over_redis() {
+            let user = "seam-expire";
+            let (mgr, _accounts) = redis_manager_with_account(user, Account { active: true, expires: Some(500), version: 1 });
+            block(async {
+                mgr.logout_user(user).await;
+                let token = mgr.login_at(user, vec![], "d", 100).await.unwrap();
+                assert!(mgr.authenticate_at(Some(&token), 400).await.is_authenticated(), "before expiry");
+                assert!(!mgr.authenticate_at(Some(&token), 600).await.is_authenticated(), "after subscription expiry → out");
+            });
+        }
+
+        #[test]
+        #[ignore = "needs a Redis server (set KW_REDIS_ADDR or run one on 127.0.0.1:6379)"]
+        fn deactivated_account_logs_out_over_redis() {
+            let user = "seam-active";
+            let (mgr, accounts) = redis_manager_with_account(user, Account { active: true, expires: None, version: 1 });
+            block(async {
+                mgr.logout_user(user).await;
+                let token = mgr.login(user, vec!["USER".to_string()], "d").await.unwrap();
+                assert!(mgr.authenticate(Some(&token)).await.is_authenticated());
+                accounts.0.lock().unwrap().get_mut(user).unwrap().active = false;
+                assert!(!mgr.authenticate(Some(&token)).await.is_authenticated(), "disabled → out");
+            });
+        }
+
+        #[test]
+        #[ignore = "needs a Redis server (set KW_REDIS_ADDR or run one on 127.0.0.1:6379)"]
+        fn version_bump_logs_out_over_redis() {
+            let user = "seam-version";
+            let (mgr, accounts) = redis_manager_with_account(user, Account { active: true, expires: None, version: 1 });
+            block(async {
+                mgr.logout_user(user).await;
+                let token = mgr.login(user, vec!["ADMIN".to_string()], "d").await.unwrap();
+                assert!(mgr.authenticate(Some(&token)).await.is_authenticated());
+                // A role change bumps the version → the old token no longer matches.
+                accounts.0.lock().unwrap().get_mut(user).unwrap().version = 2;
+                assert!(!mgr.authenticate(Some(&token)).await.is_authenticated(), "account change → out");
+            });
+        }
     }
 }
