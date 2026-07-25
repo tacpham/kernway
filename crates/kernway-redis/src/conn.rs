@@ -146,4 +146,58 @@ impl Connection {
     pub async fn scard(&mut self, key: &str) -> Result<i64, RedisError> {
         Ok(self.command(&[b"SCARD", key.as_bytes()]).await?.as_int().unwrap_or(0))
     }
+
+    // --- sorted sets (for presence: score = last-heartbeat timestamp) -------
+
+    /// `ZADD key score member` — add or update a member's score.
+    pub async fn zadd(&mut self, key: &str, score: i64, member: &str) -> Result<(), RedisError> {
+        let score = score.to_string();
+        self.command(&[b"ZADD", key.as_bytes(), score.as_bytes(), member.as_bytes()]).await?;
+        Ok(())
+    }
+
+    /// `ZSCORE key member` → the member's score, or `None` if it is not present.
+    pub async fn zscore(&mut self, key: &str, member: &str) -> Result<Option<i64>, RedisError> {
+        match self.command(&[b"ZSCORE", key.as_bytes(), member.as_bytes()]).await? {
+            Value::Bulk(bytes) => Ok(std::str::from_utf8(&bytes).ok().and_then(|s| s.parse().ok())),
+            Value::Nil => Ok(None),
+            other => Err(RedisError::unexpected("ZSCORE", &other)),
+        }
+    }
+
+    /// `ZRANGEBYSCORE key min max` → members whose score is in `[min, max]`, as
+    /// strings. `min`/`max` are the raw Redis bounds (`"-inf"`, `"+inf"`, a number,
+    /// or `"(1700"` for exclusive).
+    pub async fn zrangebyscore(&mut self, key: &str, min: &str, max: &str) -> Result<Vec<String>, RedisError> {
+        match self.command(&[b"ZRANGEBYSCORE", key.as_bytes(), min.as_bytes(), max.as_bytes()]).await? {
+            Value::Array(items) => Ok(items
+                .into_iter()
+                .filter_map(|v| match v {
+                    Value::Bulk(b) => String::from_utf8(b).ok(),
+                    _ => None,
+                })
+                .collect()),
+            Value::Nil => Ok(Vec::new()),
+            other => Err(RedisError::unexpected("ZRANGEBYSCORE", &other)),
+        }
+    }
+
+    /// `ZCOUNT key min max` → how many members score within `[min, max]`.
+    pub async fn zcount(&mut self, key: &str, min: &str, max: &str) -> Result<i64, RedisError> {
+        Ok(self
+            .command(&[b"ZCOUNT", key.as_bytes(), min.as_bytes(), max.as_bytes()])
+            .await?
+            .as_int()
+            .unwrap_or(0))
+    }
+
+    /// `ZREMRANGEBYSCORE key min max` → drop members scoring within `[min, max]`
+    /// (prunes stale heartbeats). Returns how many were removed.
+    pub async fn zremrangebyscore(&mut self, key: &str, min: &str, max: &str) -> Result<i64, RedisError> {
+        Ok(self
+            .command(&[b"ZREMRANGEBYSCORE", key.as_bytes(), min.as_bytes(), max.as_bytes()])
+            .await?
+            .as_int()
+            .unwrap_or(0))
+    }
 }
