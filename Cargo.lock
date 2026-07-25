@@ -637,11 +637,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernway-redis"
+version = "0.1.0"
+dependencies = [
+ "rt-core",
+ "rt-net",
+]
+
+[[package]]
 name = "kernway-security"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "getrandom",
  "kernway-core",
+ "kernway-redis",
+ "rt-core",
 ]
 
 [[package]]

@@ -141,4 +141,9 @@ impl Connection {
         self.command(&[b"EXPIRE", key.as_bytes(), ttl.as_bytes()]).await?;
         Ok(())
     }
+
+    /// `SCARD key` → the number of members in a set (0 for a missing key).
+    pub async fn scard(&mut self, key: &str) -> Result<i64, RedisError> {
+        Ok(self.command(&[b"SCARD", key.as_bytes()]).await?.as_int().unwrap_or(0))
+    }
 }

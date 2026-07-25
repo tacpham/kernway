@@ -28,6 +28,13 @@ pub mod hash;
 pub mod token;
 pub mod session;
 
+/// Redis-backed [`SessionStore`](session::SessionStore) — the distributed backend
+/// (feature = `redis`).
+#[cfg(feature = "redis")]
+pub mod redis_store;
+#[cfg(feature = "redis")]
+pub use redis_store::RedisSessionStore;
+
 use kernway_core::layer::{BoxFuture, Layer, Next};
 use kernway_core::request::Request;
 use kernway_core::response::Response;
