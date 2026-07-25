@@ -31,6 +31,8 @@ kernway-security = { workspace = true, optional = true }   # CSRF, headers, sess
 default = []
 ## Typed `HX-*` request extraction and response headers (htmx 2.0.x).
 htmx = ["dep:kernway-htmx"]
+## Also read application.yml (in addition to .properties) for configuration.
+yaml = ["kernway-config/yaml"]
 ## Security: CSRF tokens, security headers, and sessions (KEP-0004).
 security = ["dep:kernway-security"]
 ## Presence / heartbeat — who is online now. Independent of `security`.

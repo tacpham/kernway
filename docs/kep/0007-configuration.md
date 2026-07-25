@@ -121,8 +121,14 @@ override. Kept as a small helper at the app/meta layer, not a dependency edge fr
 
 - **`#[configuration]` derive + DI binding.** Specified above; the macro and the
   bean registration are the next slice. The loose `Config` API lands first.
-- **YAML.** Spring's other format; a parser (or dependency) later if wanted. Properties
-  covers the flat, per-module keys this KEP is about.
+- **YAML** — *built, behind the `yaml` feature.* `application.yml` /
+  `application-{profile}.yml` are read and **flattened into the same dotted-key map**
+  (a nested map → `a.b.c`, a sequence → indexed `a.0`/`a.1`), so `get`, `with_prefix`,
+  `#[configuration]`, and the logging bridge are unchanged. YAML is the one format not
+  hand-rolled — its spec (anchors, aliases, implicit typing) is the responsible-
+  dependency case (`yaml-rust2`, a maintained pure-Rust parser; `serde_yaml` is
+  archived). Off by default: the properties baseline stays dependency-free. Real
+  lists still need a richer `Config` type (below); indexed keys are the interim.
 - **`${...}` interpolation and `@ConfigurationProperties` relaxed binding.** Later.
 
 ## Drawbacks

@@ -13,6 +13,15 @@ rust-version.workspace = true
 # (KEP-0007 / KEP-0000 §1) — config load is not a hot path and not a reason to pull
 # in toml/serde/yaml.
 [dependencies]
+# YAML is the one format we do NOT hand-roll — its spec (anchors, aliases, implicit
+# typing) is thousands of lines, the responsible-dependency case (KEP-0007). Behind
+# a feature: off by default, the properties baseline stays dependency-free.
+yaml-rust2 = { version = "0.10", optional = true }
+
+[features]
+# Also read application.yml / application-{profile}.yml, flattened into the same
+# dotted-key Config.
+yaml = ["dep:yaml-rust2"]
 
 [dev-dependencies]
 di-macro = { workspace = true } # exercises the #[configuration] derive
