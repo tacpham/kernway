@@ -120,9 +120,9 @@ fn the_full_login_protected_logout_flow() {
 #[test]
 fn a_heartbeat_makes_the_user_show_up_online() {
     with_server(|port| {
-        // Nobody has beaten yet → the online fragment shows zero.
-        let before = get(port, "/who", "");
-        assert!(before.contains("<strong>0</strong>"), "nobody online yet: {before}");
+        // The online list is gated: an anonymous caller does not see it.
+        let anon = get(port, "/who", "");
+        assert!(anon.contains("Log in to see"), "anonymous is gated: {anon}");
 
         // Log in for a session cookie.
         let login = get(port, "/login", "");
@@ -130,13 +130,18 @@ fn a_heartbeat_makes_the_user_show_up_online() {
         let body = format!("username=alice&password=secret&_csrf={csrf}");
         let login_post = post(port, "/login", &format!("kw_csrf={csrf}"), &body);
         let session = extract(&login_post, "set-cookie: kw_session=", ";");
+        let cookie = format!("kw_session={session}");
+
+        // Logged in but not beaten yet → the online fragment shows zero.
+        let before = get(port, "/who", &cookie);
+        assert!(before.contains("<strong>0</strong>"), "nobody online yet: {before}");
 
         // The tab beats.
-        let beat = post(port, "/heartbeat", &format!("kw_session={session}"), "");
+        let beat = post(port, "/heartbeat", &cookie, "");
         assert!(beat.starts_with("HTTP/1.1 204"), "heartbeat accepted: {beat}");
 
         // Now the online fragment lists alice, count one — rendered by th:each.
-        let who = get(port, "/who", &format!("kw_session={session}"));
+        let who = get(port, "/who", &cookie);
         assert!(who.contains("<strong>1</strong>"), "one user online: {who}");
         assert!(who.contains("<li>alice</li>"), "alice is listed online: {who}");
     });

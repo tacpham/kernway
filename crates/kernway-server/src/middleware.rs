@@ -82,14 +82,17 @@ impl Middleware for LoggingMiddleware {
             let start = std::time::Instant::now();
             let method = req.method.clone();
             let path = req.path.clone();
+            // Capture the request id from the request an upstream middleware set
+            // (RequestIdMiddleware, if before this one) — it identifies the request,
+            // and is on the response only after the handler returns.
+            let request_id = req.headers.get("x-request-id").unwrap_or("-").to_string();
             let resp = next.run(req, scope).await;
             // The access log line, through the framework logger (KW_LOG controls it).
             kernway_log::info!(
                 target: "kernway_server",
-                "{method} {path} -> {} ({}ms) req={}",
+                "{method} {path} -> {} ({}ms) req={request_id}",
                 resp.status.0,
                 start.elapsed().as_millis(),
-                resp.headers.get("x-request-id").unwrap_or("-"),
             );
             resp
         })
