@@ -129,6 +129,16 @@ A `SessionStore` is a trait so a multi-instance deployment swaps in Redis or SQL
 without touching the manager; the in-memory backend is for a single instance and
 for tests.
 
+**The trait is async** (each method returns a `BoxFuture`), so a Redis/SQL backend
+can `.await` its network call without blocking a core — the reason KEP-0006 landed
+first. Uniformly async, not sync-by-default-async-under-a-feature: the in-memory
+store wraps its `RwLock` read in a ready future, and the `session_store` bench
+(`crates/kernway-security/benches`) measures what that costs — the box adds ~21 ns
+to a ~50 ns `get`, which is ~1.3% of the ~1.6 µs HMAC verify the auth path runs on
+*every* request before it reaches the store. The box is noise where it matters, so
+one async model wins over two trait shapes. `authenticate`/`login`/`logout` on the
+manager become async in turn, which the async middleware chain (KEP-0006) awaits.
+
 ### The manager
 
 `SessionManager<S: SessionStore>` holds the store, the signing key, and a live

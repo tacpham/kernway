@@ -17,6 +17,16 @@ kernway-core = { workspace = true } # Request/Response/Layer integration
 # OS RNG, small and audited — the responsible dependency, like mio for I/O.
 getrandom = "0.2"
 
+[dev-dependencies]
+criterion = { workspace = true }
+
+# Weighs the cost of making SessionStore async (a boxed future per call) against
+# the sync call and against the HMAC verify the auth path pays regardless —
+# the measurement behind the KEP-0004 sync-vs-async-store decision.
+[[bench]]
+name    = "session_store"
+harness = false
+
 [lints]
 workspace = true
 
