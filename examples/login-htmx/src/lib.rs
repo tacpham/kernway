@@ -24,8 +24,31 @@ use kernway_core::template::Value;
 use kernway_htmx::HtmxResponse;
 use kernway_security::session::{self, SessionConfig, SessionManager, MemorySessionStore};
 use kernway_security::{csrf, SecurityContext, SecurityHeaders};
-use kernway_server::KernwayApp;
+use kernway_server::{KernwayApp, Middleware, RequestScope};
 use kernleaf::{Kernleaf, RenderContext};
+
+/// The auth middleware (KEP-0005): every request, turn the session cookie into a
+/// `SecurityContext` and put it in the request scope. Downstream handlers and the
+/// template read it from the scope instead of authenticating themselves.
+struct Authenticate {
+    sessions: Arc<SessionManager>,
+}
+
+impl Middleware for Authenticate {
+    fn name(&self) -> &'static str {
+        "Authenticate"
+    }
+    fn handle(
+        &self,
+        req: &mut Request,
+        scope: &RequestScope,
+        next: &dyn Fn(&mut Request) -> Response,
+    ) -> Response {
+        let token = req.header("cookie").and_then(session::token_from_cookie);
+        scope.set(self.sessions.authenticate(token));
+        next(req)
+    }
+}
 
 const LOGIN_PAGE: &str = r##"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Log in</title>
@@ -66,15 +89,17 @@ pub fn build_app(addr: &str) -> KernwayApp {
     let e_login = Arc::clone(&engine);
     let e_prot = Arc::clone(&engine);
     let s_post = Arc::clone(&sessions);
-    let s_prot = Arc::clone(&sessions);
     let s_logout = Arc::clone(&sessions);
 
     KernwayApp::builder()
         .bind(addr)
-        .get("/login", move |_req, _ctx| render_login(&e_login))
-        .post("/login", move |req, _ctx| do_login(req, &s_post))
-        .get("/protected", move |req, _ctx| show_protected(req, &e_prot, &s_prot))
-        .post("/logout", move |req, _ctx| do_logout(req, &s_logout))
+        // The auth middleware runs on every request and populates the scope.
+        .layer(Authenticate { sessions: Arc::clone(&sessions) })
+        .get("/login", move |_req, _scope| render_login(&e_login))
+        .post("/login", move |req, _scope| do_login(req, &s_post))
+        // /protected reads the SecurityContext the middleware set — no auth here.
+        .get("/protected", move |_req, scope| show_protected(scope, &e_prot))
+        .post("/logout", move |req, _scope| do_logout(req, &s_logout))
         .build()
 }
 
@@ -116,10 +141,11 @@ fn do_login(req: &Request, sessions: &SessionManager) -> Response {
     resp
 }
 
-/// GET /protected — authenticate the session cookie, render role-gated content.
-fn show_protected(req: &Request, engine: &Kernleaf, sessions: &SessionManager) -> Response {
-    let token = req.header("cookie").and_then(session::token_from_cookie);
-    let ctx: SecurityContext = sessions.authenticate(token);
+/// GET /protected — read the SecurityContext the auth middleware put in the scope
+/// (KEP-0005), render role-gated content or bounce to /login.
+fn show_protected(scope: &RequestScope, engine: &Kernleaf) -> Response {
+    // Injected from the request scope — the middleware set it, we just read it.
+    let ctx = scope.get::<SecurityContext>().expect("auth middleware set a SecurityContext");
 
     if !ctx.is_authenticated() {
         // Not logged in → send them to the login page.
@@ -129,7 +155,7 @@ fn show_protected(req: &Request, engine: &Kernleaf, sessions: &SessionManager) -
     let user = ctx.principal().unwrap_or("").to_string();
     let model = Value::map([("user", Value::from(user))]);
     let html = engine
-        .render_with("protected", &model, &RenderContext::new().authorize(&ctx))
+        .render_with("protected", &model, &RenderContext::new().authorize(ctx.as_ref()))
         .unwrap_or_else(|e| format!("<p>template error: {e}</p>"));
     let mut resp = html_response(html);
     SecurityHeaders::strict().apply(&mut resp);

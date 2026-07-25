@@ -1,3 +1,4 @@
+use di_core::RequestScope;
 use kernway_core::{request::Request, response::Response};
 
 /// Sync middleware trait — intercept request/response.
@@ -8,8 +9,16 @@ pub trait Middleware: Send + Sync + 'static {
     /// Work before `next(req)` sees the request on the way in; work after it
     /// sees the response on the way out. Returning without calling `next`
     /// short-circuits the chain — how auth rejects a request before it reaches
-    /// the handler.
-    fn handle(&self, req: &mut Request, next: &dyn Fn(&mut Request) -> Response) -> Response;
+    /// the handler. `scope` is the per-request DI scope ([KEP-0005]): set a
+    /// request-scoped bean here (a `SecurityContext`) and the handler injects it.
+    ///
+    /// [KEP-0005]: https://github.com/tacpham/kernway/blob/main/docs/kep/0005-request-scoped-beans.md
+    fn handle(
+        &self,
+        req: &mut Request,
+        scope: &RequestScope,
+        next: &dyn Fn(&mut Request) -> Response,
+    ) -> Response;
 
     /// Short name used in logs and for conflict reporting.
     fn name(&self) -> &'static str;
@@ -23,7 +32,7 @@ impl Middleware for RequestIdMiddleware {
         "RequestId"
     }
 
-    fn handle(&self, req: &mut Request, next: &dyn Fn(&mut Request) -> Response) -> Response {
+    fn handle(&self, req: &mut Request, _scope: &RequestScope, next: &dyn Fn(&mut Request) -> Response) -> Response {
         let id = generate_request_id();
         req.headers.insert("x-request-id", &id);
         let mut resp = next(req);
@@ -40,7 +49,7 @@ impl Middleware for LoggingMiddleware {
         "Logging"
     }
 
-    fn handle(&self, req: &mut Request, next: &dyn Fn(&mut Request) -> Response) -> Response {
+    fn handle(&self, req: &mut Request, _scope: &RequestScope, next: &dyn Fn(&mut Request) -> Response) -> Response {
         let start = std::time::Instant::now();
         let method = req.method.clone();
         let path = req.path.clone();
@@ -69,14 +78,17 @@ fn generate_request_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::{LoggingMiddleware, Middleware, RequestIdMiddleware};
+    use di_core::{AppContext, RequestScope};
     use kernway_core::{error::StatusCode, request::Request, response::Response};
 
     #[test]
     fn request_id_middleware_adds_header() {
         let middleware = RequestIdMiddleware;
         let mut req = Request::new("GET", "/ping");
+        let app = AppContext::new();
+        let scope = RequestScope::new(&app);
 
-        let resp = middleware.handle(&mut req, &|request| {
+        let resp = middleware.handle(&mut req, &scope, &|request| {
             let mut resp = Response::new(StatusCode::OK);
             if let Some(id) = request.headers.get("x-request-id") {
                 resp.headers.insert("seen-request-id", &id.to_string());
@@ -93,8 +105,10 @@ mod tests {
     fn logging_middleware_passes_through() {
         let middleware = LoggingMiddleware;
         let mut req = Request::new("GET", "/health");
+        let app = AppContext::new();
+        let scope = RequestScope::new(&app);
 
-        let resp = middleware.handle(&mut req, &|_| {
+        let resp = middleware.handle(&mut req, &scope, &|_| {
             Response::new(StatusCode::NO_CONTENT)
         });
 

@@ -17,11 +17,15 @@ use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 
-use di_core::AppContext;
+use di_core::RequestScope;
 use kernway_core::{request::Request, response::Response};
 
-/// Handler function type — receives a request and context, returns a response.
-pub type Handler = Arc<dyn Fn(&Request, &AppContext) -> Response + Send + Sync>;
+/// Handler function type — receives a request and the per-request DI scope
+/// ([KEP-0005]), returns a response. The scope resolves request-scoped beans
+/// (a `SecurityContext`, a CSRF token) and falls back to the application singletons.
+///
+/// [KEP-0005]: https://github.com/tacpham/kernway/blob/main/docs/kep/0005-request-scoped-beans.md
+pub type Handler = Arc<dyn Fn(&Request, &RequestScope) -> Response + Send + Sync>;
 
 /// FNV-1a, for hashing path segments in the trie's static children.
 ///
@@ -205,6 +209,7 @@ fn placeholder(segment: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use di_core::AppContext;
 
     /// A router of named routes, so tests can assert *which* one answered.
     fn labelled(routes: &[(&str, &'static str, &'static str)]) -> Router {
@@ -221,8 +226,9 @@ mod tests {
     /// Which route answered `method path`, by its label, and the params it saw.
     fn hit(router: &Router, method: &str, path: &str) -> Option<(String, HashMap<String, String>)> {
         let (handler, params) = router.find(method, path)?;
-        let ctx = AppContext::new();
-        let resp = handler(&Request::new(method, path), &ctx);
+        let app = AppContext::new();
+        let scope = RequestScope::new(&app);
+        let resp = handler(&Request::new(method, path), &scope);
         Some((String::from_utf8(resp.body_bytes().to_vec()).unwrap(), params))
     }
 

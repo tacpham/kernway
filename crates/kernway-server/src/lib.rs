@@ -44,4 +44,8 @@ pub mod app;
 pub mod middleware;
 
 pub use app::{AppBuilder, KeepAliveConfig, KernwayApp};
+pub use middleware::Middleware;
 pub use router::Router;
+// The per-request DI scope handlers receive (KEP-0005), re-exported so a handler
+// signature `|req, scope| …` needs only kernway-server in scope.
+pub use di_core::RequestScope;
