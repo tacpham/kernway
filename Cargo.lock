@@ -526,6 +526,7 @@ dependencies = [
  "di-macro",
  "kernway-core",
  "kernway-htmx",
+ "kernway-security",
  "kernway-server",
  "kernway-web",
 ]

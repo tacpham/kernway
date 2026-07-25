@@ -19,7 +19,8 @@ di-core        = { workspace = true }
 di-macro       = { workspace = true }
 
 # Optional — off by default, code and compile cost only when the feature is on.
-kernway-htmx   = { workspace = true, optional = true }   # Htmx, HtmxResponse, Swap
+kernway-htmx     = { workspace = true, optional = true }   # Htmx, HtmxResponse, Swap
+kernway-security = { workspace = true, optional = true }   # CSRF, headers, sessions, presence
 
 # Capability features. The first of them: `htmx` is the model every later
 # capability (orm, cache, openapi, a template engine) follows —
@@ -28,6 +29,11 @@ kernway-htmx   = { workspace = true, optional = true }   # Htmx, HtmxResponse, S
 default = []
 ## Typed `HX-*` request extraction and response headers (htmx 2.0.x).
 htmx = ["dep:kernway-htmx"]
+## Security: CSRF tokens, security headers, sessions (KEP-0004), and presence.
+security = ["dep:kernway-security"]
+## Redis-backed session store and presence — a shared registry for a
+## multi-instance deployment. Implies `security`.
+redis = ["security", "kernway-security/redis"]
 
 [lints]
 workspace = true

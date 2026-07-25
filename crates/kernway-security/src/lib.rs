@@ -31,6 +31,8 @@ pub mod session;
 /// Presence / heartbeat — who is online now, distinct from who has a session.
 pub mod presence;
 pub use presence::{InMemoryPresence, Presence};
+#[cfg(feature = "redis")]
+pub use presence::RedisPresence;
 
 /// Redis-backed [`SessionStore`](session::SessionStore) — the distributed backend
 /// (feature = `redis`).

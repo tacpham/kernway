@@ -36,6 +36,8 @@
 //! | Feature | Brings in | Adds to the prelude |
 //! |---|---|---|
 //! | `htmx` | typed `HX-*` request extraction and response headers (htmx 2.0.x) | `Htmx`, `HtmxResponse`, `Swap` |
+//! | `security` | CSRF tokens, security headers, sessions (KEP-0004), presence | `SecurityContext`, `SecurityHeaders`, `Presence`, `InMemoryPresence` |
+//! | `redis` | Redis-backed session store and presence (implies `security`) | + `RedisSessionStore`, `RedisPresence` |
 
 // --- HTTP vocabulary (kernway-core) ---
 pub use kernway_core::prelude::*;
@@ -53,6 +55,15 @@ pub use kernway_web::{Html, Json, Path, ProblemDetail, Query};
 // --- htmx: typed HX-* extraction and response headers (feature = "htmx") ---
 #[cfg(feature = "htmx")]
 pub use kernway_htmx::{Htmx, HtmxResponse, Swap};
+
+// --- security: CSRF, headers, sessions, presence (feature = "security") ---
+#[cfg(feature = "security")]
+pub use kernway_security::{
+    self, csrf, presence, session, InMemoryPresence, Presence, SecurityContext, SecurityHeaders,
+};
+// The Redis-backed backends (feature = "redis", which implies "security").
+#[cfg(feature = "redis")]
+pub use kernway_security::{RedisPresence, RedisSessionStore};
 
 // --- DI ---
 pub use di_core::{AppContext, BeanEntry, DiError};
@@ -78,6 +89,9 @@ pub mod prelude {
     // htmx (feature = "htmx")
     #[cfg(feature = "htmx")]
     pub use crate::{Htmx, HtmxResponse, Swap};
+    // security (feature = "security")
+    #[cfg(feature = "security")]
+    pub use crate::{InMemoryPresence, Presence, SecurityContext, SecurityHeaders};
     // DI
     pub use crate::{AppContext, BeanEntry, DiError, KernwayComponent, KernwayController};
     // Macros
