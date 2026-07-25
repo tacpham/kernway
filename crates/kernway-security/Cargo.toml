@@ -41,6 +41,11 @@ rt-core = { workspace = true }
 name    = "session_store"
 harness = false
 
+[[bench]]
+name              = "presence"
+harness           = false
+required-features = ["presence"]
+
 [lints]
 workspace = true
 
