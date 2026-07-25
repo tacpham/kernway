@@ -59,6 +59,26 @@ pub struct SessionRecord {
     pub meta: String,
 }
 
+/// A session store backend failed — the network, the protocol, whatever the
+/// backend surfaces. The in-memory store never produces one; a Redis/SQL backend
+/// does when it is unreachable, and the manager turns that into a real error at
+/// `login` rather than a silent half-success.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreError {
+    /// The backing store (Redis, SQL, …) errored. The string is the backend's message.
+    Backend(String),
+}
+
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StoreError::Backend(message) => write!(f, "session store backend error: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for StoreError {}
+
 /// The session registry — an index of live sessions, keyed by `sid`. The default
 /// backend is in-memory; a trait so Redis/SQL can be swapped in for scale.
 ///
@@ -68,23 +88,29 @@ pub struct SessionRecord {
 /// The returned futures borrow `&self` and are awaited within `authenticate`'s own
 /// frame, so they need only be `Send`, not `'static`.
 ///
+/// Every method is **fallible** ([`StoreError`]): a remote store can be unreachable,
+/// and swallowing that is how a "logged in" token ends up naming a session that was
+/// never stored. The in-memory store returns `Ok` always; a Redis backend reports
+/// its error, and the manager decides the policy — `login` fails loudly, while
+/// `authenticate` fails *closed* (a store it cannot reach means "not authenticated").
+///
 /// [KEP-0004]: https://github.com/tacpham/kernway/blob/main/docs/kep/0004-sessions.md
 /// [KEP-0006]: https://github.com/tacpham/kernway/blob/main/docs/kep/0006-async-handlers.md
 pub trait SessionStore: Send + Sync {
     /// Register a new session.
-    fn insert(&self, sid: &str, record: SessionRecord) -> BoxFuture<'_, ()>;
+    fn insert(&self, sid: &str, record: SessionRecord) -> BoxFuture<'_, Result<(), StoreError>>;
     /// The record for `sid`, or `None` — this is also the membership check.
-    fn get(&self, sid: &str) -> BoxFuture<'_, Option<SessionRecord>>;
+    fn get(&self, sid: &str) -> BoxFuture<'_, Result<Option<SessionRecord>, StoreError>>;
     /// Advance `last_seen` (for the idle timeout); called lazily.
-    fn touch(&self, sid: &str, at: u64) -> BoxFuture<'_, ()>;
+    fn touch(&self, sid: &str, at: u64) -> BoxFuture<'_, Result<(), StoreError>>;
     /// Remove one session (logout / revocation / eviction).
-    fn remove(&self, sid: &str) -> BoxFuture<'_, ()>;
+    fn remove(&self, sid: &str) -> BoxFuture<'_, Result<(), StoreError>>;
     /// Remove every session of a user (logout everywhere / ban).
-    fn remove_user(&self, user: &str) -> BoxFuture<'_, ()>;
+    fn remove_user(&self, user: &str) -> BoxFuture<'_, Result<(), StoreError>>;
     /// This user's active sessions, as `(sid, record)`.
-    fn sessions_of(&self, user: &str) -> BoxFuture<'_, Vec<(String, SessionRecord)>>;
+    fn sessions_of(&self, user: &str) -> BoxFuture<'_, Result<Vec<(String, SessionRecord)>, StoreError>>;
     /// The number of live sessions — for the capacity cap.
-    fn len(&self) -> BoxFuture<'_, usize>;
+    fn len(&self) -> BoxFuture<'_, Result<usize, StoreError>>;
 }
 
 /// In-memory registry: a read-mostly `RwLock<HashMap>`. The per-request path is a
@@ -106,51 +132,59 @@ impl MemorySessionStore {
 // trait costs the in-memory store only the box (measured ~21 ns — negligible next
 // to the auth path's HMAC verify; see `benches/session_store`). Args are copied to
 // owned values before the block so the future borrows only `&self`.
+// In-memory work is infallible — every method returns `Ok`. It still returns a
+// `Result` to satisfy the trait, so the manager's error handling is uniform across
+// backends.
 impl SessionStore for MemorySessionStore {
-    fn insert(&self, sid: &str, record: SessionRecord) -> BoxFuture<'_, ()> {
+    fn insert(&self, sid: &str, record: SessionRecord) -> BoxFuture<'_, Result<(), StoreError>> {
         let sid = sid.to_string();
         Box::pin(async move {
             self.inner.write().unwrap().insert(sid, record);
+            Ok(())
         })
     }
-    fn get(&self, sid: &str) -> BoxFuture<'_, Option<SessionRecord>> {
+    fn get(&self, sid: &str) -> BoxFuture<'_, Result<Option<SessionRecord>, StoreError>> {
         let sid = sid.to_string();
-        Box::pin(async move { self.inner.read().unwrap().get(&sid).cloned() })
+        Box::pin(async move { Ok(self.inner.read().unwrap().get(&sid).cloned()) })
     }
-    fn touch(&self, sid: &str, at: u64) -> BoxFuture<'_, ()> {
+    fn touch(&self, sid: &str, at: u64) -> BoxFuture<'_, Result<(), StoreError>> {
         let sid = sid.to_string();
         Box::pin(async move {
             if let Some(r) = self.inner.write().unwrap().get_mut(&sid) {
                 r.last_seen = at;
             }
+            Ok(())
         })
     }
-    fn remove(&self, sid: &str) -> BoxFuture<'_, ()> {
+    fn remove(&self, sid: &str) -> BoxFuture<'_, Result<(), StoreError>> {
         let sid = sid.to_string();
         Box::pin(async move {
             self.inner.write().unwrap().remove(&sid);
+            Ok(())
         })
     }
-    fn remove_user(&self, user: &str) -> BoxFuture<'_, ()> {
+    fn remove_user(&self, user: &str) -> BoxFuture<'_, Result<(), StoreError>> {
         let user = user.to_string();
         Box::pin(async move {
             self.inner.write().unwrap().retain(|_, r| r.user != user);
+            Ok(())
         })
     }
-    fn sessions_of(&self, user: &str) -> BoxFuture<'_, Vec<(String, SessionRecord)>> {
+    fn sessions_of(&self, user: &str) -> BoxFuture<'_, Result<Vec<(String, SessionRecord)>, StoreError>> {
         let user = user.to_string();
         Box::pin(async move {
-            self.inner
+            Ok(self
+                .inner
                 .read()
                 .unwrap()
                 .iter()
                 .filter(|(_, r)| r.user == user)
                 .map(|(sid, r)| (sid.clone(), r.clone()))
-                .collect()
+                .collect())
         })
     }
-    fn len(&self) -> BoxFuture<'_, usize> {
-        Box::pin(async move { self.inner.read().unwrap().len() })
+    fn len(&self) -> BoxFuture<'_, Result<usize, StoreError>> {
+        Box::pin(async move { Ok(self.inner.read().unwrap().len()) })
     }
 }
 
@@ -203,6 +237,26 @@ pub trait AccountStatus: Send + Sync {
 pub enum LoginError {
     /// The registry is at `max_sessions`.
     AtCapacity,
+    /// The session store failed (e.g. Redis unreachable) — the session was not
+    /// persisted, so the login is a real error, not a silent half-success.
+    Store(StoreError),
+}
+
+impl std::fmt::Display for LoginError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LoginError::AtCapacity => write!(f, "too many active sessions"),
+            LoginError::Store(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for LoginError {}
+
+impl From<StoreError> for LoginError {
+    fn from(e: StoreError) -> Self {
+        LoginError::Store(e)
+    }
 }
 
 /// Ties the registry, the token codec, the live config, and the optional account
@@ -247,7 +301,8 @@ impl SessionManager {
             (cfg.max_sessions, cfg.token_ttl.as_secs())
         };
         if let Some(max) = max_sessions {
-            if self.store.len().await >= max {
+            // A store error here is a real login failure (`?` → LoginError::Store).
+            if self.store.len().await? >= max {
                 return Err(LoginError::AtCapacity);
             }
         }
@@ -257,12 +312,14 @@ impl SessionManager {
             .as_ref()
             .and_then(|a| a.account(user))
             .map_or(0, |acc| acc.version);
+        // If the store cannot persist the session, the login fails loudly rather
+        // than handing back a token for a session that does not exist.
         self.store
             .insert(
                 &sid,
                 SessionRecord { user: user.to_string(), created: at, last_seen: at, meta: meta.into() },
             )
-            .await;
+            .await?;
         let exp = at + token_ttl;
         Ok(self.codec.sign(&Claims { sid, user: user.to_string(), roles, version, exp }))
     }
@@ -281,22 +338,32 @@ impl SessionManager {
         if claims.exp < at {
             return SecurityContext::anonymous();
         }
-        // Revocation: the sid must still be registered.
-        let Some(record) = self.store.get(&claims.sid).await else { return SecurityContext::anonymous() };
+        // Revocation: the sid must still be registered. A store error here fails
+        // *closed* — a registry we cannot reach means we cannot confirm the session
+        // is still valid, so we must not authenticate (deny, never grant on doubt).
+        let record = match self.store.get(&claims.sid).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return SecurityContext::anonymous(),
+            Err(err) => {
+                eprintln!("kernway-security: authenticate failed closed (store error): {err}");
+                return SecurityContext::anonymous();
+            }
+        };
 
         // Copy the live timeouts out and drop the guard before any `.await`.
         let (absolute_timeout, idle_timeout) = {
             let cfg = self.config.read().unwrap();
             (cfg.absolute_timeout.as_secs(), cfg.idle_timeout.map(|d| d.as_secs()))
         };
-        // Timeouts, enforced against the *current* config.
+        // Timeouts, enforced against the *current* config. The eviction remove is
+        // best-effort — the decision is already "anonymous" regardless.
         if at > record.created.saturating_add(absolute_timeout) {
-            self.store.remove(&claims.sid).await;
+            let _ = self.store.remove(&claims.sid).await;
             return SecurityContext::anonymous();
         }
         if let Some(idle) = idle_timeout {
             if at > record.last_seen.saturating_add(idle) {
-                self.store.remove(&claims.sid).await;
+                let _ = self.store.remove(&claims.sid).await;
                 return SecurityContext::anonymous();
             }
         }
@@ -305,7 +372,7 @@ impl SessionManager {
         let roles = if let Some(accounts) = &self.accounts {
             match accounts.account(&claims.user) {
                 None => {
-                    self.store.remove(&claims.sid).await;
+                    let _ = self.store.remove(&claims.sid).await;
                     return SecurityContext::anonymous();
                 }
                 Some(acc) => {
@@ -313,7 +380,7 @@ impl SessionManager {
                         || acc.expires.is_some_and(|e| e < at)
                         || acc.version != claims.version;
                     if invalid {
-                        self.store.remove(&claims.sid).await;
+                        let _ = self.store.remove(&claims.sid).await;
                         return SecurityContext::anonymous();
                     }
                     // Roles from the token are safe: a role change would have bumped
@@ -326,33 +393,37 @@ impl SessionManager {
         };
 
         // Advance last_seen lazily (only when it drifts, to stay read-mostly).
+        // Best-effort: a failed touch just means the idle clock is a little stale.
         if at > record.last_seen + 60 {
-            self.store.touch(&claims.sid, at).await;
+            let _ = self.store.touch(&claims.sid, at).await;
         }
 
         SecurityContext::authenticated(claims.user, roles)
     }
 
-    /// Log out one session (this device).
-    pub async fn logout(&self, sid: &str) {
-        self.store.remove(sid).await;
+    /// Log out one session (this device). Errors if the store cannot be reached —
+    /// the session may still be live, so the caller should know the revocation
+    /// did not land (clearing the cookie alone is not a server-side logout).
+    pub async fn logout(&self, sid: &str) -> Result<(), StoreError> {
+        self.store.remove(sid).await
     }
 
     /// Log out the session a token names — the handler's convenience: read the
-    /// cookie, hand it here. A bad token is a no-op.
-    pub async fn logout_token(&self, token: &str) {
-        if let Some(claims) = self.codec.verify(token) {
-            self.store.remove(&claims.sid).await;
+    /// cookie, hand it here. A bad token is a no-op (`Ok`).
+    pub async fn logout_token(&self, token: &str) -> Result<(), StoreError> {
+        match self.codec.verify(token) {
+            Some(claims) => self.store.remove(&claims.sid).await,
+            None => Ok(()),
         }
     }
 
     /// Log a user out everywhere (all devices) — also how a ban takes effect.
-    pub async fn logout_user(&self, user: &str) {
-        self.store.remove_user(user).await;
+    pub async fn logout_user(&self, user: &str) -> Result<(), StoreError> {
+        self.store.remove_user(user).await
     }
 
     /// The user's active sessions, for a "my logins" view.
-    pub async fn sessions_of(&self, user: &str) -> Vec<(String, SessionRecord)> {
+    pub async fn sessions_of(&self, user: &str) -> Result<Vec<(String, SessionRecord)>, StoreError> {
         self.store.sessions_of(user).await
     }
 }
@@ -412,7 +483,7 @@ mod tests {
         let token = block(mgr.login("alice", vec![], "d")).unwrap();
         let sid = sid_of(&mgr, &token);
         assert!(block(mgr.authenticate(Some(&token))).is_authenticated());
-        block(mgr.logout(&sid));
+        block(mgr.logout(&sid)).unwrap();
         assert!(!block(mgr.authenticate(Some(&token))).is_authenticated(), "revoked session must be anonymous");
     }
 
@@ -421,11 +492,11 @@ mod tests {
         let mgr = manager();
         let t1 = block(mgr.login("alice", vec![], "phone")).unwrap();
         let t2 = block(mgr.login("alice", vec![], "laptop")).unwrap();
-        assert_eq!(block(mgr.sessions_of("alice")).len(), 2, "two devices logged in");
-        block(mgr.logout_user("alice"));
+        assert_eq!(block(mgr.sessions_of("alice")).unwrap().len(), 2, "two devices logged in");
+        block(mgr.logout_user("alice")).unwrap();
         assert!(!block(mgr.authenticate(Some(&t1))).is_authenticated());
         assert!(!block(mgr.authenticate(Some(&t2))).is_authenticated());
-        assert_eq!(block(mgr.sessions_of("alice")).len(), 0);
+        assert_eq!(block(mgr.sessions_of("alice")).unwrap().len(), 0);
     }
 
     #[test]
@@ -478,6 +549,70 @@ mod tests {
         mgr.reconfigure(|c| c.max_sessions = Some(1));
         let _ = block(mgr.login("a", vec![], "d")).unwrap();
         assert_eq!(block(mgr.login("b", vec![], "d")), Err(LoginError::AtCapacity));
+    }
+
+    // --- a store that always fails, for the fallible-store behaviour ---------
+
+    /// A `SessionStore` whose every operation errors — stands in for "Redis is
+    /// down" without a server, so the manager's error policy is unit-testable.
+    struct FailingStore;
+    impl SessionStore for FailingStore {
+        fn insert(&self, _: &str, _: SessionRecord) -> BoxFuture<'_, Result<(), StoreError>> {
+            Box::pin(async { Err(StoreError::Backend("store down".into())) })
+        }
+        fn get(&self, _: &str) -> BoxFuture<'_, Result<Option<SessionRecord>, StoreError>> {
+            Box::pin(async { Err(StoreError::Backend("store down".into())) })
+        }
+        fn touch(&self, _: &str, _: u64) -> BoxFuture<'_, Result<(), StoreError>> {
+            Box::pin(async { Err(StoreError::Backend("store down".into())) })
+        }
+        fn remove(&self, _: &str) -> BoxFuture<'_, Result<(), StoreError>> {
+            Box::pin(async { Err(StoreError::Backend("store down".into())) })
+        }
+        fn remove_user(&self, _: &str) -> BoxFuture<'_, Result<(), StoreError>> {
+            Box::pin(async { Err(StoreError::Backend("store down".into())) })
+        }
+        fn sessions_of(&self, _: &str) -> BoxFuture<'_, Result<Vec<(String, SessionRecord)>, StoreError>> {
+            Box::pin(async { Err(StoreError::Backend("store down".into())) })
+        }
+        fn len(&self) -> BoxFuture<'_, Result<usize, StoreError>> {
+            Box::pin(async { Err(StoreError::Backend("store down".into())) })
+        }
+    }
+
+    #[test]
+    fn login_errors_when_the_store_is_down() {
+        let mgr = SessionManager::new(Box::new(FailingStore), "k", SessionConfig::default());
+        // No token handed back for a session that could not be stored — a real error.
+        let err = block(mgr.login("alice", vec![], "d")).unwrap_err();
+        assert!(
+            matches!(err, LoginError::Store(StoreError::Backend(_))),
+            "store down must fail the login, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn logout_errors_when_the_store_is_down() {
+        let mgr = SessionManager::new(Box::new(FailingStore), "k", SessionConfig::default());
+        // Logout that cannot reach the store reports it — clearing the cookie alone
+        // is not a server-side revocation, and the caller must be able to tell.
+        assert!(block(mgr.logout("some-sid")).is_err(), "store down must fail the logout");
+    }
+
+    #[test]
+    fn authenticate_fails_closed_when_the_store_is_down() {
+        // Mint a valid, well-signed token with a working store…
+        let key = "shared-signing-key";
+        let minting = SessionManager::new(Box::new(MemorySessionStore::new()), key, SessionConfig::default());
+        let token = block(minting.login("alice", vec!["ADMIN".into()], "d")).unwrap();
+        // …then authenticate it against a manager whose store is down. The token is
+        // genuine, but the registry cannot be reached to confirm the session is live,
+        // so it must deny — never grant on doubt.
+        let down = SessionManager::new(Box::new(FailingStore), key, SessionConfig::default());
+        assert!(
+            !block(down.authenticate(Some(&token))).is_authenticated(),
+            "store unreachable → authenticate denies (fails closed)"
+        );
     }
 
     // --- the account seam --------------------------------------------------
@@ -600,7 +735,7 @@ mod tests {
             let mgr = redis_manager();
             block(async {
                 let user = "seam-abs";
-                mgr.logout_user(user).await;
+                let _ = mgr.logout_user(user).await;
                 mgr.reconfigure(|c| {
                     c.token_ttl = Duration::from_secs(10_000);
                     c.absolute_timeout = Duration::from_secs(300);
@@ -617,7 +752,7 @@ mod tests {
             let mgr = redis_manager();
             block(async {
                 let user = "seam-idle";
-                mgr.logout_user(user).await;
+                let _ = mgr.logout_user(user).await;
                 mgr.reconfigure(|c| {
                     c.token_ttl = Duration::from_secs(10_000);
                     c.absolute_timeout = Duration::from_secs(10_000);
@@ -635,7 +770,7 @@ mod tests {
             let user = "seam-expire";
             let (mgr, _accounts) = redis_manager_with_account(user, Account { active: true, expires: Some(500), version: 1 });
             block(async {
-                mgr.logout_user(user).await;
+                let _ = mgr.logout_user(user).await;
                 let token = mgr.login_at(user, vec![], "d", 100).await.unwrap();
                 assert!(mgr.authenticate_at(Some(&token), 400).await.is_authenticated(), "before expiry");
                 assert!(!mgr.authenticate_at(Some(&token), 600).await.is_authenticated(), "after subscription expiry → out");
@@ -648,7 +783,7 @@ mod tests {
             let user = "seam-active";
             let (mgr, accounts) = redis_manager_with_account(user, Account { active: true, expires: None, version: 1 });
             block(async {
-                mgr.logout_user(user).await;
+                let _ = mgr.logout_user(user).await;
                 let token = mgr.login(user, vec!["USER".to_string()], "d").await.unwrap();
                 assert!(mgr.authenticate(Some(&token)).await.is_authenticated());
                 accounts.0.lock().unwrap().get_mut(user).unwrap().active = false;
@@ -662,7 +797,7 @@ mod tests {
             let user = "seam-version";
             let (mgr, accounts) = redis_manager_with_account(user, Account { active: true, expires: None, version: 1 });
             block(async {
-                mgr.logout_user(user).await;
+                let _ = mgr.logout_user(user).await;
                 let token = mgr.login(user, vec!["ADMIN".to_string()], "d").await.unwrap();
                 assert!(mgr.authenticate(Some(&token)).await.is_authenticated());
                 // A role change bumps the version → the old token no longer matches.

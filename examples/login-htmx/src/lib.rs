@@ -147,7 +147,14 @@ async fn do_login(req: &Request, sessions: &SessionManager) -> Response {
 
     let token = match sessions.login("alice", vec!["ADMIN".to_string()], "web").await {
         Ok(t) => t,
-        Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "too many sessions").into_response(),
+        // The store (Redis, when configured) was unreachable, or the registry is
+        // full — either way the login did not take, so say so rather than pretend.
+        Err(session::LoginError::AtCapacity) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "too many sessions").into_response();
+        }
+        Err(session::LoginError::Store(_)) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "the session store is unavailable").into_response();
+        }
     };
 
     // Set the session cookie and tell htmx to navigate to the protected page.
@@ -177,7 +184,11 @@ fn show_protected(ctx: &SecurityContext, engine: &Kernleaf) -> Response {
 /// POST /logout — revoke the session and clear the cookie.
 async fn do_logout(req: &Request, sessions: &SessionManager) -> Response {
     if let Some(token) = req.header("cookie").and_then(session::token_from_cookie) {
-        sessions.logout_token(token).await;
+        // Best-effort server-side revocation: if the store is down we still clear
+        // the cookie below (client-side logout), but log that the session lingers.
+        if let Err(err) = sessions.logout_token(token).await {
+            eprintln!("login-htmx: logout could not revoke the session: {err}");
+        }
     }
     let mut resp = HtmxResponse::new("").redirect("/login").into_response();
     resp.headers.insert("set-cookie", &session::clear_cookie());
