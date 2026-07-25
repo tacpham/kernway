@@ -207,7 +207,9 @@ where
         // Advisory: unpinned shards are correct, just less cache-friendly, so a
         // platform that cannot pin must not fail to start.
         if let Err(e) = rt_core::pin_current_thread_to_core(index) {
-            kernway_log::warn!(target: "rt_net", "shard {index} runs unpinned: {e}");
+            // Expected on macOS/Windows (no affinity API) — advisory, not a problem.
+            // Diagnostic, so debug: quiet in production, visible when you ask for it.
+            kernway_log::debug!(target: "rt_net", "shard {index} runs unpinned: {e}");
         }
     }
 

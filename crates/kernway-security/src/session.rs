@@ -345,7 +345,7 @@ impl SessionManager {
             Ok(Some(record)) => record,
             Ok(None) => return SecurityContext::anonymous(),
             Err(err) => {
-                kernway_log::error!(target: "kernway_security", "authenticate failed closed (store error): {err}");
+                kernway_log::warn!(target: "kernway_security", "authenticate failed closed (store error): {err}");
                 return SecurityContext::anonymous();
             }
         };
