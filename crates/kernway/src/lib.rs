@@ -71,12 +71,18 @@ pub use kernway_security::{presence, InMemoryPresence, Presence};
 #[cfg(all(feature = "presence", feature = "redis"))]
 pub use kernway_security::RedisPresence;
 
+// --- config: layered .properties, profiles, env (KEP-0007) ---
+pub use kernway_config::{self, Config, ConfigBuilder, FromConfig};
+
+// --- logging: levels, per-module filters, Pretty/JSON ---
+pub use kernway_log::{self, Filter as LogFilter, Format as LogFormat, Level as LogLevel, Logger};
+
 // --- DI ---
 pub use di_core::{AppContext, BeanEntry, DiError};
 pub use di_core::{KernwayComponent, KernwayController};
 
 // --- macros ---
-pub use di_macro::{Component, component, inject, controller, route, require_role, validated, transactional};
+pub use di_macro::{Component, component, configuration, inject, controller, route, require_role, validated, transactional};
 
 /// `use kernway::prelude::*` — everything a handler usually needs.
 pub mod prelude {
@@ -101,10 +107,14 @@ pub mod prelude {
     // presence (feature = "presence")
     #[cfg(feature = "presence")]
     pub use crate::{InMemoryPresence, Presence};
+    // Config (KEP-0007)
+    pub use crate::{Config, FromConfig};
+    // Logging macros + init
+    pub use kernway_log::{debug, error, info, trace, warn};
     // DI
     pub use crate::{AppContext, BeanEntry, DiError, KernwayComponent, KernwayController};
     // Macros
-    pub use crate::{component, inject, controller, route, require_role, validated, transactional, Component};
+    pub use crate::{component, configuration, inject, controller, route, require_role, validated, transactional, Component};
 
     pub use std::sync::Arc;
 }

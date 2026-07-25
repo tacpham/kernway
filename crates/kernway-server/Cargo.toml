@@ -10,6 +10,7 @@ kernway-core   = { workspace = true }
 kernway-http   = { workspace = true }
 kernway-static = { workspace = true }
 kernway-log    = { workspace = true }   # access logs + startup warnings
+kernway-config = { workspace = true }   # auto-load config, bind + logging from it
 rt-net         = { workspace = true }
 rt-core        = { workspace = true }
 di-core        = { workspace = true }

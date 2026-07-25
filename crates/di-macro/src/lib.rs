@@ -471,3 +471,68 @@ pub fn transactional(args: TokenStream, input: TokenStream) -> TokenStream {
     let _ = args;
     input
 }
+
+/// Bind a configuration section to a struct — Spring's `@ConfigurationProperties`
+/// (KEP-0007).
+///
+/// `#[configuration(prefix = "server")]` implements `kernway_config::FromConfig`:
+/// each field is read from `server.{field}`, with the field's underscores turned
+/// into hyphens (`token_ttl_secs` → `server.token-ttl-secs`). An `Option<T>` field
+/// is `None` when the key is absent; any other field falls back to `Default`. Omit
+/// the prefix to read top-level keys.
+///
+/// ```rust,ignore
+/// #[configuration(prefix = "server")]
+/// struct ServerConfig { port: u16, host: String }
+/// // ServerConfig::from_config(&config) → { port: server.port, host: server.host }
+/// ```
+#[proc_macro_attribute]
+pub fn configuration(args: TokenStream, input: TokenStream) -> TokenStream {
+    let input_struct = parse_macro_input!(input as ItemStruct);
+    let name = &input_struct.ident;
+
+    // `prefix = "server"` → "server"; no arg → "" (top-level keys).
+    let prefix = args
+        .to_string()
+        .split_once('=')
+        .map(|(_, v)| v.trim().trim_matches('"').to_string())
+        .unwrap_or_default();
+
+    let fields = match &input_struct.fields {
+        Fields::Named(named) => &named.named,
+        _ => {
+            return syn::Error::new_spanned(
+                &input_struct,
+                "#[configuration] requires a struct with named fields",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    let assigns = fields.iter().map(|field| {
+        let fname = field.ident.as_ref().unwrap();
+        let ty = &field.ty;
+        let suffix = fname.to_string().replace('_', "-");
+        let key = if prefix.is_empty() { suffix } else { format!("{prefix}.{suffix}") };
+        match extract_generic_inner(ty, "Option") {
+            // Option<T> → present-or-absent, no default needed.
+            Some(inner) => quote! { #fname: config.get::<#inner>(#key) },
+            // Anything else → parse or fall back to Default.
+            None => quote! { #fname: config.get::<#ty>(#key).unwrap_or_default() },
+        }
+    });
+
+    let expanded = quote! {
+        #input_struct
+
+        impl ::kernway_config::FromConfig for #name {
+            fn from_config(config: &::kernway_config::Config) -> Self {
+                Self {
+                    #(#assigns),*
+                }
+            }
+        }
+    };
+    TokenStream::from(expanded)
+}

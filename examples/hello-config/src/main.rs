@@ -16,8 +16,17 @@
 //! `logging.level.*` keys build a `kernway-log` filter — so a deployment tunes log
 //! verbosity per module from config.
 
-use kernway_config::Config;
+use di_macro::configuration;
+use kernway_config::{Config, FromConfig};
 use kernway_log::{Filter, Format, Logger};
+
+/// A typed view of the `server.*` section — Spring's `@ConfigurationProperties`.
+/// `#[configuration]` implements `FromConfig`, reading `server.port`/`server.host`.
+#[configuration(prefix = "server")]
+struct ServerConfig {
+    port: u16,
+    host: String,
+}
 
 /// Build a `kernway-log` filter from config: `logging.level` is the default, and
 /// each `logging.level.<module>` is an override. Reuses the log crate's own filter
@@ -43,7 +52,11 @@ fn main() {
         .env()
         .build();
 
+    // The typed bind: one struct, populated from the server.* keys.
+    let server = ServerConfig::from_config(&config);
+
     println!("--- resolved config ---");
+    println!("typed ServerConfig -> bind {}:{}", server.host, server.port);
     println!("server.host = {}", config.get_str("server.host").unwrap_or("?"));
     println!("server.port = {}", config.get_or("server.port", 0u16));
     println!("logging.level (default) = {}", config.get_str("logging.level").unwrap_or("info"));

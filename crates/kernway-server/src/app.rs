@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use di_core::{AppContext, RequestScope};
+use kernway_config::{Config, FromConfig};
 use kernway_core::{error::StatusCode, request::Request, response::{Body, Response}};
 use kernway_http::{encode_head, encode_response, encode_response_with, parse_bytes, Connection, Parsed};
 use kernway_static::{mime_for, StaticFiles};
@@ -73,6 +74,8 @@ fn run_handler(req: Request, router: &Router, scope: &RequestScope) -> BoxFuture
 /// App builder — fluent API similar to Spring Boot.
 pub struct AppBuilder {
     addr:         String,
+    /// Whether `bind` was called — if not, the address may come from config.
+    addr_explicit: bool,
     router:       Router,
     context:      AppContext,
     middlewares:  Vec<Arc<dyn Middleware>>,
@@ -82,6 +85,10 @@ pub struct AppBuilder {
     shards:       Option<usize>,
     keep_alive:   KeepAliveConfig,
     drain:        Duration,
+    /// The application config; loaded from disk + env at `build` if not provided.
+    config:       Option<Config>,
+    /// Deferred typed-config bean registrations, run once the config is resolved.
+    config_beans: Vec<Box<dyn FnOnce(&Config, &mut AppContext)>>,
 }
 
 impl AppBuilder {
@@ -90,6 +97,7 @@ impl AppBuilder {
     pub fn new() -> Self {
         Self {
             addr: "0.0.0.0:8080".to_string(),
+            addr_explicit: false,
             router: Router::new(),
             context: AppContext::new(),
             middlewares: Vec::new(),
@@ -99,12 +107,31 @@ impl AppBuilder {
             shards: None,
             keep_alive: KeepAliveConfig::default(),
             drain: rt_net::DEFAULT_DRAIN_TIMEOUT,
+            config: None,
+            config_beans: Vec::new(),
         }
     }
 
-    /// Listening address.
+    /// Listening address. Overrides any `server.address`/`server.port` from config.
     pub fn bind(mut self, addr: &str) -> Self {
         self.addr = addr.to_string();
+        self.addr_explicit = true;
+        self
+    }
+
+    /// Provide the application [`Config`]. If omitted, [`Config::load`] reads
+    /// `application.properties` + the profile file + `KW_` env at `build` time.
+    pub fn config(mut self, config: Config) -> Self {
+        self.config = Some(config);
+        self
+    }
+
+    /// Register a typed config bean (`#[configuration]`): it is built from the
+    /// resolved config with [`FromConfig`] and made injectable like any bean.
+    pub fn configure<T: FromConfig + Send + Sync + 'static>(mut self) -> Self {
+        self.config_beans.push(Box::new(|config, context| {
+            let _ = context.register_instance::<T>(Arc::new(T::from_config(config)));
+        }));
         self
     }
 
@@ -229,7 +256,23 @@ impl AppBuilder {
     }
 
     /// Build and return KernwayApp.
-    pub fn build(self) -> KernwayApp {
+    pub fn build(mut self) -> KernwayApp {
+        // Resolve the config (explicit, else load from disk + env), and let it
+        // drive logging and — unless `bind` was called — the listen address.
+        let config = self.config.take().unwrap_or_else(Config::load);
+        init_logging_from_config(&config);
+        if !self.addr_explicit {
+            if let Some(addr) = address_from_config(&config) {
+                self.addr = addr;
+            }
+        }
+        // Build the typed config beans, then register the Config itself so a
+        // handler can inject `&Config`.
+        for register in std::mem::take(&mut self.config_beans) {
+            register(&config, &mut self.context);
+        }
+        let _ = self.context.register_instance::<Config>(Arc::new(config));
+
         // Apply the precompression toggle here so it is independent of whether
         // `.precompressed()` was called before or after `.static_files()`.
         let static_files = match (self.static_files, self.precompressed) {
@@ -248,6 +291,38 @@ impl AppBuilder {
             static_files,
             file_chunk: self.file_chunk,
         }
+    }
+}
+
+/// Install the process logger from config — `logging.level` is the default level,
+/// each `logging.level.<module>` an override, `logging.format` picks Pretty/JSON.
+/// A no-op if a logger was already installed (an explicit `kernway_log::init`).
+fn init_logging_from_config(config: &Config) {
+    let mut spec = config.get_str("logging.level").unwrap_or("info").to_string();
+    for (module, level) in config.with_prefix("logging.level.") {
+        spec.push(',');
+        spec.push_str(module);
+        spec.push('=');
+        spec.push_str(level);
+    }
+    let format = match config.get_str("logging.format") {
+        Some("json") => kernway_log::Format::Json,
+        _ => kernway_log::Format::Pretty,
+    };
+    kernway_log::init(kernway_log::Logger::new(kernway_log::Filter::parse(&spec), format));
+}
+
+/// A listen address from config: `server.address`, else `server.host:server.port`
+/// (host defaults to `0.0.0.0` when only a port is given). `None` if neither is set.
+fn address_from_config(config: &Config) -> Option<String> {
+    if let Some(address) = config.get_str("server.address") {
+        return Some(address.to_string());
+    }
+    let host = config.get_str("server.host");
+    match (host, config.get_str("server.port")) {
+        (Some(host), Some(port)) => Some(format!("{host}:{port}")),
+        (None, Some(port)) => Some(format!("0.0.0.0:{port}")),
+        _ => None,
     }
 }
 
@@ -933,6 +1008,38 @@ mod tests {
 
     fn get(path: &str) -> Request {
         Request::new("GET", path)
+    }
+
+    #[test]
+    fn config_drives_the_address_and_registers_beans() {
+        // A typed config bean (what #[configuration] generates by hand here).
+        struct DbConfig {
+            url: String,
+        }
+        impl FromConfig for DbConfig {
+            fn from_config(config: &Config) -> Self {
+                DbConfig { url: config.get_str("db.url").unwrap_or_default().to_string() }
+            }
+        }
+
+        let config = Config::builder()
+            .parse("server.port = 7654\ndb.url = postgres://localhost/app")
+            .build();
+        let app = KernwayApp::builder().config(config).configure::<DbConfig>().build();
+
+        // No .bind() → the address came from server.port.
+        assert_eq!(app.addr, "0.0.0.0:7654");
+        // The Config itself is an injectable bean.
+        assert_eq!(app.context.get::<Config>().unwrap().get_str("db.url"), Some("postgres://localhost/app"));
+        // The typed config bean was built from the config and registered.
+        assert_eq!(app.context.get::<DbConfig>().unwrap().url, "postgres://localhost/app");
+    }
+
+    #[test]
+    fn an_explicit_bind_wins_over_config() {
+        let config = Config::builder().parse("server.port = 1111").build();
+        let app = KernwayApp::builder().bind("127.0.0.1:2222").config(config).build();
+        assert_eq!(app.addr, "127.0.0.1:2222", "explicit bind is not overridden by config");
     }
 
     #[test]

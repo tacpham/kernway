@@ -15,6 +15,8 @@ homepage.workspace   = true
 kernway-core   = { workspace = true }
 kernway-server = { workspace = true }   # KernwayApp, Router, Middleware (+ http, static, rt, di transitively)
 kernway-web    = { workspace = true }   # Json, Html, Path, Query, ProblemDetail
+kernway-config = { workspace = true }   # Config, #[configuration] (KEP-0007)
+kernway-log    = { workspace = true }   # info!/warn!/error! + per-module levels
 di-core        = { workspace = true }
 di-macro       = { workspace = true }
 
