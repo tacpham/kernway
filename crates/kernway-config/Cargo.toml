@@ -1,0 +1,21 @@
+[package]
+name        = "kernway-config"
+description = "Kernway configuration — layered .properties, profiles, and env overrides, parsed ourselves"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+homepage.workspace   = true
+rust-version.workspace = true
+
+# No dependencies: a .properties file and env overrides are a few lines to parse
+# (KEP-0007 / KEP-0000 §1) — config load is not a hot path and not a reason to pull
+# in toml/serde/yaml.
+[dependencies]
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true

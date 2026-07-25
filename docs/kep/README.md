@@ -80,6 +80,7 @@ to keep.
 | [0004](0004-sessions.md) | Sessions — a signed token backed by a revocable registry | Accepted |
 | [0005](0005-request-scoped-beans.md) | Request-scoped DI beans — a per-request scope over the app context | Accepted |
 | [0006](0006-async-handlers.md) | Async handlers — a handler that can await | Accepted |
+| [0007](0007-configuration.md) | Configuration — layered properties, profiles, and typed access | Accepted |
 
 ## The first two are different from the rest
 
