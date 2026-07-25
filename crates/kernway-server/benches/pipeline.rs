@@ -10,6 +10,9 @@
 //! What this is *not*: an end-to-end throughput number. That needs a load test
 //! against a running server (a milestone, not a micro-benchmark), and until it
 //! exists this measures the floor, not the ceiling.
+//!
+//! Current floor (async handlers, KEP-0006): ~391 ns static, ~645 ns param —
+//! box-allocate + request scope + a single poll included.
 
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};

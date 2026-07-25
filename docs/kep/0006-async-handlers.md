@@ -213,7 +213,7 @@ common real handler in the cold.
 
 - **Box vs enum** — *resolved: keep the box.* With the first cut landed, the
   `pipeline` bench measures the full parse → route → handle → encode path at
-  ~404 ns (static) / ~668 ns (param), the boxed future + request scope + a single
+  ~391 ns (static) / ~645 ns (param), the boxed future + request scope + a single
   poll included. The box is a small, bounded addition that leaves the pipeline in
   the same ~400 ns range it sat in before, and the dynamic router needs *a* boxed
   future regardless — an enum would not remove the allocation, only the vtable.
