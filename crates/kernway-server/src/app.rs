@@ -409,6 +409,14 @@ pub fn forbidden() -> Response {
         .body(br#"{"status":403,"title":"Forbidden","detail":"insufficient role"}"#.to_vec())
 }
 
+/// The `401` for a request that needs a login but has none — RFC 7807.
+#[must_use]
+pub fn unauthorized() -> Response {
+    Response::new(StatusCode::UNAUTHORIZED)
+        .content_type("application/json; charset=utf-8")
+        .body(br#"{"status":401,"title":"Unauthorized","detail":"authentication required"}"#.to_vec())
+}
+
 /// HTTP application.
 pub struct KernwayApp {
     addr:        String,

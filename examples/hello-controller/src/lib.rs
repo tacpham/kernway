@@ -73,3 +73,26 @@ pub fn build_app(addr: &str) -> KernwayApp {
         .controller(Arc::new(UserController))
         .build()
 }
+
+/// The alternative to per-route `#[require_role]`: **central** path-based rules
+/// (Spring's `HttpSecurity`). One place declares public/authenticated/role paths;
+/// the `SecurityLayer` enforces them before any handler. Auth (identity) is still
+/// the upstream `HeaderAuth`; this is authorization.
+pub fn build_app_secured(addr: &str) -> KernwayApp {
+    use kernway_server::{Access, HttpSecurity};
+
+    let security = HttpSecurity::new()
+        .permit_all("/public/**") // open
+        .has_role("/admin/**", "ADMIN") // ADMIN only
+        .any_request(Access::Authenticated) // everything else needs a login
+        .build();
+
+    KernwayApp::builder()
+        .bind(addr)
+        .layer(HeaderAuth) // sets the SecurityContext (identity)
+        .layer(security) // enforces the path rules (authorization)
+        .get("/public/info", |_req: Request, _scope: &RequestScope| async { json_ok(r#"{"public":true}"#) })
+        .get("/secret/data", |_req: Request, _scope: &RequestScope| async { json_ok(r#"{"secret":true}"#) })
+        .get("/admin/panel", |_req: Request, _scope: &RequestScope| async { json_ok(r#"{"admin":true}"#) })
+        .build()
+}
