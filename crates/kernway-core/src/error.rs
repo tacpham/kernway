@@ -44,6 +44,9 @@ impl StatusCode {
     pub const NOT_FOUND:             Self = Self(404);
     /// `405 Method Not Allowed` — the path exists, the method does not.
     pub const METHOD_NOT_ALLOWED:    Self = Self(405);
+    /// `413 Payload Too Large` — the request body exceeds the configured maximum
+    /// (`max_upload_size`); the server refuses rather than spool it to disk.
+    pub const PAYLOAD_TOO_LARGE:     Self = Self(413);
     /// `422 Unprocessable Entity` — well-formed but semantically invalid;
     /// what validation failures return.
     pub const UNPROCESSABLE_ENTITY:  Self = Self(422);

@@ -60,6 +60,12 @@ harness = false
 name    = "stream_chunk"
 harness = false
 
+# Inbound upload streaming — sweep chunk size, confirm O(chunk) memory. Own main;
+# run with `cargo bench -p kernway-server --bench upload_chunk`.
+[[bench]]
+name    = "upload_chunk"
+harness = false
+
 [[bench]]
 name    = "security"
 harness = false

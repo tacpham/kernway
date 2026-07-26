@@ -16,6 +16,8 @@ use kernway_core::response::Response;
 use kernway_security::SecurityContext;
 use kernway_web::{Json, Path, ProblemDetail, Query, Validated};
 
+use crate::upload::UploadFile;
+
 /// Extract a typed value from the request (and the request scope). The `param` is
 /// the method parameter's name — a `Path<T>` uses it as the path-variable name, the
 /// rest ignore it. A failure is a ready error [`Response`] the handler returns.
@@ -63,5 +65,11 @@ impl Extract for SecurityContext {
     fn extract(_req: &Request, scope: &RequestScope, _param: &str) -> Result<Self, Response> {
         // The context the auth middleware set (KEP-0005); anonymous if none.
         Ok(scope.get::<SecurityContext>().map(|ctx| (*ctx).clone()).unwrap_or_default())
+    }
+}
+
+impl Extract for UploadFile {
+    fn extract(req: &Request, _scope: &RequestScope, _param: &str) -> Result<Self, Response> {
+        UploadFile::from_request(req).map_err(ProblemDetail::bad_request)
     }
 }

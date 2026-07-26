@@ -20,7 +20,7 @@ use std::time::Duration;
 use di_core::{AppContext, RequestScope};
 use kernway_config::{Config, FromConfig};
 use kernway_core::{error::StatusCode, request::Request, response::{Body, Response}};
-use kernway_http::{encode_head, encode_response, encode_response_with, parse_bytes, Connection, Parsed};
+use kernway_http::{encode_head, encode_response, encode_response_with, parse_head, Connection, ParsedHead};
 use kernway_static::{mime_for, StaticFiles};
 use rt_core::Shutdown;
 use rt_net::{AsyncTcpStream, ShardConfig};
@@ -57,6 +57,31 @@ impl Default for KeepAliveConfig {
     }
 }
 
+/// Bounds on request bodies — where the line between buffering in memory and streaming
+/// to disk falls, and the hard ceiling above which an upload is refused.
+#[derive(Debug, Clone)]
+pub struct UploadConfig {
+    /// Bodies up to this size are read into memory (`Request.body`); larger ones stream
+    /// to a temp file (`Request.body_spool`). Keeps the common small-body path allocation-
+    /// light while large uploads stay O(chunk). Default: 1 MiB.
+    pub max_inmemory_body: usize,
+    /// Hard ceiling: a body larger than this is refused with `413`, never spooled — the
+    /// backstop against a disk-filling upload. Default: 4 GiB.
+    pub max_upload_size: u64,
+    /// Directory for spooled upload temp files. Default: [`std::env::temp_dir`].
+    pub temp_dir: std::path::PathBuf,
+}
+
+impl Default for UploadConfig {
+    fn default() -> Self {
+        Self {
+            max_inmemory_body: 1024 * 1024,              // 1 MiB — covers virtually all JSON/form posts
+            max_upload_size: 4 * 1024 * 1024 * 1024,     // 4 GiB — generous for media, bounded vs DoS
+            temp_dir: std::env::temp_dir(),
+        }
+    }
+}
+
 /// Run the matched handler (the terminal of the middleware chain). The handler
 /// owns the request and returns a `'static` future, so nothing here is borrowed
 /// across its `await`.
@@ -87,6 +112,7 @@ pub struct AppBuilder {
     static_files: Option<Arc<StaticFiles>>,
     precompressed: bool,
     file_chunk:   usize,
+    upload:       UploadConfig,
     shards:       Option<usize>,
     keep_alive:   KeepAliveConfig,
     drain:        Duration,
@@ -111,6 +137,7 @@ impl AppBuilder {
             static_files: None,
             precompressed: false,
             file_chunk: FILE_CHUNK,
+            upload: UploadConfig::default(),
             shards: None,
             keep_alive: KeepAliveConfig::default(),
             drain: rt_net::DEFAULT_DRAIN_TIMEOUT,
@@ -257,6 +284,31 @@ impl AppBuilder {
         self
     }
 
+    /// Largest request body read into memory, in bytes (default 1 MiB). Bodies over this
+    /// stream to a temp file instead (reached via `UploadFile`/`Multipart`), so memory
+    /// stays O(chunk) for large uploads. Raise it if your handlers routinely take larger
+    /// in-memory bodies (e.g. big JSON); lower it to push more uploads straight to disk.
+    pub fn max_inmemory_body(mut self, bytes: usize) -> Self {
+        self.upload.max_inmemory_body = bytes;
+        self
+    }
+
+    /// Hard ceiling on a request body, in bytes (default 4 GiB). A larger body is refused
+    /// with `413 Payload Too Large` before any of it is spooled — the backstop against a
+    /// disk-filling upload. Size it to your largest legitimate upload.
+    pub fn max_upload_size(mut self, bytes: u64) -> Self {
+        self.upload.max_upload_size = bytes;
+        self
+    }
+
+    /// Directory for spooled upload temp files (default [`std::env::temp_dir`]). Point it
+    /// at the same filesystem as your final storage so `UploadFile::persist` can rename
+    /// rather than copy across devices.
+    pub fn upload_temp_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.upload.temp_dir = dir.into();
+        self
+    }
+
     /// Register a GET route.
     pub fn get<M>(mut self, pattern: &str, handler: impl crate::router::IntoHandler<M>) -> Self {
         self.router.add("GET", pattern, handler.into_handler());
@@ -326,6 +378,7 @@ impl AppBuilder {
             middlewares: Arc::new(self.middlewares),
             static_files,
             file_chunk: self.file_chunk,
+            upload: Arc::new(self.upload),
         }
     }
 }
@@ -429,6 +482,7 @@ pub struct KernwayApp {
     middlewares:  Arc<Vec<Arc<dyn Middleware>>>,
     static_files: Option<Arc<StaticFiles>>,
     file_chunk:   usize,
+    upload:       Arc<UploadConfig>,
 }
 
 impl KernwayApp {
@@ -498,6 +552,7 @@ impl KernwayApp {
         let static_files = self.static_files.clone();
         let keep_alive = self.keep_alive;
         let file_chunk = self.file_chunk;
+        let upload = Arc::clone(&self.upload);
         let shutdown = self.shutdown.clone();
 
         let result = rt_net::run_shards_with_shutdown(config, self.shutdown, move |stream| {
@@ -505,9 +560,10 @@ impl KernwayApp {
             let context = Arc::clone(&context);
             let middlewares = Arc::clone(&middlewares);
             let static_files = static_files.clone();
+            let upload = Arc::clone(&upload);
             let shutdown = shutdown.clone();
             async move {
-                serve_connection(stream, router, context, middlewares, static_files, keep_alive, file_chunk, shutdown).await;
+                serve_connection(stream, router, context, middlewares, static_files, keep_alive, file_chunk, upload, shutdown).await;
             }
         });
 
@@ -535,6 +591,7 @@ async fn serve_connection(
     static_files: Option<Arc<StaticFiles>>,
     keep_alive: KeepAliveConfig,
     file_chunk: usize,
+    upload: Arc<UploadConfig>,
     shutdown: Shutdown,
 ) {
     let mut buf: Vec<u8> = Vec::with_capacity(READ_CHUNK);
@@ -545,49 +602,91 @@ async fn serve_connection(
     let peer = stream.peer_addr().ok();
 
     loop {
-        // --- Read until one whole request is buffered ---
-        let (mut request, consumed) = loop {
-            match parse_bytes(&buf) {
-                Ok(Parsed::Complete { request, consumed }) => break (request, consumed),
-                Ok(Parsed::Incomplete) => {}
-                Err(err) => {
-                    let response = Response::new(StatusCode::BAD_REQUEST)
-                        .content_type("text/plain")
-                        .body(err.to_string().into_bytes());
-                    let _ = stream.write_all(&encode_response(&response)).await;
-                    return close(&mut stream);
+        // --- Read the head, then the body (small → memory, large → temp file) ---
+        let (mut request, consumed) = {
+            // Read until the head (request line + headers) is buffered. The body is
+            // handled separately below, so a multi-GB upload never grows this buffer.
+            let (head_req, head_end, content_length) = loop {
+                match parse_head(&buf) {
+                    Ok(ParsedHead::Complete { request, head_end, content_length }) => {
+                        break (request, head_end, content_length)
+                    }
+                    Ok(ParsedHead::Incomplete) => {}
+                    Err(err) => {
+                        let response = Response::new(StatusCode::BAD_REQUEST)
+                            .content_type("text/plain")
+                            .body(err.to_string().into_bytes());
+                        let _ = stream.write_all(&encode_response(&response)).await;
+                        return close(&mut stream);
+                    }
                 }
-            }
-            // The idle timer covers waiting for the *first* byte of a request as
-            // well as a stalled one mid-way, which is what a slowloris does.
-            let read = rt_core::timeout(keep_alive.idle_timeout, stream.read(&mut chunk));
-            // A *kept-alive* connection sitting idle is the common case at
-            // shutdown: it holds no request, so waiting out its idle timeout
-            // would spend the whole drain budget on a client with nothing to
-            // say. Racing the signal closes it at once.
-            //
-            // Two cases are deliberately excluded:
-            //
-            // - a non-empty buffer — a half-read request is work in flight, and
-            //   finishing it is the point of draining;
-            // - `served == 0` — a connection accepted moments before the signal,
-            //   whose first request is still on the wire. Closing it would turn
-            //   a request the client already sent into a connection reset, which
-            //   is the one failure a graceful shutdown is supposed to prevent.
-            //   It gets the normal idle timeout; the shard's drain deadline is
-            //   the outer bound if it never speaks.
-            let read = if buf.is_empty() && served > 0 {
-                match rt_core::until_shutdown(&shutdown, read).await {
-                    Some(read) => read,
-                    None => return close(&mut stream),
+                // The idle timer covers waiting for the *first* byte of a request as
+                // well as a stalled one mid-way, which is what a slowloris does.
+                let read = rt_core::timeout(keep_alive.idle_timeout, stream.read(&mut chunk));
+                // A *kept-alive* connection sitting idle is the common case at
+                // shutdown: it holds no request, so waiting out its idle timeout
+                // would spend the whole drain budget on a client with nothing to
+                // say. Racing the signal closes it at once.
+                //
+                // Two cases are deliberately excluded:
+                //
+                // - a non-empty buffer — a half-read request is work in flight, and
+                //   finishing it is the point of draining;
+                // - `served == 0` — a connection accepted moments before the signal,
+                //   whose first request is still on the wire. Closing it would turn
+                //   a request the client already sent into a connection reset, which
+                //   is the one failure a graceful shutdown is supposed to prevent.
+                //   It gets the normal idle timeout; the shard's drain deadline is
+                //   the outer bound if it never speaks.
+                let read = if buf.is_empty() && served > 0 {
+                    match rt_core::until_shutdown(&shutdown, read).await {
+                        Some(read) => read,
+                        None => return close(&mut stream),
+                    }
+                } else {
+                    read.await
+                };
+                match read {
+                    // Timed out, EOF, or a broken connection: nothing left to serve.
+                    Err(_) | Ok(Ok(0)) | Ok(Err(_)) => return close(&mut stream),
+                    Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
                 }
-            } else {
-                read.await
             };
-            match read {
-                // Timed out, EOF, or a broken connection: nothing left to serve.
-                Err(_) | Ok(Ok(0)) | Ok(Err(_)) => return close(&mut stream),
-                Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
+
+            // Refuse an oversized upload before reading (or spooling) any of its body.
+            if content_length as u64 > upload.max_upload_size {
+                let response = Response::new(StatusCode::PAYLOAD_TOO_LARGE)
+                    .content_type("text/plain")
+                    .body(b"upload exceeds the configured maximum".to_vec());
+                let _ = stream.write_all(&encode_response(&response)).await;
+                return close(&mut stream);
+            }
+
+            if content_length <= upload.max_inmemory_body {
+                // Small body: finish buffering it in memory (the fast path).
+                let total = head_end + content_length;
+                while buf.len() < total {
+                    match rt_core::timeout(keep_alive.idle_timeout, stream.read(&mut chunk)).await {
+                        Err(_) | Ok(Ok(0)) | Ok(Err(_)) => return close(&mut stream),
+                        Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let mut request = head_req;
+                request.body = buf[head_end..total].to_vec();
+                (request, total)
+            } else {
+                // Large body: stream it to a temp file — memory stays O(chunk). This
+                // drains the head+body from `buf`, leaving any pipelined tail.
+                match spool_body(&mut stream, &mut buf, head_end, content_length, &upload, file_chunk, keep_alive.idle_timeout)
+                    .await
+                {
+                    Ok(spooled) => {
+                        let mut request = head_req;
+                        request.body_spool = Some(spooled);
+                        (request, 0) // `buf` already drained by spool_body
+                    }
+                    Err(_) => return close(&mut stream),
+                }
             }
         };
 
@@ -633,6 +732,101 @@ async fn serve_connection(
 /// its own timeout for the `connection: close` we announced.
 fn close(stream: &mut AsyncTcpStream) {
     let _ = stream.shutdown(std::net::Shutdown::Write);
+}
+
+/// Stream a request body from the socket straight to a temporary file, in `file_chunk`
+/// reads, each file write on the blocking pool so the shard never stalls. Memory is
+/// O(chunk), not O(body) — the inbound mirror of [`stream_file`].
+///
+/// Consumes the head and exactly `content_length` body bytes from `buf`, leaving any
+/// pipelined bytes of the *next* request at the front of `buf`.
+async fn spool_body(
+    stream: &mut AsyncTcpStream,
+    buf: &mut Vec<u8>,
+    head_end: usize,
+    content_length: usize,
+    upload: &UploadConfig,
+    file_chunk: usize,
+    idle_timeout: Duration,
+) -> io::Result<kernway_core::request::SpooledBody> {
+    use std::io::Write; // for `file.flush()` on the blocking pool
+    let blocking_gone = || io::Error::new(io::ErrorKind::Other, "blocking pool unavailable");
+    let path = upload_temp_path(&upload.temp_dir);
+
+    // Create the temp file on the blocking pool.
+    let mut file = {
+        let path = path.clone();
+        match rt_core::spawn_blocking(move || std::fs::File::create(&path)).await {
+            Some(result) => result?,
+            None => return Err(blocking_gone()),
+        }
+    };
+
+    let mut written = 0usize;
+
+    // Body bytes already read alongside the head go to the file first.
+    let body_have = buf.len() - head_end;
+    let from_buf = content_length.min(body_have);
+    if from_buf > 0 {
+        let data = buf[head_end..head_end + from_buf].to_vec();
+        file = write_all_blocking(file, data).await?;
+        written += from_buf;
+    }
+    // Everything past the body is the next pipelined request — keep it as the new `buf`.
+    *buf = buf.split_off(head_end + from_buf);
+
+    // Stream the rest of the body from the socket.
+    let mut chunk = vec![0u8; file_chunk];
+    while written < content_length {
+        let n = match rt_core::timeout(idle_timeout, stream.read(&mut chunk)).await {
+            Ok(Ok(n)) => n,
+            _ => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "upload stalled or closed")),
+        };
+        if n == 0 {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed mid-upload"));
+        }
+        let take = (content_length - written).min(n);
+        file = write_all_blocking(file, chunk[..take].to_vec()).await?;
+        written += take;
+        if n > take {
+            // Overshoot past the body belongs to the next request.
+            buf.extend_from_slice(&chunk[take..n]);
+        }
+    }
+
+    // Flush before a handler is handed the path.
+    match rt_core::spawn_blocking(move || file.flush()).await {
+        Some(result) => result?,
+        None => return Err(blocking_gone()),
+    }
+
+    Ok(kernway_core::request::SpooledBody { path, len: content_length as u64 })
+}
+
+/// Append `data` to `file` on the blocking pool, handing the file back to keep writing.
+async fn write_all_blocking(file: std::fs::File, data: Vec<u8>) -> io::Result<std::fs::File> {
+    use std::io::Write;
+    match rt_core::spawn_blocking(move || {
+        let mut file = file;
+        file.write_all(&data).map(|()| file)
+    })
+    .await
+    {
+        Some(result) => result,
+        None => Err(io::Error::new(io::ErrorKind::Other, "blocking pool unavailable")),
+    }
+}
+
+/// A unique temp-file path for a spooled upload (`<dir>/kernway-upload-<pid>-<nanos>-<n>.tmp`).
+fn upload_temp_path(dir: &std::path::Path) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    dir.join(format!("kernway-upload-{}-{}-{}.tmp", std::process::id(), nanos, n))
 }
 
 /// Default chunk size for streaming a file body, overridable with
@@ -1319,7 +1513,7 @@ mod tests {
         let middlewares: Arc<Vec<Arc<dyn Middleware>>> = Arc::new(Vec::new());
         ex.block_on(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_connection(stream, router, context, middlewares, None, keep_alive, FILE_CHUNK, Shutdown::new()).await;
+            serve_connection(stream, router, context, middlewares, None, keep_alive, FILE_CHUNK, Arc::new(UploadConfig::default()), Shutdown::new()).await;
         })
         .unwrap();
 
@@ -1359,6 +1553,104 @@ mod tests {
     fn a_malformed_request_gets_a_400_rather_than_a_dropped_connection() {
         let got = round_trip(Router::new(), "GARBAGE\r\n\r\n");
         assert!(got.starts_with("HTTP/1.1 400 Bad Request\r\n"), "got {got:?}");
+    }
+
+    /// Serve one connection with owned request bytes and a custom upload config.
+    fn serve_upload(router: Router, request: Vec<u8>, upload: UploadConfig) -> String {
+        use std::io::{Read, Write};
+        let ex = rt_core::Executor::new().unwrap();
+        let (mut listener, addr) = ex
+            .block_on(async {
+                let l = rt_net::AsyncTcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+                let a = l.local_addr().unwrap();
+                (l, a)
+            })
+            .unwrap();
+        let client = std::thread::spawn(move || {
+            let mut sock = std::net::TcpStream::connect(addr).unwrap();
+            sock.write_all(&request).unwrap();
+            let mut got = Vec::new();
+            sock.read_to_end(&mut got).unwrap();
+            String::from_utf8_lossy(&got).into_owned()
+        });
+        let router = Arc::new(router);
+        let context = Arc::new(AppContext::new());
+        let middlewares: Arc<Vec<Arc<dyn Middleware>>> = Arc::new(Vec::new());
+        ex.block_on(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_connection(stream, router, context, middlewares, None, KeepAliveConfig::default(), FILE_CHUNK, Arc::new(upload), Shutdown::new()).await;
+        })
+        .unwrap();
+        client.join().unwrap()
+    }
+
+    #[test]
+    fn a_large_body_spools_to_disk_not_memory() {
+        // Threshold 1 KiB → a 100 KiB body streams to a temp file. The handler reports
+        // what it saw: an empty in-memory body, and a spool file holding every byte.
+        let mut router = Router::new();
+        router.add("POST", "/up", sync_handler(|req: Request, _ctx: &RequestScope| {
+            let on_disk = req.body_spool.as_ref().map(|s| (s.len, std::fs::read(&s.path).map(|v| v.len()).unwrap_or(0)));
+            Response::new(StatusCode::OK).body(format!("body={} spool={on_disk:?}", req.body.len()).into_bytes())
+        }));
+
+        let payload = vec![b'm'; 100 * 1024];
+        let mut request = format!("POST /up HTTP/1.1\r\nHost: x\r\ncontent-length: {}\r\n\r\n", payload.len()).into_bytes();
+        request.extend_from_slice(&payload);
+
+        let upload = UploadConfig { max_inmemory_body: 1024, ..UploadConfig::default() };
+        let got = serve_upload(router, request, upload);
+        assert!(
+            got.ends_with(&format!("body=0 spool=Some(({}, {}))", payload.len(), payload.len())),
+            "large body must be spooled whole to disk with an empty in-memory body: {got:?}"
+        );
+    }
+
+    #[test]
+    fn a_small_body_stays_in_memory() {
+        // Under the threshold → the existing fast path: in `req.body`, no spool.
+        let mut router = Router::new();
+        router.add("POST", "/up", sync_handler(|req: Request, _ctx: &RequestScope| {
+            Response::new(StatusCode::OK).body(format!("body={} spool={}", req.body.len(), req.body_spool.is_some()).into_bytes())
+        }));
+        let request = b"POST /up HTTP/1.1\r\nHost: x\r\ncontent-length: 5\r\n\r\nhello".to_vec();
+        let upload = UploadConfig { max_inmemory_body: 1024, ..UploadConfig::default() };
+        let got = serve_upload(router, request, upload);
+        assert!(got.ends_with("body=5 spool=false"), "small body stays in memory: {got:?}");
+    }
+
+    #[test]
+    fn an_upload_over_the_ceiling_is_refused_with_413() {
+        let payload = vec![b'x'; 5000];
+        let mut request = format!("POST /up HTTP/1.1\r\nHost: x\r\ncontent-length: {}\r\n\r\n", payload.len()).into_bytes();
+        request.extend_from_slice(&payload);
+        // Ceiling 1000 < 5000 → 413 before any body is spooled.
+        let upload = UploadConfig { max_inmemory_body: 100, max_upload_size: 1000, ..UploadConfig::default() };
+        let got = serve_upload(Router::new(), request, upload);
+        assert!(got.starts_with("HTTP/1.1 413"), "over-limit upload must be refused: {got:?}");
+    }
+
+    #[test]
+    fn upload_file_persist_moves_the_spooled_file() {
+        let dir = std::env::temp_dir();
+        let src = dir.join(format!("kernway-test-src-{}.tmp", std::process::id()));
+        let dst = dir.join(format!("kernway-test-dst-{}.tmp", std::process::id()));
+        std::fs::write(&src, b"song bytes").unwrap();
+
+        let mut req = Request::new("POST", "/up");
+        req.body_spool = Some(kernway_core::request::SpooledBody { path: src.clone(), len: 10 });
+        let upload = crate::upload::UploadFile::from_request(&req).unwrap();
+        assert_eq!(upload.len(), 10);
+
+        let dst_move = dst.clone();
+        rt_core::Executor::new()
+            .unwrap()
+            .block_on(async move { upload.persist(dst_move).await.unwrap() })
+            .unwrap();
+
+        assert_eq!(std::fs::read(&dst).unwrap(), b"song bytes", "content moved intact");
+        assert!(!src.exists(), "source temp file was moved away");
+        std::fs::remove_file(&dst).ok();
     }
 
     #[test]
@@ -1418,7 +1710,7 @@ mod keep_alive_tests {
         let middlewares: Arc<Vec<Arc<dyn Middleware>>> = Arc::new(Vec::new());
         ex.block_on(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_connection(stream, router, context, middlewares, None, keep_alive, FILE_CHUNK, shutdown).await;
+            serve_connection(stream, router, context, middlewares, None, keep_alive, FILE_CHUNK, Arc::new(UploadConfig::default()), shutdown).await;
         })
         .unwrap();
 
@@ -1615,8 +1907,8 @@ mod keep_alive_tests {
     fn the_parser_reports_the_version_the_client_sent() {
         let req = kernway_http::parse_bytes(b"GET / HTTP/1.0\r\n\r\n").unwrap();
         match req {
-            Parsed::Complete { request, .. } => assert_eq!(request.version, HttpVersion::Http10),
-            Parsed::Incomplete => panic!("expected a complete request"),
+            kernway_http::Parsed::Complete { request, .. } => assert_eq!(request.version, HttpVersion::Http10),
+            kernway_http::Parsed::Incomplete => panic!("expected a complete request"),
         }
     }
 }
@@ -1862,7 +2154,7 @@ mod static_file_tests {
         let keep_alive = KeepAliveConfig { enabled: false, ..Default::default() };
         ex.block_on(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_connection(stream, router, context, middlewares, static_files, keep_alive, FILE_CHUNK, Shutdown::new()).await;
+            serve_connection(stream, router, context, middlewares, static_files, keep_alive, FILE_CHUNK, Arc::new(UploadConfig::default()), Shutdown::new()).await;
         })
         .unwrap();
 

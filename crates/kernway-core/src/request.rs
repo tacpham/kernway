@@ -2,7 +2,28 @@
 
 use crate::error::KernwayError;
 use crate::fields::{Headers, QueryParams};
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::path::PathBuf;
+
+/// A request body too large for memory, streamed to a temporary file by the server
+/// (bodies over `max_inmemory_body`). Handlers reach it through the `UploadFile` /
+/// `Multipart` extractors; the file is removed when this is dropped unless it was moved
+/// out (e.g. `UploadFile::persist`). Memory stays O(chunk), not O(body).
+#[derive(Debug)]
+pub struct SpooledBody {
+    /// Path to the temp file holding the body.
+    pub path: PathBuf,
+    /// Full body length in bytes.
+    pub len: u64,
+}
+
+impl Drop for SpooledBody {
+    fn drop(&mut self) {
+        // Best-effort cleanup: if the body was persisted (renamed) this is already gone.
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
 
 /// HTTP protocol version of a request.
 ///
@@ -46,8 +67,13 @@ pub struct Request {
     /// Populated by the router after a route matches, so it is empty on a
     /// hand-built `Request`.
     pub path_params: HashMap<String, String>,
-    /// Raw request body. Left empty when the request carries none.
+    /// Raw request body, in memory. Empty when the request carries none, or when the
+    /// body was too large and streamed to disk instead — see [`body_spool`](Self::body_spool).
     pub body:        Vec<u8>,
+    /// Set instead of [`body`](Self::body) when the body exceeded `max_inmemory_body`
+    /// and was streamed to a temporary file. Reached via the `UploadFile`/`Multipart`
+    /// extractors; [`body_bytes`](Self::body_bytes) reads it for the buffered extractors.
+    pub body_spool:  Option<SpooledBody>,
     /// The TCP peer address the request arrived on — the direct client, or a
     /// reverse proxy when one sits in front. `None` on a hand-built request. The
     /// *real* client IP behind a proxy is resolved from this plus the forwarded
@@ -66,7 +92,21 @@ impl Request {
             query:       QueryParams::new(),
             path_params: HashMap::new(),
             body:        Vec::new(),
+            body_spool:  None,
             remote_addr: None,
+        }
+    }
+
+    /// The body bytes, reading the spooled temp file if the body was streamed to disk
+    /// (over `max_inmemory_body`). Borrows the in-memory body in the common small-body
+    /// case; a spooled body is read fully into memory here, so this is for the buffered
+    /// extractors (`Json`, `Validated`) — large uploads should use `UploadFile`/`Multipart`,
+    /// which stream from [`body_spool`](Self::body_spool) without materialising it.
+    #[must_use]
+    pub fn body_bytes(&self) -> Cow<'_, [u8]> {
+        match &self.body_spool {
+            Some(spool) => Cow::Owned(std::fs::read(&spool.path).unwrap_or_default()),
+            None => Cow::Borrowed(&self.body),
         }
     }
 

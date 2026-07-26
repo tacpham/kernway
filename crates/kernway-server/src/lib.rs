@@ -46,6 +46,8 @@ pub mod middleware;
 pub mod security;
 /// Typed argument extraction for `#[controller]` methods.
 pub mod extract;
+/// `UploadFile` — a large request body streamed to a temp file.
+pub mod upload;
 /// Visitor tracking + ban middleware (`VisitorTracking`, `BanFilter`).
 pub mod tracking;
 /// CORS — cross-origin resource sharing middleware (Spring's `cors()`).
@@ -88,6 +90,8 @@ pub use compression::Compression;
 // Typed argument extraction + the extractors, re-exported so `#[controller]` method
 // params (`id: Path<u64>`, `body: Validated<T>`) reference only `::kernway_server::`.
 pub use extract::Extract;
+pub use upload::UploadFile;
+pub use app::UploadConfig;
 pub use kernway_web::{Json, Path, ProblemDetail, Query, Validated};
 // Visitor tracking + ban middleware and its types.
 pub use kernway_security::{BanList, Bans, RequestMeta};
