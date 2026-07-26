@@ -14,8 +14,8 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
     parse_macro_input, punctuated::Punctuated, token::Comma, Attribute, Data, DataStruct,
-    DeriveInput, Expr, Fields, FieldsNamed, GenericArgument, ImplItem, ItemImpl, ItemStruct, Lit,
-    LitStr, Meta, MetaList, PathArguments, Type,
+    DeriveInput, Expr, Fields, FieldsNamed, FnArg, GenericArgument, ImplItem, ItemImpl, ItemStruct,
+    Lit, LitStr, Meta, MetaList, Pat, PathArguments, Type,
 };
 
 // ============================================================
@@ -482,7 +482,8 @@ fn controller_impl(args: &str, mut item_impl: ItemImpl) -> TokenStream {
 
         let Some((http, path)) = route else { continue };
         let name = method.sig.ident.clone();
-        match route_registration(&name, &http, &format!("{prefix}{path}"), role.as_deref()) {
+        let inputs = method.sig.inputs.clone();
+        match route_registration(&name, &inputs, &http, &format!("{prefix}{path}"), role.as_deref()) {
             Ok(tokens) => registrations.push(tokens),
             Err(e) => return e.to_compile_error().into(),
         }
@@ -503,10 +504,13 @@ fn controller_impl(args: &str, mut item_impl: ItemImpl) -> TokenStream {
 }
 
 /// One route method → a `.get/.post/…(path, handler)` on the builder. The role
-/// guard is computed synchronously (it borrows the scope) before the `'static`
-/// handler future, which then owns only the request and the `Arc<Self>`.
+/// guard and each typed argument ([`Extract`]) are resolved **synchronously** (they
+/// borrow the request and scope) before the `'static` handler future, which then
+/// owns only the extracted values and the `Arc<Self>`. A `Request` parameter is the
+/// raw request, passed by move.
 fn route_registration(
     method: &syn::Ident,
+    inputs: &Punctuated<FnArg, Comma>,
     http: &str,
     full_path: &str,
     role: Option<&str>,
@@ -524,26 +528,72 @@ fn route_registration(
             ));
         }
     };
-    let allowed = match role {
-        Some(role) => quote! { ::kernway_server::role_allowed(scope, #role) },
-        None => quote! { true },
+
+    // Walk the method parameters (skipping `&self`): each is either the raw
+    // `Request` (moved) or a typed `Extract` (resolved synchronously, short-
+    // circuiting to its error response on failure).
+    let mut extractions = Vec::new();
+    let mut call_args = Vec::new();
+    let mut has_request = false;
+    for arg in inputs {
+        let FnArg::Typed(pt) = arg else { continue };
+        let Pat::Ident(pat) = &*pt.pat else {
+            return Err(syn::Error::new_spanned(&pt.pat, "#[route] method parameters must be simple names"));
+        };
+        let name = &pat.ident;
+        let ty = &pt.ty;
+        if is_request_type(ty) {
+            has_request = true;
+            call_args.push(quote! { req });
+        } else {
+            extractions.push(quote! {
+                let #name = match <#ty as ::kernway_server::Extract>::extract(&req, scope, ::std::stringify!(#name)) {
+                    ::std::result::Result::Ok(__value) => __value,
+                    ::std::result::Result::Err(__response) => {
+                        return ::std::boxed::Box::pin(async move { __response });
+                    }
+                };
+            });
+            call_args.push(quote! { #name });
+        }
+    }
+
+    // Only reference the closure params that are actually used, so the generated
+    // code has no "unused variable" warnings.
+    let req_used = has_request || !extractions.is_empty();
+    let scope_used = role.is_some() || !extractions.is_empty();
+    let req_param = if req_used { quote! { req } } else { quote! { _req } };
+    let scope_param = if scope_used { quote! { scope } } else { quote! { _scope } };
+    let guard = match role {
+        Some(role) => quote! {
+            if !::kernway_server::role_allowed(scope, #role) {
+                return ::std::boxed::Box::pin(async move { ::kernway_server::forbidden() });
+            }
+        },
+        None => quote! {},
     };
+
     Ok(quote! {
         __app = {
             let __this = ::std::sync::Arc::clone(&self);
-            __app.#builder(#full_path, move |req: ::kernway_server::Request, scope: &::kernway_server::RequestScope| {
-                // Guard runs now (borrows the scope); the future is `'static`.
-                let __allowed = #allowed;
-                let __this = ::std::sync::Arc::clone(&__this);
-                async move {
-                    if !__allowed {
-                        return ::kernway_server::forbidden();
-                    }
-                    __this.#method(req).await
-                }
-            })
+            __app.#builder(
+                #full_path,
+                move |#req_param: ::kernway_server::Request, #scope_param: &::kernway_server::RequestScope|
+                    -> ::kernway_server::BoxFuture<'static, ::kernway_server::Response>
+                {
+                    #guard
+                    #(#extractions)*
+                    let __this = ::std::sync::Arc::clone(&__this);
+                    ::std::boxed::Box::pin(async move { __this.#method(#(#call_args),*).await })
+                },
+            )
         };
     })
+}
+
+/// Whether a parameter type is the raw `Request` (passed by move, not extracted).
+fn is_request_type(ty: &Type) -> bool {
+    matches!(ty, Type::Path(tp) if tp.path.segments.last().is_some_and(|s| s.ident == "Request"))
 }
 
 /// Read `#[route(METHOD, "/path")]` → `(method, path)`.

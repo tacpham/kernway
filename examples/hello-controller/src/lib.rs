@@ -13,10 +13,11 @@
 
 use std::sync::Arc;
 
-use di_macro::controller;
+use di_macro::{controller, Validate};
 use kernway_security::SecurityContext;
 use kernway_server::{
-    BoxFuture, KernwayApp, Middleware, Next, Request, RequestScope, Response, StatusCode,
+    BoxFuture, KernwayApp, Middleware, Next, Path, Request, RequestScope, Response, StatusCode,
+    Validated,
 };
 
 /// Demo auth: turn an `X-Role` header into a `SecurityContext`. No header →
@@ -59,6 +60,44 @@ impl UserController {
     }
 }
 
+/// A validated request body for the typed-args controller.
+#[derive(serde::Deserialize, Validate)]
+struct NewItem {
+    #[validate(not_blank, length(min = 2, max = 40))]
+    name: String,
+}
+
+/// A controller using **typed argument extraction**: a `Path<u64>`, a
+/// `Validated<T>` body (auto-400 on invalid input, before the method runs), and the
+/// `SecurityContext` — extracted by the `#[controller]` macro, no manual parsing.
+pub struct ItemController;
+
+#[controller("/items")]
+impl ItemController {
+    /// `Path<u64>` — the id parsed and typed (a non-numeric id → 400).
+    #[route(GET, "/{id}")]
+    async fn show(&self, id: Path<u64>) -> Response {
+        json_ok(&format!(r#"{{"item":{}}}"#, *id))
+    }
+
+    /// `Validated<NewItem>` — the body is validated before the method body runs;
+    /// an invalid body never reaches here (the extractor returns a 400).
+    #[route(POST, "")]
+    async fn create(&self, body: Validated<NewItem>) -> Response {
+        json_ok(&format!(r#"{{"created":"{}"}}"#, body.name))
+    }
+
+    /// `SecurityContext` — the current identity, extracted from the scope.
+    #[route(GET, "/whoami")]
+    async fn whoami(&self, ctx: SecurityContext) -> Response {
+        json_ok(&format!(
+            r#"{{"user":"{}","admin":{}}}"#,
+            ctx.principal().unwrap_or("anonymous"),
+            ctx.has_role("ADMIN")
+        ))
+    }
+}
+
 fn json_ok(body: &str) -> Response {
     Response::new(StatusCode::OK)
         .content_type("application/json; charset=utf-8")
@@ -71,6 +110,7 @@ pub fn build_app(addr: &str) -> KernwayApp {
         .bind(addr)
         .layer(HeaderAuth)
         .controller(Arc::new(UserController))
+        .controller(Arc::new(ItemController))
         .build()
 }
 

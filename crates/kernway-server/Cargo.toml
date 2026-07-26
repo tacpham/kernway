@@ -9,6 +9,9 @@ license.workspace    = true
 kernway-core     = { workspace = true }
 kernway-http     = { workspace = true }
 kernway-static   = { workspace = true }
+kernway-web      = { workspace = true }   # Path/Json/Query/Validated for typed args
+kernway-validation = { workspace = true } # the Validate bound on Validated<T> extract
+serde            = { workspace = true }    # the DeserializeOwned bound on Json/Query
 kernway-log      = { workspace = true }   # access logs + startup warnings
 kernway-config   = { workspace = true }   # auto-load config, bind + logging from it
 kernway-security = { workspace = true }   # SecurityContext for #[require_role]
