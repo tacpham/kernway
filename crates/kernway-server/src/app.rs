@@ -540,10 +540,13 @@ async fn serve_connection(
     let mut buf: Vec<u8> = Vec::with_capacity(READ_CHUNK);
     let mut chunk = vec![0u8; READ_CHUNK];
     let mut served: u32 = 0;
+    // The peer address is per-connection; stamp it on each request so the app can
+    // resolve the real client (directly, or via forwarded headers behind a proxy).
+    let peer = stream.peer_addr().ok();
 
     loop {
         // --- Read until one whole request is buffered ---
-        let (request, consumed) = loop {
+        let (mut request, consumed) = loop {
             match parse_bytes(&buf) {
                 Ok(Parsed::Complete { request, consumed }) => break (request, consumed),
                 Ok(Parsed::Incomplete) => {}
@@ -589,6 +592,7 @@ async fn serve_connection(
         };
 
         // --- Answer it ---
+        request.remote_addr = peer;
         served += 1;
         let client_wants_more = request.wants_keep_alive();
         // A server on its way out answers this request and says so, rather than

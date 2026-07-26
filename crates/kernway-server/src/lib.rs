@@ -46,6 +46,8 @@ pub mod middleware;
 pub mod security;
 /// Typed argument extraction for `#[controller]` methods.
 pub mod extract;
+/// Visitor tracking + ban middleware (`VisitorTracking`, `BanFilter`).
+pub mod tracking;
 
 pub use app::{AppBuilder, Controller, KeepAliveConfig, KernwayApp};
 pub use middleware::{Middleware, Next};
@@ -71,3 +73,6 @@ pub use security::{Access, HttpSecurity, SecurityLayer};
 // params (`id: Path<u64>`, `body: Validated<T>`) reference only `::kernway_server::`.
 pub use extract::Extract;
 pub use kernway_web::{Json, Path, ProblemDetail, Query, Validated};
+// Visitor tracking + ban middleware and its types.
+pub use kernway_security::{BanList, Bans, RequestMeta};
+pub use tracking::{BanFilter, VisitorTracking};

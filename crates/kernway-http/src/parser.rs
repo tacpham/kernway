@@ -121,6 +121,7 @@ pub fn parse_bytes(buf: &[u8]) -> Result<Parsed, ParseError> {
             query,
             path_params: HashMap::new(), // filled by the router
             body: buf[head_end..total].to_vec(),
+            remote_addr: None, // set by the server from the socket peer
         },
         consumed: total,
     })
@@ -261,6 +262,7 @@ pub fn parse_from_reader<R: BufRead>(mut reader: R) -> Result<Request, ParseErro
         query,
         path_params: HashMap::new(), // filled by router
         body,
+        remote_addr: None, // set by the server from the socket peer
     })
 }
 

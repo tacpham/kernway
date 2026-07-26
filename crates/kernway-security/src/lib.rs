@@ -28,6 +28,11 @@ pub mod hash;
 pub mod token;
 pub mod session;
 
+/// Request tracking — visitor id, client IP (proxy-aware), User-Agent, and a ban
+/// list (IP / subnet / User-Agent).
+pub mod tracking;
+pub use tracking::{BanList, Bans, RequestMeta};
+
 /// Presence / heartbeat — who is online now, distinct from who has a session
 /// (feature = `presence`).
 #[cfg(feature = "presence")]
