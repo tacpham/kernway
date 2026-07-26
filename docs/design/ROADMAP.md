@@ -26,7 +26,7 @@
 
 **Deliverable**:
 ```toml
-# Thêm vào project Axum hiện tại
+# Add to an existing Axum project
 kernway-di = "0.1"
 ```
 
@@ -38,7 +38,7 @@ kernway-di = "0.1"
 
 - [x] `rt-core/sys/`: platform layer (CPU affinity). Linux only — macOS has no
       affinity API and Windows is unimplemented; both report `Unsupported`
-      rather than faking success. Graceful shutdown still to do.
+      rather than faking success.
 - [x] Reactor wrapping `mio::Poll` + custom Waker
 - [x] Executor + Task system (`RawWakerVTable`). Deviation from the module doc:
       the waker payload is `Arc<WakeHandle>`, not `Rc<Task>` — a `Waker` is
@@ -63,7 +63,19 @@ kernway-di = "0.1"
       bounded by an idle timeout and a per-connection request cap. Verified with
       `curl` reporting *Re-using existing connection*.
 - [ ] Benchmark: p99 within 20% of the tokio echo example (needs a Linux host)
-- [ ] Graceful shutdown / drain for `run_shards`
+- [x] Graceful shutdown / drain for `run_shards`. `rt_core::Shutdown` is a
+      latching, `Arc`-backed signal any thread can trigger; shards wait on it
+      through `until_shutdown`, so a parked shard wakes on the `poll()` it was
+      already sleeping in. On the signal a shard drops its listener first (the
+      port is released, new connections are refused rather than half-served),
+      then drains in-flight ones for `ShardConfig::drain_timeout` (15s default).
+      `kernway-server` stops announcing `keep-alive` once the signal fires, and
+      closes an idle kept-alive connection at once — but never one whose first
+      request is still on the wire, which would turn a graceful stop into a
+      connection reset. `SIGINT`/`SIGTERM` are wired up by `KernwayApp::run`;
+      a second interrupt hits the default handler and kills the process, so a
+      stuck drain is always escapable. Unix only — `on_interrupt` reports
+      `Unsupported` on Windows instead of silently never firing.
 - [ ] `transfer-encoding: chunked` — request bodies must still declare
       `content-length`
 
