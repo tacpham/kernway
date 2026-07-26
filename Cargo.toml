@@ -85,6 +85,12 @@ anyhow    = "1"
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# TLS for the outbound HTTP client (kernway-http-client). rustls is the Rust
+# ecosystem's de-facto TLS (what reqwest/hyper use); the `ring` provider avoids a C
+# toolchain. webpki-roots ships Mozilla's root CAs so we can verify public servers.
+rustls       = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
+
 # Benchmarking — statistical micro-benchmarks with regression detection
 # against a saved baseline (see scripts/check-core.sh --with-bench).
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }

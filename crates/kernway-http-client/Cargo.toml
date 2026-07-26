@@ -6,9 +6,12 @@ edition.workspace    = true
 license.workspace    = true
 
 [dependencies]
-# The Kernway async socket — same runtime as the server, no tokio. TLS (rustls) is
-# added in a follow-up so https works; this first cut is the plain-HTTP + parsing core.
+# The Kernway async socket — same runtime as the server, no tokio.
 rt-net = { workspace = true }
+# TLS for https:// — rustls (ring provider) + Mozilla roots. rustls is a state
+# machine we drive over the async socket ourselves (no tokio-rustls).
+rustls       = { workspace = true }
+webpki-roots = { workspace = true }
 
 [dev-dependencies]
 # Drives the client futures to completion in integration tests.
