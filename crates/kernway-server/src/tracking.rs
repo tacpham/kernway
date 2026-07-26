@@ -155,3 +155,74 @@ fn banned_response() -> Response {
         .content_type("application/json; charset=utf-8")
         .body(br#"{"status":403,"title":"Forbidden","detail":"access denied"}"#.to_vec())
 }
+
+/// Records the current request into an [`Activity`] store (feature = `presence`), so
+/// an admin can see a live "who is on the site and where" list. Reads the
+/// [`RequestMeta`] a `VisitorTracking` upstream put in the scope and the
+/// `SecurityContext` an auth middleware set — the identity is the logged-in user if
+/// there is one, else the anonymous visitor id. Recording is best-effort: a store
+/// error never fails the request.
+///
+/// Order it **after** `VisitorTracking` (and any auth), so both are in the scope.
+#[cfg(feature = "presence")]
+pub struct ActivityTracking {
+    activity: std::sync::Arc<dyn kernway_security::Activity>,
+}
+
+#[cfg(feature = "presence")]
+impl ActivityTracking {
+    /// Record into `activity` (an `InMemoryActivity` or a `RedisActivity`).
+    #[must_use]
+    pub fn new(activity: std::sync::Arc<dyn kernway_security::Activity>) -> Self {
+        Self { activity }
+    }
+}
+
+#[cfg(feature = "presence")]
+impl Middleware for ActivityTracking {
+    fn name(&self) -> &'static str {
+        "ActivityTracking"
+    }
+
+    fn handle<'a>(&'a self, req: Request, scope: &'a RequestScope, next: Next<'a>) -> BoxFuture<'a, Response> {
+        use kernway_security::{ActiveVisitor, SecurityContext};
+
+        // Needs the RequestMeta from VisitorTracking; without it, just pass through.
+        let Ok(meta) = scope.get::<RequestMeta>() else {
+            return next.run(req, scope);
+        };
+        // Identity: the logged-in user if authenticated, else the anonymous visitor id.
+        let ctx = scope.get::<SecurityContext>().ok();
+        let (id, authenticated) = match ctx.as_deref() {
+            Some(c) if c.is_authenticated() => {
+                (c.principal().unwrap_or(&meta.visitor_id).to_string(), true)
+            }
+            _ => (meta.visitor_id.clone(), false),
+        };
+        let visitor = ActiveVisitor {
+            id,
+            authenticated,
+            ip: meta.ip,
+            user_agent: meta.user_agent.clone(),
+            path: meta.path.clone(),
+            method: meta.method.clone(),
+            last_seen: unix_now(),
+        };
+        let activity = self.activity.clone();
+        Box::pin(async move {
+            // Best-effort: a store error must not fail the request being served.
+            let _ = activity.record(visitor).await;
+            next.run(req, scope).await
+        })
+    }
+}
+
+/// Unix seconds now — the activity liveness clock. Runtime code (not a workflow), so
+/// the system clock is available.
+#[cfg(feature = "presence")]
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}

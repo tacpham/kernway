@@ -76,3 +76,9 @@ pub use kernway_web::{Json, Path, ProblemDetail, Query, Validated};
 // Visitor tracking + ban middleware and its types.
 pub use kernway_security::{BanList, Bans, RequestMeta};
 pub use tracking::{BanFilter, VisitorTracking};
+// Live activity — the "who's on the site and where" middleware + store (feature =
+// `presence`, forwarded to kernway-security).
+#[cfg(feature = "presence")]
+pub use kernway_security::{ActiveVisitor, Activity, InMemoryActivity};
+#[cfg(feature = "presence")]
+pub use tracking::ActivityTracking;

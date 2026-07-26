@@ -126,6 +126,22 @@ pub fn build_app_tracked(addr: &str, bans: Bans) -> KernwayApp {
         .build()
 }
 
+/// Live activity: `VisitorTracking` + `ActivityTracking` record every request into a
+/// shared [`InMemoryActivity`], so an admin view can list who is on the site and the
+/// page each is on. The caller keeps the store to query `active(now)`.
+#[cfg(feature = "presence")]
+pub fn build_app_activity(addr: &str, activity: std::sync::Arc<kernway_server::InMemoryActivity>) -> KernwayApp {
+    use kernway_server::ActivityTracking;
+
+    KernwayApp::builder()
+        .bind(addr)
+        .layer(VisitorTracking::new()) // sets kw_visitor + RequestMeta
+        .layer(ActivityTracking::new(activity)) // records the request into the store
+        .get("/hello", |_req: Request, _scope: &RequestScope| async { json_ok(r#"{"ok":true}"#) })
+        .get("/reports", |_req: Request, _scope: &RequestScope| async { json_ok(r#"{"page":"reports"}"#) })
+        .build()
+}
+
 /// The alternative to per-route `#[require_role]`: **central** path-based rules
 /// (Spring's `HttpSecurity`). One place declares public/authenticated/role paths;
 /// the `SecurityLayer` enforces them before any handler. Auth (identity) is still
