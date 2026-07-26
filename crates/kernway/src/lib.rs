@@ -51,7 +51,10 @@ pub use kernway_server::{AppBuilder, BoxFuture, KernwayApp, Router};
 pub use di_core::RequestScope;
 
 // --- web: extractors and response types ---
-pub use kernway_web::{Html, Json, Path, ProblemDetail, Query};
+pub use kernway_web::{Html, Json, Path, ProblemDetail, Query, Validated};
+
+// --- validation: constraints + RFC 7807 (KEP-0000 §1) ---
+pub use kernway_validation::{self, rules as validation_rules, Validate, ValidationErrors};
 
 // --- htmx: typed HX-* extraction and response headers (feature = "htmx") ---
 #[cfg(feature = "htmx")]
@@ -82,7 +85,9 @@ pub use di_core::{AppContext, BeanEntry, DiError};
 pub use di_core::{KernwayComponent, KernwayController};
 
 // --- macros ---
-pub use di_macro::{Component, component, configuration, inject, controller, route, require_role, validated, transactional};
+// `Validate` is both the derive (di-macro, macro namespace) and the trait
+// (kernway-validation, type namespace) — coexisting like serde's `Serialize`.
+pub use di_macro::{Component, Validate, component, configuration, inject, controller, route, require_role, validated, transactional};
 
 /// `use kernway::prelude::*` — everything a handler usually needs.
 pub mod prelude {
@@ -97,7 +102,9 @@ pub mod prelude {
     // Traits
     pub use crate::{IntoResponse, FromRequest, Layer, Next, DbPool, TemplateEngine, KernwayPlugin};
     // Extractors and response types
-    pub use crate::{Html, Json, Path, ProblemDetail, Query};
+    pub use crate::{Html, Json, Path, ProblemDetail, Query, Validated};
+    // Validation — the trait + derive share the name `Validate`
+    pub use crate::{Validate, ValidationErrors};
     // htmx (feature = "htmx")
     #[cfg(feature = "htmx")]
     pub use crate::{Htmx, HtmxResponse, Swap};

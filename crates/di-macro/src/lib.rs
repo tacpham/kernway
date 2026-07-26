@@ -13,8 +13,8 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
-    parse_macro_input, Data, DataStruct, DeriveInput, Fields, FieldsNamed,
-    GenericArgument, ItemStruct, PathArguments, Type,
+    parse_macro_input, punctuated::Punctuated, token::Comma, Data, DataStruct, DeriveInput, Fields,
+    FieldsNamed, GenericArgument, ItemStruct, Meta, MetaList, PathArguments, Type,
 };
 
 // ============================================================
@@ -470,6 +470,120 @@ pub fn validated(args: TokenStream, input: TokenStream) -> TokenStream {
 pub fn transactional(args: TokenStream, input: TokenStream) -> TokenStream {
     let _ = args;
     input
+}
+
+/// Derive `Validate` from `#[validate(...)]` field constraints (Spring's Bean
+/// Validation). Generates a `validate` that runs each field's rules and collects
+/// **every** failure.
+///
+/// ```rust,ignore
+/// #[derive(Validate)]
+/// struct CreateUser {
+///     #[validate(not_blank, length(min = 3, max = 50))]
+///     name: String,
+///     #[validate(email)]
+///     email: String,
+///     #[validate(range(min = 0, max = 150))]
+///     age: u8,
+/// }
+/// ```
+///
+/// Rules: `not_blank`, `email` (no args, on `&str`/`String`); `length(min, max)`
+/// (on `&str`/`String`); `range(min, max)` (on a numeric field, by value).
+#[proc_macro_derive(Validate, attributes(validate))]
+pub fn derive_validate(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+
+    let fields = match &input.data {
+        Data::Struct(DataStruct { fields: Fields::Named(FieldsNamed { named, .. }), .. }) => named,
+        _ => {
+            return syn::Error::new_spanned(&name, "#[derive(Validate)] requires a struct with named fields")
+                .to_compile_error()
+                .into();
+        }
+    };
+
+    let mut checks = Vec::new();
+    for field in named_iter(fields) {
+        let fname = field.ident.as_ref().unwrap();
+        let fstr = fname.to_string();
+        for attr in &field.attrs {
+            if !attr.path().is_ident("validate") {
+                continue;
+            }
+            let metas = match attr.parse_args_with(Punctuated::<Meta, Comma>::parse_terminated) {
+                Ok(metas) => metas,
+                Err(e) => return e.to_compile_error().into(),
+            };
+            for meta in metas {
+                match meta {
+                    // `not_blank`, `email` — no-arg rules on the string field (by ref).
+                    Meta::Path(path) => {
+                        let rule = path.segments.last().map(|s| &s.ident);
+                        checks.push(quote! {
+                            if let ::std::result::Result::Err(__m) =
+                                ::kernway_validation::rules::#rule(&self.#fname)
+                            {
+                                __errors.push(#fstr, __m);
+                            }
+                        });
+                    }
+                    // `length(min, max)`, `range(min, max)` — bounded rules.
+                    Meta::List(list) => {
+                        let rule = list.path.segments.last().map(|s| s.ident.clone());
+                        let (min, max) = parse_min_max(&list);
+                        let min_tokens = min.map_or_else(|| quote! { None }, |e| quote! { Some(#e) });
+                        let max_tokens = max.map_or_else(|| quote! { None }, |e| quote! { Some(#e) });
+                        // range takes the numeric field by value; length by ref.
+                        let is_range = rule.as_ref().is_some_and(|r| r == "range");
+                        let arg = if is_range { quote! { self.#fname } } else { quote! { &self.#fname } };
+                        checks.push(quote! {
+                            if let ::std::result::Result::Err(__m) =
+                                ::kernway_validation::rules::#rule(#arg, #min_tokens, #max_tokens)
+                            {
+                                __errors.push(#fstr, __m);
+                            }
+                        });
+                    }
+                    Meta::NameValue(_) => {}
+                }
+            }
+        }
+    }
+
+    let expanded = quote! {
+        impl ::kernway_validation::Validate for #name {
+            fn validate(&self) -> ::std::result::Result<(), ::kernway_validation::ValidationErrors> {
+                let mut __errors = ::kernway_validation::ValidationErrors::new();
+                #(#checks)*
+                __errors.into_result()
+            }
+        }
+    };
+    expanded.into()
+}
+
+/// Iterate named fields (small helper so the loop reads cleanly).
+fn named_iter(named: &Punctuated<syn::Field, Comma>) -> impl Iterator<Item = &syn::Field> {
+    named.iter()
+}
+
+/// Pull `min`/`max` expressions out of a `length(min = .., max = ..)` /
+/// `range(...)` attribute list; either may be absent.
+fn parse_min_max(list: &MetaList) -> (Option<syn::Expr>, Option<syn::Expr>) {
+    let mut min = None;
+    let mut max = None;
+    if let Ok(pairs) = list.parse_args_with(Punctuated::<syn::MetaNameValue, Comma>::parse_terminated) {
+        for pair in pairs {
+            if pair.path.is_ident("min") {
+                min = Some(pair.value);
+            } else if pair.path.is_ident("max") {
+                max = Some(pair.value);
+            }
+        }
+    }
+    (min, max)
 }
 
 /// Bind a configuration section to a struct — Spring's `@ConfigurationProperties`

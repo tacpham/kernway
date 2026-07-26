@@ -193,6 +193,85 @@ impl ProblemDetail {
     }
 }
 
+// ============================================================
+// Validated<T> — deserialize + validate a request body
+// ============================================================
+
+use kernway_validation::{Validate, ValidationErrors};
+
+/// A request body deserialized **and** validated ([`kernway_validation`]).
+///
+/// [`from_request`](Validated::from_request) parses the JSON body and runs the
+/// type's `Validate`; on failure it returns a ready RFC 7807 `400` listing every
+/// field error, so a handler is:
+///
+/// ```rust,ignore
+/// let Validated(body) = match Validated::<CreateUser>::from_request(&req) {
+///     Ok(v) => v,
+///     Err(resp) => return resp,   // 400 with the field errors
+/// };
+/// // `body` is now known-valid
+/// ```
+pub struct Validated<T>(pub T);
+
+impl<T: DeserializeOwned + Validate> Validated<T> {
+    /// Deserialize the JSON body into `T` and validate it. The `Err` is a finished
+    /// `400` response — a malformed body is a plain problem, a validation failure
+    /// carries the per-field `errors`.
+    ///
+    /// # Errors
+    /// Returns a `400` [`Response`] when the body is not valid JSON for `T` or fails
+    /// validation.
+    pub fn from_request(req: &Request) -> Result<Self, Response> {
+        let value: T = serde_json::from_slice(&req.body)
+            .map_err(|e| ProblemDetail::bad_request(format!("invalid JSON body: {e}")))?;
+        match value.validate() {
+            Ok(()) => Ok(Validated(value)),
+            Err(errors) => Err(validation_response(&errors)),
+        }
+    }
+}
+
+impl<T> std::ops::Deref for Validated<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+/// One field failure in the RFC 7807 `errors` extension member.
+#[derive(Serialize)]
+struct FieldProblem<'a> {
+    field: &'a str,
+    message: &'a str,
+}
+
+/// RFC 7807 problem with a validation `errors` array (an extension member, §3.2).
+#[derive(Serialize)]
+struct ValidationProblem<'a> {
+    status: u16,
+    title: &'static str,
+    detail: &'static str,
+    errors: Vec<FieldProblem<'a>>,
+}
+
+/// A `400` response listing every field failure.
+fn validation_response(errors: &ValidationErrors) -> Response {
+    let problem = ValidationProblem {
+        status: 400,
+        title: "Validation Failed",
+        detail: "the request body did not pass validation",
+        errors: errors
+            .errors()
+            .iter()
+            .map(|e| FieldProblem { field: &e.field, message: &e.message })
+            .collect(),
+    };
+    let mut response = Json(problem).into_response();
+    response.status = StatusCode::BAD_REQUEST;
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +314,54 @@ mod tests {
         let mut req = Request::new("POST", "/users");
         req.body = b"not json".to_vec();
         assert!(Json::<User>::from_request(&req).is_err());
+    }
+
+    // --- Validated<T> ---
+
+    #[test]
+    fn validated_accepts_valid_and_rejects_invalid_with_field_errors() {
+        use kernway_validation::{rules, Validate, ValidationErrors};
+
+        #[derive(serde::Deserialize)]
+        struct NewUser {
+            name: String,
+            email: String,
+        }
+        impl Validate for NewUser {
+            fn validate(&self) -> Result<(), ValidationErrors> {
+                let mut errors = ValidationErrors::new();
+                if let Err(m) = rules::not_blank(&self.name) {
+                    errors.push("name", m);
+                }
+                if let Err(m) = rules::email(&self.email) {
+                    errors.push("email", m);
+                }
+                errors.into_result()
+            }
+        }
+
+        // A valid body passes through.
+        let mut req = Request::new("POST", "/users");
+        req.body = br#"{"name":"Alice","email":"alice@example.com"}"#.to_vec();
+        assert!(Validated::<NewUser>::from_request(&req).is_ok());
+
+        // An invalid body → 400 listing every field error.
+        let mut bad = Request::new("POST", "/users");
+        bad.body = br#"{"name":"","email":"nope"}"#.to_vec();
+        let resp = Validated::<NewUser>::from_request(&bad).err().unwrap();
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        let body = String::from_utf8_lossy(resp.body_bytes());
+        assert!(body.contains("Validation Failed"), "body: {body}");
+        assert!(body.contains(r#""field":"name""#), "name error present: {body}");
+        assert!(body.contains(r#""field":"email""#), "email error present: {body}");
+
+        // A malformed body is a plain 400 problem.
+        let mut malformed = Request::new("POST", "/users");
+        malformed.body = b"not json".to_vec();
+        assert_eq!(
+            Validated::<NewUser>::from_request(&malformed).err().unwrap().status,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     // --- Path<T> ---
