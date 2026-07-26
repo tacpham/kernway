@@ -50,6 +50,9 @@ pub mod extract;
 pub mod tracking;
 /// Config-driven backend selection (memory / file / redis) for the security stores.
 pub mod backends;
+/// JWT bearer authentication middleware (`BearerAuth`, feature = `jwt`).
+#[cfg(feature = "jwt")]
+pub mod auth;
 
 pub use app::{AppBuilder, Controller, KeepAliveConfig, KernwayApp};
 pub use middleware::{Middleware, Next};
@@ -80,6 +83,11 @@ pub use kernway_security::{BanList, Bans, RequestMeta};
 pub use tracking::{BanFilter, VisitorTracking};
 // Config-driven backend selection.
 pub use backends::{session_store_from_config, BanBackend, BackendError};
+// JWT bearer authentication (feature = `jwt`).
+#[cfg(feature = "jwt")]
+pub use auth::BearerAuth;
+#[cfg(feature = "jwt")]
+pub use kernway_security::{Claims, Jwt, JwtError, Validation};
 // Live activity — the "who's on the site and where" middleware + store (feature =
 // `presence`, forwarded to kernway-security).
 #[cfg(feature = "presence")]

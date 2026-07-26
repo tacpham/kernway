@@ -26,6 +26,12 @@ kernway-redis = { workspace = true, optional = true }
 # for stores that stay in memory but survive a restart without a Redis server.
 kernway-persist = { workspace = true, optional = true }
 
+# JSON for JWT claims (feature = "jwt"). A JWT must be spec-correct JSON to
+# interoperate, so this is the responsible dependency (KEP-0000 §1) rather than a
+# hand-rolled JSON — the same call as getrandom for the CSPRNG.
+serde      = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
 [features]
 # Presence / heartbeat — who is online now (KEP-0004 sibling). Off by default:
 # an app that does not need it compiles none of it.
@@ -36,6 +42,9 @@ redis = ["dep:kernway-redis"]
 # Local, durable-on-disk backends (bans / sessions / activity): fast in-memory
 # reads, but a restart keeps the data. Single-node (no sharing across instances).
 persist = ["dep:kernway-persist"]
+# JSON Web Tokens (RFC 7519), HS256 — a standards-compliant, stateless bearer
+# token alongside the stateful session token. Pulls in serde for the claims JSON.
+jwt = ["dep:serde", "dep:serde_json"]
 
 [dev-dependencies]
 criterion = { workspace = true }

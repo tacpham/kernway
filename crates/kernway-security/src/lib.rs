@@ -37,6 +37,12 @@ pub use tracking::{BanList, Bans, RequestMeta};
 pub mod password;
 pub use password::{hash_password, verify_password};
 
+/// JSON Web Tokens (RFC 7519), HS256 — a stateless bearer token (feature = `jwt`).
+#[cfg(feature = "jwt")]
+pub mod jwt;
+#[cfg(feature = "jwt")]
+pub use jwt::{Claims, Jwt, JwtError, Validation};
+
 /// Presence / heartbeat — who is online now, distinct from who has a session
 /// (feature = `presence`).
 #[cfg(feature = "presence")]
