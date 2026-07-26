@@ -7,9 +7,11 @@ publish = false
 [dependencies]
 # The #[controller] macro expands to ::kernway_server:: paths, so a controller
 # crate needs just kernway-server (+ the macros, + security for the auth middleware).
-kernway-server   = { workspace = true }
-kernway-security = { workspace = true }
-di-macro         = { workspace = true }
+kernway-server     = { workspace = true }
+kernway-security   = { workspace = true }
+kernway-validation = { workspace = true } # #[derive(Validate)] for a Validated<T> arg
+di-macro           = { workspace = true }
+serde              = { workspace = true }
 
 [lints]
 workspace = true

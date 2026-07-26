@@ -44,6 +44,8 @@ pub mod app;
 pub mod middleware;
 /// Web security — central, path-based access rules (Spring's `HttpSecurity`).
 pub mod security;
+/// Typed argument extraction for `#[controller]` methods.
+pub mod extract;
 
 pub use app::{AppBuilder, Controller, KeepAliveConfig, KernwayApp};
 pub use middleware::{Middleware, Next};
@@ -63,3 +65,7 @@ pub use kernway_core::response::Response;
 pub use app::{forbidden, role_allowed, unauthorized};
 // Central, path-based access rules (Spring's HttpSecurity).
 pub use security::{Access, HttpSecurity, SecurityLayer};
+// Typed argument extraction + the extractors, re-exported so `#[controller]` method
+// params (`id: Path<u64>`, `body: Validated<T>`) reference only `::kernway_server::`.
+pub use extract::Extract;
+pub use kernway_web::{Json, Path, ProblemDetail, Query, Validated};

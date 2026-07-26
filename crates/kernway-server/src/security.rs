@@ -50,8 +50,12 @@ pub enum Access {
 /// A builder of path-based access rules (Spring's `HttpSecurity`). Rules match in
 /// declaration order (first match wins); [`any_request`](HttpSecurity::any_request)
 /// is the fallback.
+/// One rule: an optional HTTP method (`None` = any), a path pattern, and the access
+/// it grants.
+type Rule = (Option<String>, String, Access);
+
 pub struct HttpSecurity {
-    rules: Vec<(String, Access)>,
+    rules: Vec<Rule>,
     default: Access,
 }
 
@@ -63,39 +67,48 @@ impl HttpSecurity {
         Self { rules: Vec::new(), default: Access::Authenticated }
     }
 
-    /// Open a path pattern to everyone.
+    /// Open a path pattern to everyone (any method).
     #[must_use]
-    pub fn permit_all(mut self, pattern: &str) -> Self {
-        self.rules.push((pattern.to_string(), Access::PermitAll));
-        self
+    pub fn permit_all(self, pattern: &str) -> Self {
+        self.rule(None, pattern, Access::PermitAll)
     }
 
-    /// Require any authenticated user on a pattern.
+    /// Require any authenticated user on a pattern (any method).
     #[must_use]
-    pub fn authenticated(mut self, pattern: &str) -> Self {
-        self.rules.push((pattern.to_string(), Access::Authenticated));
-        self
+    pub fn authenticated(self, pattern: &str) -> Self {
+        self.rule(None, pattern, Access::Authenticated)
     }
 
-    /// Require `role` on a pattern.
+    /// Require `role` on a pattern (any method).
     #[must_use]
-    pub fn has_role(mut self, pattern: &str, role: &str) -> Self {
-        self.rules.push((pattern.to_string(), Access::HasRole(role.to_string())));
-        self
+    pub fn has_role(self, pattern: &str, role: &str) -> Self {
+        self.rule(None, pattern, Access::HasRole(role.to_string()))
     }
 
-    /// Require any of `roles` on a pattern.
+    /// Require any of `roles` on a pattern (any method).
     #[must_use]
-    pub fn has_any_role(mut self, pattern: &str, roles: &[&str]) -> Self {
-        let roles = roles.iter().map(|r| (*r).to_string()).collect();
-        self.rules.push((pattern.to_string(), Access::HasAnyRole(roles)));
-        self
+    pub fn has_any_role(self, pattern: &str, roles: &[&str]) -> Self {
+        self.rule(None, pattern, Access::HasAnyRole(roles.iter().map(|r| (*r).to_string()).collect()))
     }
 
-    /// Deny a pattern outright.
+    /// Deny a pattern outright (any method).
     #[must_use]
-    pub fn deny_all(mut self, pattern: &str) -> Self {
-        self.rules.push((pattern.to_string(), Access::DenyAll));
+    pub fn deny_all(self, pattern: &str) -> Self {
+        self.rule(None, pattern, Access::DenyAll)
+    }
+
+    /// A **method-aware** rule (Spring's `requestMatchers(HttpMethod.POST, "/x")`):
+    /// only requests with `method` on `pattern` match it. So `POST /articles` can
+    /// need ADMIN while `GET /articles` is open.
+    #[must_use]
+    pub fn request(self, method: &str, pattern: &str, access: Access) -> Self {
+        self.rule(Some(method.to_ascii_uppercase()), pattern, access)
+    }
+
+    /// Add a rule directly (optional method + pattern + access).
+    #[must_use]
+    fn rule(mut self, method: Option<String>, pattern: &str, access: Access) -> Self {
+        self.rules.push((method, pattern.to_string(), access));
         self
     }
 
@@ -122,17 +135,20 @@ impl Default for HttpSecurity {
 /// The middleware [`HttpSecurity::build`] produces: match the request path to a
 /// rule and enforce it (401 when a login is needed, 403 when the role is missing).
 pub struct SecurityLayer {
-    rules: Arc<Vec<(String, Access)>>,
+    rules: Arc<Vec<Rule>>,
     default: Access,
 }
 
 impl SecurityLayer {
-    /// The access rule for `path` — the first matching pattern, else the default.
-    fn access_for(&self, path: &str) -> &Access {
+    /// The access rule for a `method` `path` request — the first rule whose method
+    /// (or any) and pattern match, else the default.
+    fn access_for(&self, method: &str, path: &str) -> &Access {
         self.rules
             .iter()
-            .find(|(pattern, _)| path_matches(pattern, path))
-            .map_or(&self.default, |(_, access)| access)
+            .find(|(rule_method, pattern, _)| {
+                rule_method.as_deref().map_or(true, |m| m == method) && path_matches(pattern, path)
+            })
+            .map_or(&self.default, |(_, _, access)| access)
     }
 }
 
@@ -144,7 +160,7 @@ impl Middleware for SecurityLayer {
     fn handle<'a>(&'a self, req: Request, scope: &'a RequestScope, next: Next<'a>) -> BoxFuture<'a, Response> {
         let anonymous = SecurityContext::anonymous();
         let context = scope.get::<SecurityContext>().ok();
-        let decision = decide(self.access_for(&req.path), context.as_deref().unwrap_or(&anonymous));
+        let decision = decide(self.access_for(&req.method, &req.path), context.as_deref().unwrap_or(&anonymous));
         match decision {
             Decision::Allow => next.run(req, scope),
             Decision::Unauthenticated => Box::pin(async { unauthorized() }),
@@ -250,10 +266,26 @@ mod tests {
             .authenticated("/api/**")
             .any_request(Access::PermitAll)
             .build();
-        assert!(matches!(layer.access_for("/public/x"), Access::PermitAll));
-        assert!(matches!(layer.access_for("/admin/x"), Access::HasRole(r) if r == "ADMIN"));
-        assert!(matches!(layer.access_for("/api/x"), Access::Authenticated));
-        assert!(matches!(layer.access_for("/other"), Access::PermitAll), "falls to any_request");
+        assert!(matches!(layer.access_for("GET", "/public/x"), Access::PermitAll));
+        assert!(matches!(layer.access_for("GET", "/admin/x"), Access::HasRole(r) if r == "ADMIN"));
+        assert!(matches!(layer.access_for("GET", "/api/x"), Access::Authenticated));
+        assert!(matches!(layer.access_for("GET", "/other"), Access::PermitAll), "falls to any_request");
+    }
+
+    #[test]
+    fn method_aware_rules_match_the_method() {
+        // GET /articles/** is open; POST/PUT/DELETE need ADMIN.
+        let layer = HttpSecurity::new()
+            .request("POST", "/articles/**", Access::HasRole("ADMIN".into()))
+            .request("DELETE", "/articles/**", Access::HasRole("ADMIN".into()))
+            .permit_all("/articles/**") // any other method (GET) is open
+            .any_request(Access::Authenticated)
+            .build();
+        assert!(matches!(layer.access_for("GET", "/articles/1"), Access::PermitAll), "GET open");
+        assert!(matches!(layer.access_for("POST", "/articles"), Access::HasRole(r) if r == "ADMIN"));
+        assert!(matches!(layer.access_for("DELETE", "/articles/1"), Access::HasRole(r) if r == "ADMIN"));
+        // A method-specific rule does not catch other methods.
+        assert!(matches!(layer.access_for("PUT", "/articles/1"), Access::PermitAll), "PUT falls to the open rule");
     }
 
     #[test]
