@@ -48,6 +48,8 @@ pub mod security;
 pub mod extract;
 /// Visitor tracking + ban middleware (`VisitorTracking`, `BanFilter`).
 pub mod tracking;
+/// CORS — cross-origin resource sharing middleware (Spring's `cors()`).
+pub mod cors;
 /// Config-driven backend selection (memory / file / redis) for the security stores.
 pub mod backends;
 /// JWT bearer authentication middleware (`BearerAuth`, feature = `jwt`).
@@ -74,6 +76,7 @@ pub use app::{forbidden, role_allowed, unauthorized};
 // middleware (kernway-server implements `Middleware` for it — see security.rs).
 pub use kernway_security::SecurityHeaders;
 pub use security::{Access, HttpSecurity, SecurityLayer};
+pub use cors::Cors;
 // Typed argument extraction + the extractors, re-exported so `#[controller]` method
 // params (`id: Path<u64>`, `body: Validated<T>`) reference only `::kernway_server::`.
 pub use extract::Extract;
