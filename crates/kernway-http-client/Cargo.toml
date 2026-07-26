@@ -15,7 +15,12 @@ webpki-roots = { workspace = true }
 
 [dev-dependencies]
 # Drives the client futures to completion in integration tests.
-rt-core = { workspace = true }
+rt-core   = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name    = "client"
+harness = false
 
 [lints]
 workspace = true

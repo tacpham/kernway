@@ -496,6 +496,27 @@ pub fn percent_encode(s: &str) -> String {
     out
 }
 
+// Benchmark hooks: the per-request CPU work (encode + parse), exposed for `benches/`
+// without widening the public API. Hidden from docs; not part of the stable surface.
+
+/// Benchmark hook — encode a request to the wire (see `benches/client.rs`).
+#[doc(hidden)]
+pub fn bench_encode_request(req: &Request) -> Vec<u8> {
+    encode_request(req)
+}
+
+/// Benchmark hook — parse a response head, returning the header count.
+#[doc(hidden)]
+pub fn bench_parse_head(head_bytes: &[u8]) -> usize {
+    parse_head(head_bytes).map(|h| h.headers.len()).unwrap_or(0)
+}
+
+/// Benchmark hook — decode a chunked body, returning its length.
+#[doc(hidden)]
+pub fn bench_decode_chunked(bytes: &[u8]) -> usize {
+    decode_chunked(bytes).map(|v| v.len()).unwrap_or(0)
+}
+
 /// Index of the first occurrence of `needle` in `haystack`.
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
