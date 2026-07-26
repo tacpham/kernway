@@ -38,9 +38,18 @@ fn client(c: &mut Criterion) {
         b.iter(|| black_box(bench_encode_request(black_box(&req))));
     });
 
-    // Response-head parsing — status line + 7 headers.
-    group.bench_function("parse_head", |b| {
+    // Response-head parsing — status line + 7 headers — ours vs httparse (the
+    // SIMD-optimised parser hyper/reqwest use), on identical bytes.
+    group.bench_function("parse_head/kernway", |b| {
         b.iter(|| black_box(bench_parse_head(black_box(RESPONSE_HEAD))));
+    });
+    group.bench_function("parse_head/httparse", |b| {
+        b.iter(|| {
+            let mut headers = [httparse::EMPTY_HEADER; 16];
+            let mut resp = httparse::Response::new(&mut headers);
+            black_box(resp.parse(black_box(RESPONSE_HEAD)).unwrap());
+            black_box(resp.code)
+        });
     });
 
     // Chunked decoding at a couple of body sizes (chunks of 256 bytes).

@@ -17,6 +17,9 @@ webpki-roots = { workspace = true }
 # Drives the client futures to completion in integration tests.
 rt-core   = { workspace = true }
 criterion = { workspace = true }
+# Benchmark-only: the response parser hyper/reqwest use, as the incumbent to measure
+# our own response-head parsing against (KEP-0000 §2). Never a real dependency.
+httparse  = "1"
 
 [[bench]]
 name    = "client"
