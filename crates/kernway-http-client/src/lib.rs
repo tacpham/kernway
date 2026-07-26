@@ -23,6 +23,7 @@ mod tls;
 
 use std::fmt;
 use std::net::ToSocketAddrs;
+use std::ops::Range;
 use std::sync::Arc;
 
 use rt_net::AsyncTcpStream;
@@ -162,21 +163,39 @@ impl Request {
 }
 
 /// A response from a remote server.
-#[derive(Debug, Clone)]
+///
+/// Headers are stored **without per-header allocation**: the raw header block is owned
+/// once, and each header is a pair of byte ranges into it, decoded to `&str` only when
+/// read via [`header`](Self::header)/[`headers`](Self::headers). Names keep their
+/// on-wire case; lookup is case-insensitive.
+#[derive(Clone)]
 pub struct Response {
     /// The HTTP status code.
     pub status: u16,
-    /// The response headers, in order (names lowercased).
-    pub headers: Vec<(String, String)>,
     /// The response body.
     pub body: Vec<u8>,
+    /// The raw header block (status line + headers), owned once; `spans` index into it.
+    head: Vec<u8>,
+    /// `(name, value)` byte ranges into `head`, one per header, in received order.
+    spans: Vec<(Range<usize>, Range<usize>)>,
 }
 
 impl Response {
     /// The first value of header `name` (case-insensitive), if present.
     #[must_use]
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+        self.spans
+            .iter()
+            .find(|(n, _)| self.head[n.clone()].eq_ignore_ascii_case(name.as_bytes()))
+            .map(|(_, v)| std::str::from_utf8(&self.head[v.clone()]).unwrap_or(""))
+    }
+
+    /// Every header as `(name, value)`, in received order.
+    pub fn headers(&self) -> impl Iterator<Item = (&str, &str)> + '_ {
+        self.spans.iter().map(move |(n, v)| {
+            let str_of = |r: &Range<usize>| std::str::from_utf8(&self.head[r.clone()]).unwrap_or("");
+            (str_of(n), str_of(v))
+        })
     }
 
     /// The body as UTF-8 (lossy).
@@ -189,6 +208,16 @@ impl Response {
     #[must_use]
     pub fn is_success(&self) -> bool {
         (200..300).contains(&self.status)
+    }
+}
+
+impl fmt::Debug for Response {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Response")
+            .field("status", &self.status)
+            .field("headers", &self.headers().collect::<Vec<_>>())
+            .field("body_len", &self.body.len())
+            .finish()
     }
 }
 
@@ -308,10 +337,12 @@ async fn read_response(stream: &mut Conn) -> Result<Response, HttpError> {
         }
     };
 
-    let head = parse_head(&buf[..head_end])?;
-    let mut body = buf[head_end..].to_vec(); // any bytes already read past the headers
+    // Split without copying the head: `body` takes the tail, `head_block` reuses buf.
+    let mut body = buf.split_off(head_end);
+    let head_block = buf;
+    let (status, spans) = parse_head_spans(&head_block)?;
 
-    match body_plan(&head.headers) {
+    match body_plan(&head_block, &spans) {
         BodyPlan::Length(n) => {
             while body.len() < n {
                 if !read_more_into(stream, &mut body).await? {
@@ -337,7 +368,7 @@ async fn read_response(stream: &mut Conn) -> Result<Response, HttpError> {
         }
     }
 
-    Ok(Response { status: head.status, headers: head.headers, body })
+    Ok(Response { status, body, head: head_block, spans })
 }
 
 /// Read one chunk from the connection into `buf`; `false` at EOF.
@@ -355,13 +386,7 @@ async fn read_more_into(stream: &mut Conn, buf: &mut Vec<u8>) -> Result<bool, Ht
     Ok(true)
 }
 
-// ── pure helpers (no I/O) — the reusable core, shared by the future TLS path ──
-
-/// The parsed status line + headers.
-struct Head {
-    status: u16,
-    headers: Vec<(String, String)>,
-}
+// ── pure helpers (no I/O) — the reusable core, shared by the plain + TLS paths ──
 
 /// How to read the body.
 enum BodyPlan {
@@ -373,39 +398,71 @@ enum BodyPlan {
     UntilClose,
 }
 
-/// Parse the status line and headers (given the bytes up to and including CRLFCRLF).
-fn parse_head(head_bytes: &[u8]) -> Result<Head, HttpError> {
-    let text = std::str::from_utf8(head_bytes).map_err(|_| HttpError::Protocol("non-UTF8 headers".into()))?;
-    let mut lines = text.split("\r\n");
+/// Parse the status code and the header `(name, value)` byte ranges — **no allocation
+/// per header** (the earlier version allocated two lowercased `String`s each) and no
+/// whole-block UTF-8 scan (the status code is read from bytes; header bytes are
+/// validated as UTF-8 only when accessed). This is the parser's hot path.
+fn parse_head_spans(block: &[u8]) -> Result<(u16, Vec<(Range<usize>, Range<usize>)>), HttpError> {
+    let line_end = find(block, b"\r\n").ok_or_else(|| HttpError::Protocol("no status line".into()))?;
+    let status = parse_status(&block[..line_end])?;
 
-    let status_line = lines.next().ok_or_else(|| HttpError::Protocol("empty response".into()))?;
-    // "HTTP/1.1 200 OK" → the middle token is the code.
-    let mut parts = status_line.splitn(3, ' ');
-    let _version = parts.next();
-    let status = parts
-        .next()
-        .and_then(|s| s.parse::<u16>().ok())
-        .ok_or_else(|| HttpError::Protocol(format!("bad status line {status_line:?}")))?;
-
-    let mut headers = Vec::new();
-    for line in lines {
-        if line.is_empty() {
+    let mut spans = Vec::new();
+    let mut pos = line_end + 2;
+    while pos < block.len() {
+        let end = match find(&block[pos..], b"\r\n") {
+            Some(i) => pos + i,
+            None => break, // no terminator — stop at the last complete line
+        };
+        if end == pos {
             break; // the blank line before the body
         }
-        if let Some((name, value)) = line.split_once(':') {
-            headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
+        if let Some(colon) = block[pos..end].iter().position(|&b| b == b':') {
+            let name = trim_range(block, pos, pos + colon);
+            let value = trim_range(block, pos + colon + 1, end);
+            spans.push((name, value));
         }
+        pos = end + 2;
     }
-    Ok(Head { status, headers })
+    Ok((status, spans))
 }
 
-/// Decide how to read the body from the response headers.
-fn body_plan(headers: &[(String, String)]) -> BodyPlan {
-    let header = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
-    if header("transfer-encoding").is_some_and(|v| v.eq_ignore_ascii_case("chunked")) {
+/// The code from a status line like `HTTP/1.1 200 OK` (the token after the version).
+fn parse_status(line: &[u8]) -> Result<u16, HttpError> {
+    let bad = || HttpError::Protocol("bad status line".into());
+    let space = line.iter().position(|&b| b == b' ').ok_or_else(bad)?;
+    let rest = &line[space + 1..];
+    let end = rest.iter().position(|&b| b == b' ').unwrap_or(rest.len());
+    std::str::from_utf8(&rest[..end]).ok().and_then(|s| s.parse::<u16>().ok()).ok_or_else(bad)
+}
+
+/// `start..end` with surrounding spaces/tabs trimmed — no allocation, just narrowed.
+fn trim_range(block: &[u8], mut start: usize, mut end: usize) -> Range<usize> {
+    while start < end && (block[start] == b' ' || block[start] == b'\t') {
+        start += 1;
+    }
+    while end > start && (block[end - 1] == b' ' || block[end - 1] == b'\t') {
+        end -= 1;
+    }
+    start..end
+}
+
+/// Look up a header value (bytes) by lowercase name, over the ranges.
+fn header_bytes<'a>(block: &'a [u8], spans: &[(Range<usize>, Range<usize>)], name: &[u8]) -> Option<&'a [u8]> {
+    spans
+        .iter()
+        .find(|(n, _)| block[n.clone()].eq_ignore_ascii_case(name))
+        .map(|(_, v)| &block[v.clone()])
+}
+
+/// Decide how to read the body from the parsed header ranges.
+fn body_plan(block: &[u8], spans: &[(Range<usize>, Range<usize>)]) -> BodyPlan {
+    if header_bytes(block, spans, b"transfer-encoding").is_some_and(|v| v.eq_ignore_ascii_case(b"chunked")) {
         return BodyPlan::Chunked;
     }
-    if let Some(len) = header("content-length").and_then(|v| v.trim().parse::<usize>().ok()) {
+    if let Some(len) = header_bytes(block, spans, b"content-length")
+        .and_then(|v| std::str::from_utf8(v).ok())
+        .and_then(|s| s.trim().parse::<usize>().ok())
+    {
         return BodyPlan::Length(len);
     }
     BodyPlan::UntilClose
@@ -508,7 +565,7 @@ pub fn bench_encode_request(req: &Request) -> Vec<u8> {
 /// Benchmark hook — parse a response head, returning the header count.
 #[doc(hidden)]
 pub fn bench_parse_head(head_bytes: &[u8]) -> usize {
-    parse_head(head_bytes).map(|h| h.headers.len()).unwrap_or(0)
+    parse_head_spans(head_bytes).map(|(_, spans)| spans.len()).unwrap_or(0)
 }
 
 /// Benchmark hook — decode a chunked body, returning its length.
@@ -564,11 +621,17 @@ mod tests {
     }
 
     #[test]
-    fn parses_a_response_head() {
-        let head = parse_head(b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\n").unwrap();
-        assert_eq!(head.status, 404);
-        assert_eq!(head.headers.len(), 2);
-        assert_eq!(head.headers[0], ("content-type".to_string(), "text/plain".to_string()));
+    fn parses_a_response_head_into_ranges() {
+        let block = b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\n";
+        let (status, spans) = parse_head_spans(block).unwrap();
+        assert_eq!(status, 404);
+        assert_eq!(spans.len(), 2);
+        // The name keeps its on-wire case and matches case-insensitively; the value is
+        // the exact byte slice, no allocation.
+        let (name, value) = &spans[0];
+        assert!(block[name.clone()].eq_ignore_ascii_case(b"content-type"));
+        assert_eq!(&block[value.clone()], b"text/plain");
+        assert_eq!(header_bytes(block, &spans, b"content-length"), Some(b"3".as_slice()));
     }
 
     #[test]
