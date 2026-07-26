@@ -45,6 +45,10 @@ harness = false
 name    = "stream_chunk"
 harness = false
 
+[[bench]]
+name    = "security"
+harness = false
+
 [lints]
 workspace = true
 

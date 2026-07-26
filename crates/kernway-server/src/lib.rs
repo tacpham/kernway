@@ -63,7 +63,9 @@ pub use kernway_core::response::Response;
 // The role check `#[require_role]` compiles to (reads the SecurityContext the auth
 // middleware put in the scope, KEP-0005) and the 401/403 responses.
 pub use app::{forbidden, role_allowed, unauthorized};
-// Central, path-based access rules (Spring's HttpSecurity).
+// Central, path-based access rules (Spring's HttpSecurity), and the SecurityHeaders
+// middleware (kernway-server implements `Middleware` for it — see security.rs).
+pub use kernway_security::SecurityHeaders;
 pub use security::{Access, HttpSecurity, SecurityLayer};
 // Typed argument extraction + the extractors, re-exported so `#[controller]` method
 // params (`id: Path<u64>`, `body: Validated<T>`) reference only `::kernway_server::`.

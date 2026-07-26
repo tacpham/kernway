@@ -119,9 +119,8 @@ pub mod security;
 /// Re-export all traits for use with: `use kernway_core::prelude::*`
 pub mod prelude {
     pub use crate::error::KernwayError;
-    pub use crate::request::FromRequest;
+    pub use crate::layer::BoxFuture;
     pub use crate::response::IntoResponse;
-    pub use crate::layer::{Layer, Next};
     pub use crate::db::DbPool;
     pub use crate::template::{TemplateEngine, ToValue, Value};
     pub use crate::plugin::KernwayPlugin;

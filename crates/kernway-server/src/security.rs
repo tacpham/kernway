@@ -27,10 +27,28 @@ use di_core::RequestScope;
 use kernway_core::layer::BoxFuture;
 use kernway_core::request::Request;
 use kernway_core::response::Response;
-use kernway_security::SecurityContext;
+use kernway_security::{SecurityContext, SecurityHeaders};
 
 use crate::app::{forbidden, unauthorized};
 use crate::middleware::{Middleware, Next};
+
+/// [`SecurityHeaders`] as a middleware: add the headers to **every** response
+/// (`app.layer(SecurityHeaders::strict())`), instead of applying them per handler.
+/// This is the working replacement for the removed `SecurityHeadersLayer` (which
+/// implemented a superseded pre-KEP-0006 `Layer` trait).
+impl Middleware for SecurityHeaders {
+    fn name(&self) -> &'static str {
+        "SecurityHeaders"
+    }
+
+    fn handle<'a>(&'a self, req: Request, scope: &'a RequestScope, next: Next<'a>) -> BoxFuture<'a, Response> {
+        Box::pin(async move {
+            let mut response = next.run(req, scope).await;
+            self.apply(&mut response);
+            response
+        })
+    }
+}
 
 /// What a path requires — the right-hand side of a Spring `authorizeHttpRequests` rule.
 #[derive(Debug, Clone)]
@@ -47,13 +65,13 @@ pub enum Access {
     DenyAll,
 }
 
-/// A builder of path-based access rules (Spring's `HttpSecurity`). Rules match in
-/// declaration order (first match wins); [`any_request`](HttpSecurity::any_request)
-/// is the fallback.
 /// One rule: an optional HTTP method (`None` = any), a path pattern, and the access
 /// it grants.
 type Rule = (Option<String>, String, Access);
 
+/// A builder of path-based access rules (Spring's `HttpSecurity`). Rules match in
+/// declaration order (first match wins); [`any_request`](HttpSecurity::any_request)
+/// is the fallback.
 pub struct HttpSecurity {
     rules: Vec<Rule>,
     default: Access,
@@ -150,6 +168,14 @@ impl SecurityLayer {
             })
             .map_or(&self.default, |(_, _, access)| access)
     }
+
+    /// Whether a `method` `path` request from `ctx` is **allowed** by the policy —
+    /// the authorization decision without running a request (`false` covers both a
+    /// missing login and a missing role). Handy for testing a policy or measuring it.
+    #[must_use]
+    pub fn allows(&self, method: &str, path: &str, ctx: &SecurityContext) -> bool {
+        matches!(decide(self.access_for(method, path), ctx), Decision::Allow)
+    }
 }
 
 impl Middleware for SecurityLayer {
@@ -200,18 +226,23 @@ fn decide(access: &Access, context: &SecurityContext) -> Decision {
 
 /// Ant-style path match: `/a/**` matches `/a` and any descendant; `/a/*` matches
 /// exactly one more segment; `**` matches everything; otherwise an exact match.
+/// Allocation-free — it runs once per rule per request (the `security` bench).
 fn path_matches(pattern: &str, path: &str) -> bool {
     if pattern == "**" || pattern == "/**" {
         return true;
     }
     if let Some(prefix) = pattern.strip_suffix("/**") {
-        return path == prefix || path.starts_with(&format!("{prefix}/"));
+        // `path == prefix`, or `path` continues past `prefix` at a `/` boundary.
+        return path == prefix
+            || (path.starts_with(prefix) && path.as_bytes().get(prefix.len()) == Some(&b'/'));
     }
     if let Some(prefix) = pattern.strip_suffix("/*") {
-        return match path.strip_prefix(&format!("{prefix}/")) {
-            Some(rest) => !rest.is_empty() && !rest.contains('/'),
-            None => false,
-        };
+        // `prefix/` then exactly one more segment (no further `/`).
+        if path.starts_with(prefix) && path.as_bytes().get(prefix.len()) == Some(&b'/') {
+            let rest = &path[prefix.len() + 1..];
+            return !rest.is_empty() && !rest.contains('/');
+        }
+        return false;
     }
     pattern == path
 }
@@ -343,6 +374,23 @@ mod tests {
         // Default (authenticated) — login required.
         assert_eq!(enforce(&layer, "/anything", user()), StatusCode::OK);
         assert_eq!(enforce(&layer, "/anything", SecurityContext::anonymous()), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn security_headers_middleware_adds_headers_to_every_response() {
+        let headers = SecurityHeaders::strict();
+        let app = AppContext::new();
+        let scope = RequestScope::new(&app);
+        let terminal: &Terminal =
+            &|_req, _scope| Box::pin(async { Response::new(StatusCode::OK) }) as BoxFuture<'static, Response>;
+        let response = block_on(Middleware::handle(
+            &headers,
+            Request::new("GET", "/"),
+            &scope,
+            Next { rest: &[], terminal },
+        ));
+        assert_eq!(response.headers.get("x-frame-options"), Some("DENY"), "headers applied");
+        assert!(response.headers.get("content-security-policy").is_some(), "CSP applied");
     }
 
     #[test]

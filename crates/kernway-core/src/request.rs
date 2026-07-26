@@ -92,15 +92,9 @@ impl Request {
 
 /// Trait for extracting data from an HTTP request into a Rust type.
 ///
-/// Equivalent to `HandlerMethodArgumentResolver` in Spring MVC.
-/// `Path<T>`, `Query<T>`, `Json<T>`, and `Header<T>` all implement this trait.
-pub trait FromRequest: Sized + Send {
-    /// Error returned when extraction fails — must implement IntoResponse.
-    type Rejection: crate::response::IntoResponse;
-
-    /// Extract self from the request.
-    fn from_request(req: &Request) -> Result<Self, Self::Rejection>;
-}
+// Argument resolution is `kernway_server::Extract` (which also sees the request
+// scope), and the extractors' own `from_request`. An early `FromRequest` trait
+// lived here (0 impls) and was removed as dead in favour of those.
 
 // --- Error rejection helper ---
 
