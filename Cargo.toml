@@ -28,6 +28,7 @@ members = [
     "crates/kernway-validation",
     "crates/kernway-persist",
     "crates/kernway-http-client",
+    "crates/kernway-oauth2",
     "crates/kernway",
     "examples/echo-server",
     "examples/hello-di",
@@ -129,6 +130,7 @@ kernway-config       = { path = "crates/kernway-config" }
 kernway-validation   = { path = "crates/kernway-validation" }
 kernway-persist      = { path = "crates/kernway-persist" }
 kernway-http-client  = { path = "crates/kernway-http-client" }
+kernway-oauth2       = { path = "crates/kernway-oauth2" }
 rt-core              = { path = "crates/rt-core" }
 rt-net               = { path = "crates/rt-net" }
 di-core              = { path = "crates/di-core" }
