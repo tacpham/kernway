@@ -41,6 +41,7 @@ members = [
     "examples/login-htmx",
     "examples/hello-log",
     "examples/hello-config",
+    "examples/hello-validate",
 ]
 resolver = "2"
 

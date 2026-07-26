@@ -486,6 +486,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hello-validate"
+version = "0.1.0"
+dependencies = [
+ "kernway",
+ "kernway-validation",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "hello-web"
 version = "0.1.0"
 dependencies = [
