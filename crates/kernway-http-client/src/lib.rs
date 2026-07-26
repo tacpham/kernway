@@ -1128,11 +1128,9 @@ mod tests {
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
-        // gzip a payload the way a server would.
+        // gzip a payload the way a server would (via the shared compression crate).
         let payload = b"hello gzip world - this body is served compressed and must arrive plain";
-        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        encoder.write_all(payload).unwrap();
-        let gz = encoder.finish().unwrap();
+        let gz = kernway_compress::encode(payload, kernway_compress::Encoding::Gzip);
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();

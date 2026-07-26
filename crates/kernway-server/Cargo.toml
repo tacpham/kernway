@@ -15,6 +15,7 @@ serde            = { workspace = true }    # the DeserializeOwned bound on Json/
 kernway-log      = { workspace = true }   # access logs + startup warnings
 kernway-config   = { workspace = true }   # auto-load config, bind + logging from it
 kernway-security = { workspace = true }   # SecurityContext for #[require_role]
+kernway-compress = { workspace = true, optional = true } # dynamic response compression (feature)
 rt-net         = { workspace = true }
 rt-core        = { workspace = true }
 di-core        = { workspace = true }
@@ -31,6 +32,8 @@ persist = ["kernway-security/persist"]
 redis = ["kernway-security/redis"]
 # The BearerAuth middleware — `Authorization: Bearer <jwt>` → SecurityContext.
 jwt = ["kernway-security/jwt"]
+# The Compression middleware — dynamically compress compressible responses.
+compression = ["dep:kernway-compress"]
 
 [dev-dependencies]
 criterion = { workspace = true }
