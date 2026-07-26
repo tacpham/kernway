@@ -14,6 +14,9 @@ rt-core = { workspace = true }
 # machine we drive over the async socket ourselves (no tokio-rustls).
 rustls       = { workspace = true }
 webpki-roots = { workspace = true }
+# Response decompression — gzip/deflate + brotli (pure Rust).
+flate2 = { workspace = true }
+brotli = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
