@@ -20,6 +20,7 @@
 #![forbid(unsafe_code)]
 
 mod compress;
+mod cookie;
 mod tls;
 
 use std::collections::HashMap;
@@ -339,6 +340,7 @@ impl From<std::io::Error> for HttpError {
 pub struct HttpClient {
     tls: Arc<rustls::ClientConfig>,
     pool: Arc<ConnPool>,
+    cookies: Option<Arc<cookie::CookieJar>>,
     connect_timeout: Option<Duration>,
     timeout: Option<Duration>,
     max_redirects: usize,
@@ -357,11 +359,21 @@ impl HttpClient {
         Self {
             tls: tls::default_config(),
             pool: Arc::new(ConnPool::new(DEFAULT_MAX_IDLE_PER_HOST)),
+            cookies: None,
             connect_timeout: Some(DEFAULT_CONNECT_TIMEOUT),
             timeout: Some(DEFAULT_TIMEOUT),
             max_redirects: DEFAULT_MAX_REDIRECTS,
             max_idle_per_host: DEFAULT_MAX_IDLE_PER_HOST,
         }
+    }
+
+    /// Enable a cookie jar: store `Set-Cookie` from responses and send matching
+    /// `Cookie` headers on later requests (off by default — bearer-token APIs rarely
+    /// want implicit cookies). The jar is shared across clones of the client.
+    #[must_use]
+    pub fn cookie_store(mut self, enabled: bool) -> Self {
+        self.cookies = enabled.then(|| Arc::new(cookie::CookieJar::new()));
+        self
     }
 
     /// How many idle keep-alive connections to keep per origin (`0` disables pooling —
@@ -445,26 +457,53 @@ impl HttpClient {
     async fn roundtrip(&self, req: &Request) -> Result<Response, HttpError> {
         let origin = origin_of(&req.url);
         let keep_alive = self.max_idle_per_host > 0;
+        let now = now_ms();
 
-        // First, try a connection already in the pool.
-        if let Some(mut conn) = self.pool.take(&origin, now_ms()) {
-            match send_on(&mut conn, req, keep_alive).await {
-                Ok((response, keepable)) => {
-                    self.maybe_return(origin, conn, keepable, &response);
-                    return Ok(response);
-                }
-                // A stale pooled connection (server closed it) — fall through to a dial.
-                Err(e) if is_stale(&e) => {}
+        // The Cookie header for this URL, if a jar is enabled and has matches.
+        let cookie = self
+            .cookies
+            .as_ref()
+            .map(|jar| jar.header_for(&req.url, now / 1000))
+            .filter(|c| !c.is_empty());
+        let cookie = cookie.as_deref();
+
+        // Reuse a pooled connection if there is one; on a stale one, fall to a dial.
+        let (conn, response, keepable) = match self.pool.take(&origin, now) {
+            Some(mut conn) => match send_on(&mut conn, req, keep_alive, cookie).await {
+                Ok((response, keepable)) => (conn, response, keepable),
+                Err(e) if is_stale(&e) => self.dial_and_send(req, keep_alive, cookie).await?,
                 Err(e) => return Err(e),
+            },
+            None => self.dial_and_send(req, keep_alive, cookie).await?,
+        };
+
+        // Record any Set-Cookie the response carried.
+        if let Some(jar) = &self.cookies {
+            let set: Vec<&str> = response
+                .headers()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
+                .map(|(_, value)| value)
+                .collect();
+            if !set.is_empty() {
+                jar.store(set.into_iter(), &req.url, now / 1000);
             }
         }
 
-        // A fresh connection (first use for this origin, or the pooled one was stale).
-        let addr = resolve(&req.url.host, req.url.port)?;
-        let mut conn = self.connect(addr, &req.url).await?;
-        let (response, keepable) = send_on(&mut conn, req, keep_alive).await?;
         self.maybe_return(origin, conn, keepable, &response);
         Ok(response)
+    }
+
+    /// Open a fresh connection and send the request on it.
+    async fn dial_and_send(
+        &self,
+        req: &Request,
+        keep_alive: bool,
+        cookie: Option<&str>,
+    ) -> Result<(Conn, Response, bool), HttpError> {
+        let addr = resolve(&req.url.host, req.url.port)?;
+        let mut conn = self.connect(addr, &req.url).await?;
+        let (response, keepable) = send_on(&mut conn, req, keep_alive, cookie).await?;
+        Ok((conn, response, keepable))
     }
 
     /// Return the connection to the pool if pooling is on and the exchange left it in a
@@ -519,8 +558,8 @@ fn resolve(host: &str, port: u16) -> Result<std::net::SocketAddr, HttpError> {
 
 /// Write a request and read its full response. Returns the response and whether the
 /// connection is at a clean boundary for reuse (a framed body, not read-to-close).
-async fn send_on(conn: &mut Conn, req: &Request, keep_alive: bool) -> Result<(Response, bool), HttpError> {
-    conn.write_all(&encode_request(req, keep_alive)).await?;
+async fn send_on(conn: &mut Conn, req: &Request, keep_alive: bool, cookie: Option<&str>) -> Result<(Response, bool), HttpError> {
+    conn.write_all(&encode_request(req, keep_alive, cookie)).await?;
     read_response(conn).await
 }
 
@@ -713,9 +752,10 @@ fn decode_chunked(bytes: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-/// Serialise a request to the wire, adding Host/Content-Length/Connection/User-Agent.
-/// `keep_alive` picks `Connection: keep-alive` (pooled) vs `close`.
-fn encode_request(req: &Request, keep_alive: bool) -> Vec<u8> {
+/// Serialise a request to the wire, adding Host/Content-Length/Connection/User-Agent
+/// (and `Cookie` when the jar supplied one). `keep_alive` picks `Connection:
+/// keep-alive` (pooled) vs `close`.
+fn encode_request(req: &Request, keep_alive: bool, cookie: Option<&str>) -> Vec<u8> {
     let mut out = format!("{} {} HTTP/1.1\r\n", req.method.as_str(), req.url.path_and_query);
 
     let has = |name: &str| req.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(name));
@@ -743,6 +783,11 @@ fn encode_request(req: &Request, keep_alive: bool) -> Vec<u8> {
     }
     if !has("connection") {
         out.push_str(if keep_alive { "Connection: keep-alive\r\n" } else { "Connection: close\r\n" });
+    }
+    if let Some(cookie) = cookie {
+        if !cookie.is_empty() && !has("cookie") {
+            out.push_str(&format!("Cookie: {cookie}\r\n"));
+        }
     }
     out.push_str("\r\n");
 
@@ -847,7 +892,7 @@ pub fn percent_encode(s: &str) -> String {
 /// Benchmark hook — encode a request to the wire (see `benches/client.rs`).
 #[doc(hidden)]
 pub fn bench_encode_request(req: &Request) -> Vec<u8> {
-    encode_request(req, true)
+    encode_request(req, true, None)
 }
 
 /// Benchmark hook — parse a response head, returning the header count.
@@ -897,7 +942,7 @@ mod tests {
     fn encodes_a_request_with_default_headers() {
         let req = Request::new(Method::Post, Url::parse("http://api.example.com/v1/things").unwrap())
             .body("application/json", b"{}".to_vec());
-        let wire = String::from_utf8(encode_request(&req, false)).unwrap();
+        let wire = String::from_utf8(encode_request(&req, false, None)).unwrap();
         assert!(wire.starts_with("POST /v1/things HTTP/1.1\r\n"));
         assert!(wire.contains("Host: api.example.com\r\n"));
         // Custom headers are emitted as stored (lowercased); wire header names are
@@ -907,8 +952,11 @@ mod tests {
         assert!(wire.contains("Connection: close\r\n"));
         assert!(wire.ends_with("\r\n\r\n{}"));
         // With pooling on, the connection is kept alive instead.
-        let ka = String::from_utf8(encode_request(&req, true)).unwrap();
+        let ka = String::from_utf8(encode_request(&req, true, None)).unwrap();
         assert!(ka.contains("Connection: keep-alive\r\n"));
+        // A supplied cookie is included.
+        let ck = String::from_utf8(encode_request(&req, true, Some("sid=abc"))).unwrap();
+        assert!(ck.contains("Cookie: sid=abc\r\n"));
     }
 
     #[test]
@@ -1038,6 +1086,41 @@ mod tests {
         assert_eq!(resp.text(), "done");
         let followed = server.join().unwrap();
         assert!(followed.starts_with("GET /final "), "followed to /final: {followed}");
+    }
+
+    #[test]
+    fn a_cookie_jar_carries_cookies_to_the_next_request() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // One keep-alive connection: reply 1 sets a cookie; capture request 2 to check
+        // it echoes the cookie back.
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 512];
+            let _ = sock.read(&mut buf).unwrap();
+            sock.write_all(b"HTTP/1.1 200 OK\r\nSet-Cookie: sid=abc123; Path=/\r\nContent-Length: 0\r\n\r\n").unwrap();
+            let n = sock.read(&mut buf).unwrap();
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").unwrap();
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        });
+
+        let client = HttpClient::new().cookie_store(true);
+        let url = format!("http://127.0.0.1:{port}/");
+        rt_core::Executor::new()
+            .unwrap()
+            .block_on(async {
+                let _ = client.get(&url).await; // receives Set-Cookie
+                let _ = client.get(&url).await; // should send Cookie: sid=abc123
+            })
+            .unwrap();
+        let second = server.join().unwrap();
+        assert!(
+            second.to_lowercase().contains("cookie: sid=abc123"),
+            "the jar sent the cookie on the next request: {second}"
+        );
     }
 
     #[test]
