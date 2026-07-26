@@ -1,0 +1,18 @@
+[package]
+name        = "kernway-http-client"
+description = "Async outbound HTTP/1.1 client on the Kernway runtime — the client half, for calling other services (OAuth2, external APIs, JWKS)"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+
+[dependencies]
+# The Kernway async socket — same runtime as the server, no tokio. TLS (rustls) is
+# added in a follow-up so https works; this first cut is the plain-HTTP + parsing core.
+rt-net = { workspace = true }
+
+[dev-dependencies]
+# Drives the client futures to completion in integration tests.
+rt-core = { workspace = true }
+
+[lints]
+workspace = true
