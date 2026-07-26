@@ -9,7 +9,8 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use kernway_http_client::{
-    bench_decode_chunked, bench_encode_request, bench_parse_head, percent_encode, Method, Request, Url,
+    bench_chunk_decoder_incremental, bench_decode_chunked, bench_encode_request, bench_parse_head, percent_encode,
+    Method, Request, Url,
 };
 
 /// A response head with a realistic set of headers.
@@ -57,6 +58,19 @@ fn client(c: &mut Criterion) {
         let body = make_chunked(chunks, 256);
         group.bench_with_input(BenchmarkId::new("decode_chunked", chunks * 256), &body, |b, body| {
             b.iter(|| black_box(bench_decode_chunked(black_box(body))));
+        });
+    }
+
+    // Streaming (incremental) vs whole-buffer chunked decoding on a larger body: the
+    // whole-buffer decoder re-parses from the start every call (O(n²) when fed
+    // progressively), the incremental one is O(consumed). Fed whole here for parity.
+    for chunks in [64usize, 256] {
+        let body = make_chunked(chunks, 256);
+        group.bench_with_input(BenchmarkId::new("decode_chunked/whole", chunks * 256), &body, |b, body| {
+            b.iter(|| black_box(bench_decode_chunked(black_box(body))));
+        });
+        group.bench_with_input(BenchmarkId::new("decode_chunked/incremental", chunks * 256), &body, |b, body| {
+            b.iter(|| black_box(bench_chunk_decoder_incremental(black_box(body))));
         });
     }
 
