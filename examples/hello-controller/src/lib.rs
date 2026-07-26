@@ -142,6 +142,27 @@ pub fn build_app_activity(addr: &str, activity: std::sync::Arc<kernway_server::I
         .build()
 }
 
+/// JWT bearer auth + role-based access: `BearerAuth` turns `Authorization: Bearer
+/// <jwt>` into a `SecurityContext`, then `HttpSecurity` enforces it. No token (or an
+/// invalid one) is anonymous — `/me` needs a login, `/admin/**` needs ADMIN.
+#[cfg(feature = "jwt")]
+pub fn build_app_bearer(addr: &str, secret: &str) -> KernwayApp {
+    use kernway_server::{Access, BearerAuth, HttpSecurity};
+
+    let security = HttpSecurity::new()
+        .has_role("/admin/**", "ADMIN")
+        .any_request(Access::Authenticated)
+        .build();
+
+    KernwayApp::builder()
+        .bind(addr)
+        .layer(BearerAuth::new(secret)) // Bearer JWT → identity
+        .layer(security) // path rules → authorization
+        .get("/me", |_req: Request, _scope: &RequestScope| async { json_ok(r#"{"me":true}"#) })
+        .get("/admin/panel", |_req: Request, _scope: &RequestScope| async { json_ok(r#"{"admin":true}"#) })
+        .build()
+}
+
 /// The alternative to per-route `#[require_role]`: **central** path-based rules
 /// (Spring's `HttpSecurity`). One place declares public/authenticated/role paths;
 /// the `SecurityLayer` enforces them before any handler. Auth (identity) is still

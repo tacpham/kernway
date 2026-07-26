@@ -16,6 +16,8 @@ serde              = { workspace = true }
 [features]
 # Demonstrates the live-activity middleware (who's on the site + where).
 presence = ["kernway-server/presence"]
+# Demonstrates JWT bearer auth (Authorization: Bearer <jwt> → role-based access).
+jwt = ["kernway-server/jwt"]
 
 [lints]
 workspace = true

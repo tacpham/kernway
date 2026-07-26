@@ -29,6 +29,8 @@ presence = ["kernway-security/presence"]
 # per store from `kernway.*.store`. These forward the kernway-security backends.
 persist = ["kernway-security/persist"]
 redis = ["kernway-security/redis"]
+# The BearerAuth middleware — `Authorization: Bearer <jwt>` → SecurityContext.
+jwt = ["kernway-security/jwt"]
 
 [dev-dependencies]
 criterion = { workspace = true }

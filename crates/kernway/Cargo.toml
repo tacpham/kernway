@@ -45,6 +45,9 @@ redis = ["security", "kernway-security/redis", "kernway-server/redis"]
 ## File-backed (local disk) durable stores — sessions/bans/activity survive a
 ## restart with no server (single-node). Implies `security`.
 persist = ["security", "kernway-security/persist", "kernway-server/persist"]
+## JSON Web Tokens (RFC 7519, HS256) + the BearerAuth middleware — stateless
+## `Authorization: Bearer <jwt>` auth. Implies `security`.
+jwt = ["security", "kernway-security/jwt", "kernway-server/jwt"]
 
 [lints]
 workspace = true
