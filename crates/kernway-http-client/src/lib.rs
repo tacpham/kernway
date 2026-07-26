@@ -19,6 +19,7 @@
 
 #![forbid(unsafe_code)]
 
+mod compress;
 mod tls;
 
 use std::collections::HashMap;
@@ -544,7 +545,7 @@ async fn read_response(stream: &mut Conn) -> Result<(Response, bool), HttpError>
     let head_block = buf;
     let (status, spans) = parse_head_spans(&head_block)?;
 
-    let framed = match body_plan(&head_block, &spans) {
+    let keepable = match body_plan(&head_block, &spans) {
         BodyPlan::Length(n) => {
             while body.len() < n {
                 if !read_more_into(stream, &mut body).await? {
@@ -572,7 +573,9 @@ async fn read_response(stream: &mut Conn) -> Result<(Response, bool), HttpError>
         }
     };
 
-    Ok((Response { status, body, head: head_block, spans }, framed))
+    let mut response = Response { status, body, head: head_block, spans };
+    compress::decompress(&mut response)?; // inflate gzip/deflate/br transparently
+    Ok((response, keepable))
 }
 
 /// Whether an error means the connection was closed under us (so a retry on a fresh
@@ -727,6 +730,10 @@ fn encode_request(req: &Request, keep_alive: bool) -> Vec<u8> {
     }
     if !has("user-agent") {
         out.push_str("User-Agent: kernway-http-client/0.1\r\n");
+    }
+    // Advertise the encodings we can transparently inflate on the response.
+    if !has("accept-encoding") {
+        out.push_str("Accept-Encoding: gzip, deflate, br\r\n");
     }
     for (name, value) in &req.headers {
         out.push_str(&format!("{name}: {value}\r\n"));
@@ -1031,6 +1038,40 @@ mod tests {
         assert_eq!(resp.text(), "done");
         let followed = server.join().unwrap();
         assert!(followed.starts_with("GET /final "), "followed to /final: {followed}");
+    }
+
+    #[test]
+    fn decompresses_a_gzip_response() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        // gzip a payload the way a server would.
+        let payload = b"hello gzip world - this body is served compressed and must arrive plain";
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(payload).unwrap();
+        let gz = encoder.finish().unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 512];
+            let n = sock.read(&mut buf).unwrap();
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n", gz.len());
+            sock.write_all(head.as_bytes()).unwrap();
+            sock.write_all(&gz).unwrap();
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        });
+
+        let resp = rt_core::Executor::new()
+            .unwrap()
+            .block_on(HttpClient::new().get(&format!("http://127.0.0.1:{port}/")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp.body, payload, "the body arrives decompressed");
+        assert_eq!(resp.header("content-encoding"), None, "the stale encoding header is stripped");
+        let request = server.join().unwrap();
+        assert!(request.to_lowercase().contains("accept-encoding: gzip"), "we advertised gzip: {request}");
     }
 
     #[test]

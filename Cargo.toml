@@ -92,6 +92,12 @@ serde_json = "1"
 rustls       = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "0.26"
 
+# Response decompression for the HTTP client — gzip/deflate (flate2 on the pure-Rust
+# miniz_oxide backend, no C) and brotli. Both are pure-Rust, audited, and the standard
+# choice (what reqwest uses), so a responsible dependency for a real need (KEP-0000 §1).
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+brotli = "7"
+
 # Benchmarking — statistical micro-benchmarks with regression detection
 # against a saved baseline (see scripts/check-core.sh --with-bench).
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
