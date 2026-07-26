@@ -48,6 +48,9 @@ persist = ["security", "kernway-security/persist", "kernway-server/persist"]
 ## JSON Web Tokens (RFC 7519, HS256) + the BearerAuth middleware — stateless
 ## `Authorization: Bearer <jwt>` auth. Implies `security`.
 jwt = ["security", "kernway-security/jwt", "kernway-server/jwt"]
+## Dynamic response compression middleware (gzip/deflate/br, selective by
+## content-type + size + Accept-Encoding).
+compression = ["kernway-server/compression"]
 
 [lints]
 workspace = true

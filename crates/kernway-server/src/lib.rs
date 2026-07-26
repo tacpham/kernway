@@ -50,6 +50,9 @@ pub mod extract;
 pub mod tracking;
 /// CORS — cross-origin resource sharing middleware (Spring's `cors()`).
 pub mod cors;
+/// Dynamic response compression middleware (feature = `compression`).
+#[cfg(feature = "compression")]
+pub mod compression;
 /// Rate limiting — a per-client token bucket returning `429`.
 pub mod rate_limit;
 /// Config-driven backend selection (memory / file / redis) for the security stores.
@@ -80,6 +83,8 @@ pub use kernway_security::SecurityHeaders;
 pub use security::{Access, HttpSecurity, SecurityLayer};
 pub use cors::Cors;
 pub use rate_limit::RateLimit;
+#[cfg(feature = "compression")]
+pub use compression::Compression;
 // Typed argument extraction + the extractors, re-exported so `#[controller]` method
 // params (`id: Path<u64>`, `body: Validated<T>`) reference only `::kernway_server::`.
 pub use extract::Extract;
