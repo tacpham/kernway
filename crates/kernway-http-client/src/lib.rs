@@ -25,8 +25,14 @@ use std::fmt;
 use std::net::ToSocketAddrs;
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rt_net::AsyncTcpStream;
+
+/// Default cap on establishing a connection (TCP connect + TLS handshake).
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Default cap on the whole request (connect through reading the full response).
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A live connection — a plain socket, or a TLS session over one. Both expose the
 /// same `read`/`write_all`, so the HTTP layer is oblivious to which it holds.
@@ -232,8 +238,10 @@ pub enum HttpError {
     Io(std::io::Error),
     /// The response was not valid HTTP.
     Protocol(String),
-    /// TLS is required (an `https` URL) but not available in this build/cut.
+    /// The TLS handshake failed.
     Tls(String),
+    /// The connect or the request exceeded its timeout — a hung/slow server.
+    Timeout,
 }
 
 impl fmt::Display for HttpError {
@@ -244,6 +252,7 @@ impl fmt::Display for HttpError {
             HttpError::Io(e) => write!(f, "io: {e}"),
             HttpError::Protocol(m) => write!(f, "protocol: {m}"),
             HttpError::Tls(m) => write!(f, "tls: {m}"),
+            HttpError::Timeout => write!(f, "timed out"),
         }
     }
 }
@@ -262,13 +271,36 @@ impl From<std::io::Error> for HttpError {
 #[derive(Clone)]
 pub struct HttpClient {
     tls: Arc<rustls::ClientConfig>,
+    connect_timeout: Option<Duration>,
+    timeout: Option<Duration>,
 }
 
 impl HttpClient {
-    /// A new client with the default TLS config (verifies against Mozilla's roots).
+    /// A new client with the default TLS config (verifies against Mozilla's roots) and
+    /// the default timeouts ([`DEFAULT_CONNECT_TIMEOUT`], [`DEFAULT_TIMEOUT`]) — so a
+    /// hung server can never hang a request forever. Override them per client.
     #[must_use]
     pub fn new() -> Self {
-        Self { tls: tls::default_config() }
+        Self {
+            tls: tls::default_config(),
+            connect_timeout: Some(DEFAULT_CONNECT_TIMEOUT),
+            timeout: Some(DEFAULT_TIMEOUT),
+        }
+    }
+
+    /// Cap the whole request (connect through reading the full response). `None`
+    /// removes the cap (not recommended — a slow server can then block indefinitely).
+    #[must_use]
+    pub fn timeout(mut self, timeout: impl Into<Option<Duration>>) -> Self {
+        self.timeout = timeout.into();
+        self
+    }
+
+    /// Cap establishing the connection (TCP connect + TLS handshake).
+    #[must_use]
+    pub fn connect_timeout(mut self, timeout: impl Into<Option<Duration>>) -> Self {
+        self.connect_timeout = timeout.into();
+        self
     }
 
     /// `GET url`.
@@ -286,22 +318,46 @@ impl HttpClient {
     }
 
     /// Send a request and read the full response — over TLS for an `https` URL, plain
-    /// otherwise.
+    /// otherwise. Bounded by the configured timeouts: [`HttpError::Timeout`] if the
+    /// connect or the overall request runs long (a hung/slow server).
     pub async fn send(&self, req: Request) -> Result<Response, HttpError> {
+        match self.timeout {
+            Some(limit) => match rt_core::timeout(limit, self.send_inner(req)).await {
+                Ok(result) => result,
+                Err(_elapsed) => Err(HttpError::Timeout),
+            },
+            None => self.send_inner(req).await,
+        }
+    }
+
+    async fn send_inner(&self, req: Request) -> Result<Response, HttpError> {
         let addr = resolve(&req.url.host, req.url.port)?;
-        let tcp = AsyncTcpStream::connect(addr).await?;
-        tcp.set_nodelay(true).ok();
-
-        let mut conn = if req.url.is_tls() {
-            let tls = tls::AsyncTlsStream::connect(tcp, self.tls.clone(), &req.url.host).await?;
-            Conn::Tls(Box::new(tls))
-        } else {
-            Conn::Plain(tcp)
-        };
-
+        let mut conn = self.connect(addr, &req.url).await?;
         let raw = encode_request(&req);
         conn.write_all(&raw).await?;
         read_response(&mut conn).await
+    }
+
+    /// Establish the connection (TCP + TLS handshake for https), bounded by the
+    /// connect timeout.
+    async fn connect(&self, addr: std::net::SocketAddr, url: &Url) -> Result<Conn, HttpError> {
+        let establish = async {
+            let tcp = AsyncTcpStream::connect(addr).await?;
+            tcp.set_nodelay(true).ok();
+            if url.is_tls() {
+                let tls = tls::AsyncTlsStream::connect(tcp, self.tls.clone(), &url.host).await?;
+                Ok::<Conn, HttpError>(Conn::Tls(Box::new(tls)))
+            } else {
+                Ok(Conn::Plain(tcp))
+            }
+        };
+        match self.connect_timeout {
+            Some(limit) => match rt_core::timeout(limit, establish).await {
+                Ok(result) => result,
+                Err(_elapsed) => Err(HttpError::Timeout),
+            },
+            None => establish.await,
+        }
     }
 }
 
@@ -676,6 +732,31 @@ mod tests {
         assert_eq!(resp.status, 200);
         assert_eq!(resp.text(), "hello");
         assert_eq!(resp.header("content-length"), Some("5"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_hung_server_hits_the_timeout() {
+        use std::io::Read;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 512];
+            let _ = sock.read(&mut buf); // consume the request, then never respond
+            std::thread::sleep(Duration::from_millis(300)); // hold the socket open
+        });
+
+        // A short timeout must fire even though the server is still holding the socket.
+        let client = HttpClient::new().timeout(Duration::from_millis(80));
+        let err = rt_core::Executor::new()
+            .unwrap()
+            .block_on(client.get(&format!("http://127.0.0.1:{port}/hang")))
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(err, HttpError::Timeout), "a hung server must time out, got {err:?}");
         server.join().unwrap();
     }
 
