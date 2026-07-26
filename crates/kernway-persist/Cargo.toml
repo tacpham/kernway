@@ -1,0 +1,14 @@
+[package]
+name        = "kernway-persist"
+description = "Snapshot + append-log persistence engine — durable in-memory state, without a network round-trip on the hot path"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+
+[dependencies]
+# Deliberately zero third-party deps (KEP-0000 §1): std file I/O + a hand-rolled
+# executor-agnostic oneshot are all this needs. The domain crates own their record
+# encoding, so no serde here either.
+
+[lints]
+workspace = true

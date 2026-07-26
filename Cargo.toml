@@ -26,6 +26,7 @@ members = [
     "crates/kernway-log",
     "crates/kernway-config",
     "crates/kernway-validation",
+    "crates/kernway-persist",
     "crates/kernway",
     "examples/echo-server",
     "examples/hello-di",
@@ -119,6 +120,7 @@ kernway-multipart    = { path = "crates/kernway-multipart" }
 kernway-log          = { path = "crates/kernway-log" }
 kernway-config       = { path = "crates/kernway-config" }
 kernway-validation   = { path = "crates/kernway-validation" }
+kernway-persist      = { path = "crates/kernway-persist" }
 rt-core              = { path = "crates/rt-core" }
 rt-net               = { path = "crates/rt-net" }
 di-core              = { path = "crates/di-core" }

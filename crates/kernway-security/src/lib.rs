@@ -62,6 +62,11 @@ pub use redis_store::RedisSessionStore;
 pub mod redis_bans;
 #[cfg(feature = "redis")]
 pub use redis_bans::{PersistentBans, RedisBanStore};
+/// File-backed (local disk) persistence for the ban list (feature = `persist`).
+#[cfg(feature = "persist")]
+pub mod file_bans;
+#[cfg(feature = "persist")]
+pub use file_bans::FileBackedBans;
 
 // Used by the `csrf` module and the tests via `use super::*`; the lint can't see
 // through the glob re-export, so the import looks unused at the top level.

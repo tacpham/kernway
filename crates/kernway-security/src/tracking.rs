@@ -243,6 +243,36 @@ impl BanList {
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
     }
+
+    /// A read-only view of every rule, for taking a snapshot of the list (e.g. a
+    /// durable backend serialising the whole state at a checkpoint).
+    #[must_use]
+    pub fn rules(&self) -> Vec<BanRuleView> {
+        self.rules
+            .iter()
+            .map(|rule| match rule {
+                BanRule::Ip(ip) => BanRuleView::Ip(*ip),
+                BanRule::Subnet(cidr) => BanRuleView::Subnet(format!("{}/{}", cidr.network, cidr.prefix)),
+                BanRule::UserAgentExact(ua) => BanRuleView::UserAgentExact(ua.clone()),
+                BanRule::UserAgentContains(p) => BanRuleView::UserAgentContains(p.clone()),
+            })
+            .collect()
+    }
+}
+
+/// A read-only view of one [`BanList`] rule — the shape a durable backend serialises
+/// and replays. `Subnet` is rendered as `network/prefix`, which [`BanList::subnet`]
+/// parses back exactly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BanRuleView {
+    /// A single banned IP.
+    Ip(IpAddr),
+    /// A banned subnet, as `network/prefix`.
+    Subnet(String),
+    /// A banned exact User-Agent.
+    UserAgentExact(String),
+    /// A banned User-Agent phrase (already lowercased).
+    UserAgentContains(String),
 }
 
 /// A **shared, runtime-mutable** ban list — the handle an admin uses to ban and
@@ -286,6 +316,11 @@ impl Bans {
         self.0.write().unwrap().remove_subnet(cidr);
     }
 
+    /// Ban an exact User-Agent at runtime.
+    pub fn ban_user_agent_exact(&self, agent: &str) {
+        self.0.write().unwrap().add_user_agent_exact(agent);
+    }
+
     /// Ban any User-Agent containing `phrase` (case-insensitive) at runtime.
     pub fn ban_user_agent_containing(&self, phrase: &str) {
         self.0.write().unwrap().add_user_agent_containing(phrase);
@@ -305,6 +340,12 @@ impl Bans {
     #[must_use]
     pub fn is_banned(&self, ip: Option<IpAddr>, user_agent: Option<&str>) -> bool {
         self.0.read().unwrap().is_banned(ip, user_agent)
+    }
+
+    /// A snapshot of every current rule (for a durable backend's checkpoint).
+    #[must_use]
+    pub fn rules(&self) -> Vec<BanRuleView> {
+        self.0.read().unwrap().rules()
     }
 }
 
