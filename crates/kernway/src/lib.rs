@@ -102,7 +102,7 @@ pub mod prelude {
     // The per-request DI scope and the async handler future type (KEP-0005/0006)
     pub use crate::{BoxFuture, RequestScope};
     // Traits
-    pub use crate::{IntoResponse, FromRequest, Layer, Next, DbPool, TemplateEngine, KernwayPlugin};
+    pub use crate::{IntoResponse, DbPool, TemplateEngine, KernwayPlugin};
     // Extractors and response types
     pub use crate::{Html, Json, Path, ProblemDetail, Query, Validated};
     // Validation — the trait + derive share the name `Validate`

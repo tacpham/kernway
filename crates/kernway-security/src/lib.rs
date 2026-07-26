@@ -44,7 +44,9 @@ pub mod redis_store;
 #[cfg(feature = "redis")]
 pub use redis_store::RedisSessionStore;
 
-use kernway_core::layer::{BoxFuture, Layer, Next};
+// Used by the `csrf` module and the tests via `use super::*`; the lint can't see
+// through the glob re-export, so the import looks unused at the top level.
+#[allow(unused_imports)]
 use kernway_core::request::Request;
 use kernway_core::response::Response;
 
@@ -151,18 +153,10 @@ impl SecurityHeaders {
     }
 }
 
-/// A middleware that adds [`SecurityHeaders`] to every response.
-pub struct SecurityHeadersLayer(pub SecurityHeaders);
-
-impl Layer for SecurityHeadersLayer {
-    fn handle<'a>(&'a self, req: Request, next: &'a dyn Next) -> BoxFuture<'a, Response> {
-        Box::pin(async move {
-            let mut resp = next.call(req).await;
-            self.0.apply(&mut resp);
-            resp
-        })
-    }
-}
+// `SecurityHeaders` is applied to every response by the middleware
+// `kernway_server` implements for it (`app.layer(SecurityHeaders::strict())`) —
+// it lives there because the async `Middleware` trait does. `SecurityHeaders`
+// itself stays here as the header data + `apply`.
 
 // ============================================================
 // CSRF — double-submit token
