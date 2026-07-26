@@ -64,9 +64,10 @@ impl<T: Into<String> + Send> IntoResponse for Html<T> {
 }
 
 impl<T: DeserializeOwned> Json<T> {
-    /// Extract a JSON body from the request.
+    /// Extract a JSON body from the request. Reads the spooled temp file if the body was
+    /// large enough to stream to disk (`body_bytes`), so JSON works either way.
     pub fn from_request(req: &Request) -> Result<Self, String> {
-        serde_json::from_slice(&req.body)
+        serde_json::from_slice(req.body_bytes().as_ref())
             .map(Json)
             .map_err(|e| format!("invalid JSON body: {}", e))
     }
@@ -223,7 +224,7 @@ impl<T: DeserializeOwned + Validate> Validated<T> {
     /// Returns a `400` [`Response`] when the body is not valid JSON for `T` or fails
     /// validation.
     pub fn from_request(req: &Request) -> Result<Self, Response> {
-        let value: T = serde_json::from_slice(&req.body)
+        let value: T = serde_json::from_slice(req.body_bytes().as_ref())
             .map_err(|e| ProblemDetail::bad_request(format!("invalid JSON body: {e}")))?;
         match value.validate() {
             Ok(()) => Ok(Validated(value)),
