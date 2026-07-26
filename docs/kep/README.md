@@ -81,6 +81,7 @@ to keep.
 | [0005](0005-request-scoped-beans.md) | Request-scoped DI beans — a per-request scope over the app context | Accepted |
 | [0006](0006-async-handlers.md) | Async handlers — a handler that can await | Accepted |
 | [0007](0007-configuration.md) | Configuration — layered properties, profiles, and typed access | Accepted |
+| [0008](0008-request-body.md) | A request body that can be buffered, spooled to disk, or multipart | Draft |
 
 ## The first two are different from the rest
 
