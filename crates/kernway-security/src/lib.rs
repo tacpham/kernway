@@ -46,6 +46,8 @@ pub use lockout::LoginGuard;
 pub mod jwt;
 #[cfg(feature = "jwt")]
 pub use jwt::{Claims, Jwt, JwtError, Validation};
+#[cfg(feature = "jwks")]
+pub use jwt::Jwks;
 
 /// Presence / heartbeat — who is online now, distinct from who has a session
 /// (feature = `presence`).

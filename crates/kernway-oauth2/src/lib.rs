@@ -29,9 +29,12 @@
 
 #![forbid(unsafe_code)]
 
+use std::sync::{Arc, Mutex};
+
 use kernway_http_client::{percent_encode, HttpClient, HttpError, Method, Request, Url};
 use kernway_security::hash::sha256;
 use kernway_security::token::b64url_encode;
+use kernway_security::{Claims, Jwks, JwtError, Validation};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -272,6 +275,8 @@ pub enum OAuth2Error {
     Parse(String),
     /// The client is misconfigured (e.g. no userinfo endpoint).
     Config(String),
+    /// A JWT/JWKS verification failure.
+    Jwt(JwtError),
 }
 
 impl std::fmt::Display for OAuth2Error {
@@ -281,6 +286,7 @@ impl std::fmt::Display for OAuth2Error {
             OAuth2Error::Status(code, body) => write!(f, "oauth2 provider returned {code}: {body}"),
             OAuth2Error::Parse(m) => write!(f, "oauth2 parse error: {m}"),
             OAuth2Error::Config(m) => write!(f, "oauth2 config error: {m}"),
+            OAuth2Error::Jwt(e) => write!(f, "oauth2 token verification failed: {e}"),
         }
     }
 }
@@ -290,6 +296,63 @@ impl std::error::Error for OAuth2Error {}
 impl From<HttpError> for OAuth2Error {
     fn from(e: HttpError) -> Self {
         OAuth2Error::Http(e)
+    }
+}
+
+/// Verifies **RS256** tokens from an external issuer (Auth0/Keycloak/Google) against
+/// their published JWKS — the OAuth2/OIDC *resource server* side. It fetches the
+/// issuer's public keys once, caches them, and re-fetches when a token arrives with an
+/// unknown `kid` (the issuer rotated keys).
+///
+/// ```rust,ignore
+/// let jwks = JwksClient::new("https://issuer.example/.well-known/jwks.json");
+/// let claims = jwks.verify(bearer_token, now, &Validation::default()).await?;
+/// let user = claims.sub;
+/// ```
+pub struct JwksClient {
+    jwks_url: String,
+    http: HttpClient,
+    cache: Mutex<Option<Arc<Jwks>>>,
+}
+
+impl JwksClient {
+    /// A verifier fetching keys from `jwks_url` (the issuer's `jwks_uri`).
+    #[must_use]
+    pub fn new(jwks_url: impl Into<String>) -> Self {
+        Self { jwks_url: jwks_url.into(), http: HttpClient::new(), cache: Mutex::new(None) }
+    }
+
+    /// Verify an RS256 `token` and validate its claims. Uses the cached keys; if the
+    /// token's key id is unknown (a rotation), re-fetches the JWKS once and retries.
+    pub async fn verify(&self, token: &str, now: u64, validation: &Validation) -> Result<Claims, OAuth2Error> {
+        // Bind the cached value to a statement so the MutexGuard temporary drops here,
+        // BEFORE the `.await` below — holding it across `self.fetch()` (which re-locks
+        // the same mutex to cache the fetched keys) would self-deadlock.
+        let cached = self.cache.lock().unwrap().clone();
+        let jwks = match cached {
+            Some(jwks) => jwks,
+            None => self.fetch().await?,
+        };
+
+        match jwks.verify(token, now, validation) {
+            Err(JwtError::UnknownKey) => {
+                // The issuer may have rotated keys — refresh once and retry.
+                let fresh = self.fetch().await?;
+                fresh.verify(token, now, validation).map_err(OAuth2Error::Jwt)
+            }
+            other => other.map_err(OAuth2Error::Jwt),
+        }
+    }
+
+    /// Fetch and cache the issuer's JWKS.
+    async fn fetch(&self) -> Result<Arc<Jwks>, OAuth2Error> {
+        let response = self.http.get(&self.jwks_url).await?;
+        if !response.is_success() {
+            return Err(OAuth2Error::Status(response.status, response.text()));
+        }
+        let jwks = Arc::new(Jwks::from_json(&response.body).map_err(OAuth2Error::Jwt)?);
+        *self.cache.lock().unwrap() = Some(Arc::clone(&jwks));
+        Ok(jwks)
     }
 }
 
@@ -393,6 +456,26 @@ mod tests {
         assert!(sent.contains("code_verifier=the-verifier"));
         assert!(sent.contains("client_secret=secret"));
         assert!(sent.contains("accept: application/json"), "asks for JSON (GitHub needs it)");
+    }
+
+    // A real RS256 token + its JWKS (RSA-2048), as an external issuer would publish.
+    const RS256_TOKEN: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6InRlc3Qta2V5LTEifQ.eyJzdWIiOiIxMjM0NTY3ODkwIiwiaXNzIjoiaHR0cHM6Ly9pc3N1ZXIuZXhhbXBsZSIsImF1ZCI6Im15LWFwaSIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxNzAwMDAwMDAwfQ.j5o1170qMzys95RZy2KKrssW-KuQ-KRbRkYjoVOeIxa9oReChs2sea_qE943SApq58XLvswxZUCnO2vZ7IPz82pGc6gYFG1uXiDnyJOCkeSwtkAHWGJ6EWl79rULFGzi4DMNO-y3FcM0VWekeev4Y6NQB_bNAnLPwmyKY3BiRgK9Oo7FwdO8EQNJqXJ_I851pH88P39S9pdSq4He4Hi91xRsGspcSKPNMwMxAgZIXAlF5zVbOr6dLv-jMypGNsu3ev4jBz0V9A58XPGWafdMguwmnPjZwBeASDywqoCJbzH-pxcwvs7V0RnOQs9hUHArsXamD1CvJmWmvflL1hkpJQ";
+    const RS256_JWKS: &str = r#"{"keys":[{"kty":"RSA","use":"sig","kid":"test-key-1","alg":"RS256","n":"oYaIi_50A0cWJapMnTI2JVjtCt0jdeamBgsLkhaS_IhTMOBUAjCSNxLb4Xx6dFZv3RGrONWc4vTr8mnEwozfiG3YhC0UONBCboWX607pm1fDu6lxL-XqmIx86KrYrVpK7Cv55esuZopGwxglJlC3UiB8Bs_Zf2SFZp5IkHoYz_-uHMlfQpCWQDM-uI1_tNs41c98eLnMU77NIwVV7VgZNHb6AB24_VhYHWxMx2o0so0q3_qdMkMlWCNmMrR1GuabigfwryJFckUe7tuaKRRYzrLLqeCasbcIquatafi8W-7ZGnvNGVvuf7KsnqNUBEsGdyMhw3c26trdMzHCocm7jQ","e":"AQAB"}]}"#;
+
+    #[test]
+    fn jwks_client_fetches_keys_and_verifies_an_rs256_token() {
+        let (jwks_url, server) = mock_json(RS256_JWKS);
+        let client = JwksClient::new(jwks_url);
+        let validation = Validation {
+            expected_iss: Some("https://issuer.example".into()),
+            expected_aud: Some("my-api".into()),
+            ..Default::default()
+        };
+        let claims = block(client.verify(RS256_TOKEN, 1_700_000_000, &validation)).unwrap();
+        assert_eq!(claims.sub.as_deref(), Some("1234567890"));
+
+        let request = String::from_utf8(server.join().unwrap()).unwrap();
+        assert!(request.starts_with("GET "), "fetched the JWKS over HTTP: {request}");
     }
 
     #[test]

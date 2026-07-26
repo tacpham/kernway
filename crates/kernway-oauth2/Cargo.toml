@@ -7,7 +7,7 @@ license.workspace    = true
 
 [dependencies]
 kernway-http-client = { workspace = true }        # the outbound calls (token, userinfo)
-kernway-security    = { workspace = true }        # sha256 (PKCE), base64url
+kernway-security    = { workspace = true, features = ["jwks"] } # sha256/base64url (PKCE) + RS256/JWKS verify
 getrandom  = "0.2"                                # random code_verifier + state
 serde      = { workspace = true }
 serde_json = { workspace = true }
