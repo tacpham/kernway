@@ -451,6 +451,131 @@ impl HttpClient {
         }
     }
 
+    /// `GET url`, streaming the response body — see [`send_streaming`](Self::send_streaming).
+    pub async fn get_streaming(&self, url: &str) -> Result<ResponseStream, HttpError> {
+        self.send_streaming(Request::new(Method::Get, Url::parse(url)?)).await
+    }
+
+    /// Send a request and return a [`ResponseStream`]: the head is ready immediately and
+    /// the body is pulled a chunk at a time, so memory stays O(chunk) for large downloads,
+    /// proxying, or SSE. Redirects are followed (their small bodies drained); the final
+    /// hop is the one you stream.
+    ///
+    /// Requests `Accept-Encoding: identity` unless you set the header yourself — the
+    /// streamed bytes are raw and are **not** transparently inflated (unlike [`send`](Self::send)).
+    pub async fn send_streaming(&self, req: Request) -> Result<ResponseStream, HttpError> {
+        let mut req = req;
+        // No transparent decompression mid-stream: ask the server not to encode.
+        if !req.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("accept-encoding")) {
+            req = req.header("accept-encoding", "identity");
+        }
+
+        let mut redirects = 0;
+        loop {
+            let mut stream = self.dial_and_stream(&req).await?;
+
+            // Follow a redirect if we have budget and the head points somewhere. The head
+            // alone decides; the (usually empty) redirect body is drained to reuse the
+            // connection before following.
+            if redirects < self.max_redirects {
+                let head_only = Response {
+                    status: stream.status,
+                    body: Vec::new(),
+                    head: stream.head.clone(),
+                    spans: stream.spans.clone(),
+                };
+                if let Some(next) = redirect_target(&req, &head_only)? {
+                    while stream.chunk().await?.is_some() {}
+                    redirects += 1;
+                    req = next;
+                    continue;
+                }
+            }
+            return Ok(stream);
+        }
+    }
+
+    /// One streaming request→head: reuse a pooled connection when possible (retry once on
+    /// a stale one), read only the head, and hand the live connection to a `ResponseStream`.
+    async fn dial_and_stream(&self, req: &Request) -> Result<ResponseStream, HttpError> {
+        let origin = origin_of(&req.url);
+        let keep_alive = self.max_idle_per_host > 0;
+        let now = now_ms();
+
+        let cookie = self
+            .cookies
+            .as_ref()
+            .map(|jar| jar.header_for(&req.url, now / 1000))
+            .filter(|c| !c.is_empty());
+        let cookie = cookie.as_deref();
+
+        let (conn, head) = match self.pool.take(&origin, now) {
+            Some(mut conn) => match self.head_exchange(&mut conn, req, keep_alive, cookie).await {
+                Ok(head) => (conn, head),
+                Err(e) if is_stale(&e) => self.dial_head(req, keep_alive, cookie).await?,
+                Err(e) => return Err(e),
+            },
+            None => self.dial_head(req, keep_alive, cookie).await?,
+        };
+
+        // Record any Set-Cookie the head carried (same as the buffered path).
+        if let Some(jar) = &self.cookies {
+            let set = set_cookies(&head.head, &head.spans);
+            if !set.is_empty() {
+                jar.store(set.into_iter(), &req.url, now / 1000);
+            }
+        }
+
+        Ok(ResponseStream {
+            status: head.status,
+            head: head.head,
+            spans: head.spans,
+            conn: Some(conn),
+            buf: head.buf,
+            plan: head.plan,
+            pool: Arc::clone(&self.pool),
+            origin,
+            max_idle_per_host: self.max_idle_per_host,
+            close: head.close,
+            idle_timeout: self.timeout,
+        })
+    }
+
+    /// Open a fresh connection and read the response head on it.
+    async fn dial_head(
+        &self,
+        req: &Request,
+        keep_alive: bool,
+        cookie: Option<&str>,
+    ) -> Result<(Conn, HeadRead), HttpError> {
+        let addr = resolve(&req.url.host, req.url.port)?;
+        let mut conn = self.connect(addr, &req.url).await?;
+        let head = self.head_exchange(&mut conn, req, keep_alive, cookie).await?;
+        Ok((conn, head))
+    }
+
+    /// Write the request and read only the head, bounded by the overall timeout (the body
+    /// then streams under the per-chunk idle timeout).
+    async fn head_exchange(
+        &self,
+        conn: &mut Conn,
+        req: &Request,
+        keep_alive: bool,
+        cookie: Option<&str>,
+    ) -> Result<HeadRead, HttpError> {
+        let exchange = async {
+            conn.write_all(&encode_request(req, keep_alive, cookie)).await?;
+            read_stream_head(conn).await
+        };
+        match self.timeout {
+            Some(limit) => match rt_core::timeout(limit, exchange).await {
+                Ok(result) => result,
+                Err(_elapsed) => Err(HttpError::Timeout),
+            },
+            None => exchange.await,
+        }
+    }
+
     /// One request→response: reuse a pooled connection when possible, retry once on a
     /// fresh connection if the pooled one turned out to be stale, and return the
     /// connection to the pool when it can be kept alive.
@@ -563,10 +688,228 @@ async fn send_on(conn: &mut Conn, req: &Request, keep_alive: bool, cookie: Optio
     read_response(conn).await
 }
 
-/// Read the whole response, following `Content-Length`, chunked, or read-to-close. The
-/// returned bool is whether the body was framed (so the connection can be kept alive);
-/// a read-to-close body consumes the connection.
-async fn read_response(stream: &mut Conn) -> Result<(Response, bool), HttpError> {
+/// How the streaming reader delivers the body, and where it currently sits.
+enum StreamPlan {
+    /// `Content-Length`: this many body bytes remain to deliver.
+    Length(usize),
+    /// `Transfer-Encoding: chunked`, decoded incrementally.
+    Chunked(ChunkDecoder),
+    /// No framing — deliver until the connection closes (consumes it).
+    UntilClose,
+}
+
+/// The head plus streaming state, produced by [`read_stream_head`] and moved into a
+/// [`ResponseStream`].
+struct HeadRead {
+    status: u16,
+    head: Vec<u8>,
+    spans: Vec<(Range<usize>, Range<usize>)>,
+    /// Body bytes already read alongside the head (not yet delivered).
+    buf: Vec<u8>,
+    plan: StreamPlan,
+    /// The response asked to close the connection (`Connection: close`).
+    close: bool,
+}
+
+/// Read the head and set up the streaming body plan, without reading any body.
+async fn read_stream_head(stream: &mut Conn) -> Result<HeadRead, HttpError> {
+    let (status, head, spans, buf) = read_head(stream).await?;
+    let plan = match body_plan(&head, &spans) {
+        BodyPlan::Length(n) => StreamPlan::Length(n),
+        BodyPlan::Chunked => StreamPlan::Chunked(ChunkDecoder::new()),
+        BodyPlan::UntilClose => StreamPlan::UntilClose,
+    };
+    let close = header_bytes(&head, &spans, b"connection").is_some_and(|v| v.eq_ignore_ascii_case(b"close"));
+    Ok(HeadRead { status, head, spans, buf, plan, close })
+}
+
+/// The `Set-Cookie` header values in a head block, in received order.
+fn set_cookies<'a>(head: &'a [u8], spans: &[(Range<usize>, Range<usize>)]) -> Vec<&'a str> {
+    spans
+        .iter()
+        .filter(|(n, _)| head[n.clone()].eq_ignore_ascii_case(b"set-cookie"))
+        .map(|(_, v)| std::str::from_utf8(&head[v.clone()]).unwrap_or(""))
+        .collect()
+}
+
+/// A streaming response: the head is available immediately, and the body is pulled a
+/// chunk at a time with [`chunk`](Self::chunk) so memory stays O(chunk), not O(body) —
+/// for large downloads, proxying, or Server-Sent Events. Get one from
+/// [`HttpClient::send_streaming`]/[`get_streaming`](HttpClient::get_streaming).
+///
+/// The streaming path requests `Accept-Encoding: identity`, so the delivered bytes are
+/// the raw body — it does **not** transparently inflate gzip/deflate/br (that decoder is
+/// whole-buffer only). Use the buffered [`HttpClient::send`] if you want that.
+///
+/// When the body is fully drained the connection returns to the pool (if keep-alive);
+/// dropping the stream before it is drained simply closes the connection — a half-read
+/// keep-alive connection cannot be reused.
+pub struct ResponseStream {
+    status: u16,
+    head: Vec<u8>,
+    spans: Vec<(Range<usize>, Range<usize>)>,
+    /// The live connection while the body is being read; `None` once drained/returned.
+    conn: Option<Conn>,
+    /// Raw bytes read from the socket but not yet delivered/decoded.
+    buf: Vec<u8>,
+    plan: StreamPlan,
+    pool: Arc<ConnPool>,
+    origin: Origin,
+    max_idle_per_host: usize,
+    close: bool,
+    /// Per-read idle bound: no bytes within this long → [`HttpError::Timeout`].
+    idle_timeout: Option<Duration>,
+}
+
+impl ResponseStream {
+    /// The HTTP status code.
+    #[must_use]
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// Whether the status is 2xx.
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+
+    /// The first value of header `name` (case-insensitive), if present.
+    #[must_use]
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.spans
+            .iter()
+            .find(|(n, _)| self.head[n.clone()].eq_ignore_ascii_case(name.as_bytes()))
+            .map(|(_, v)| std::str::from_utf8(&self.head[v.clone()]).unwrap_or(""))
+    }
+
+    /// Every header as `(name, value)`, in received order.
+    pub fn headers(&self) -> impl Iterator<Item = (&str, &str)> + '_ {
+        self.spans.iter().map(move |(n, v)| {
+            let str_of = |r: &Range<usize>| std::str::from_utf8(&self.head[r.clone()]).unwrap_or("");
+            (str_of(n), str_of(v))
+        })
+    }
+
+    /// Read the next slice of the body, or `None` at the end. Memory stays O(chunk): only
+    /// the bytes needed to produce the next slice are held. On the final slice the
+    /// connection is returned to the pool (framed body, keep-alive) or closed.
+    pub async fn chunk(&mut self) -> Result<Option<Vec<u8>>, HttpError> {
+        // What a single pass over the buffered bytes produced.
+        enum Step {
+            Yield(Vec<u8>),
+            Done(bool), // keepable: the body was framed, connection reusable
+            NeedMore(&'static str),
+        }
+
+        loop {
+            if self.conn.is_none() {
+                return Ok(None);
+            }
+
+            let step = match self.plan {
+                StreamPlan::Length(ref mut rem) => {
+                    if *rem == 0 {
+                        Step::Done(true)
+                    } else if !self.buf.is_empty() {
+                        let take = (*rem).min(self.buf.len());
+                        *rem -= take;
+                        Step::Yield(self.buf.drain(..take).collect())
+                    } else {
+                        Step::NeedMore("connection closed mid-body")
+                    }
+                }
+                StreamPlan::Chunked(ref mut dec) => {
+                    let mut out = Vec::new();
+                    dec.pull(&mut self.buf, &mut out)?;
+                    if !out.is_empty() {
+                        Step::Yield(out)
+                    } else if dec.is_done() {
+                        Step::Done(true)
+                    } else {
+                        Step::NeedMore("connection closed mid-chunk")
+                    }
+                }
+                StreamPlan::UntilClose => {
+                    if !self.buf.is_empty() {
+                        Step::Yield(std::mem::take(&mut self.buf))
+                    } else {
+                        Step::NeedMore("") // an EOF here is a clean end, not an error
+                    }
+                }
+            };
+
+            match step {
+                Step::Yield(out) => return Ok(Some(out)),
+                Step::Done(keepable) => {
+                    self.finish(keepable);
+                    return Ok(None);
+                }
+                Step::NeedMore(mid_err) => {
+                    if !self.fill().await? {
+                        if matches!(self.plan, StreamPlan::UntilClose) {
+                            self.finish(false); // read-to-close: EOF is the end
+                            return Ok(None);
+                        }
+                        return Err(HttpError::Protocol(mid_err.into()));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Drain the rest of the body into a buffered [`Response`] (inflating any content
+    /// encoding, for callers who set one). Convenience for "stream, then collect".
+    pub async fn read_to_end(mut self) -> Result<Response, HttpError> {
+        let mut body = Vec::new();
+        while let Some(part) = self.chunk().await? {
+            body.extend_from_slice(&part);
+        }
+        let mut response = Response {
+            status: self.status,
+            body,
+            head: std::mem::take(&mut self.head),
+            spans: std::mem::take(&mut self.spans),
+        };
+        compress::decompress(&mut response)?;
+        Ok(response)
+    }
+
+    /// Read more bytes from the socket into `self.buf`, bounded by the idle timeout.
+    /// `false` at EOF. Splits the field borrows so `conn` and `buf` can be used together.
+    async fn fill(&mut self) -> Result<bool, HttpError> {
+        let Self { conn, buf, idle_timeout, .. } = self;
+        let conn = conn.as_mut().ok_or_else(|| HttpError::Protocol("stream already finished".into()))?;
+        let read = read_more_into(conn, buf);
+        match idle_timeout {
+            Some(limit) => match rt_core::timeout(*limit, read).await {
+                Ok(result) => result,
+                Err(_elapsed) => Err(HttpError::Timeout),
+            },
+            None => read.await,
+        }
+    }
+
+    /// End the stream: return the connection to the pool when the body was framed and
+    /// keep-alive is on, otherwise drop (close) it.
+    fn finish(&mut self, keepable: bool) {
+        if let Some(conn) = self.conn.take() {
+            if self.max_idle_per_host > 0 && keepable && !self.close {
+                self.pool.put(std::mem::take(&mut self.origin), conn, now_ms());
+            }
+            // Otherwise `conn` drops here (closed). A partially-read connection is never
+            // pooled — the leftover bytes would corrupt the next response on it.
+        }
+    }
+}
+
+/// Read the response head (status line + headers) up to and including the CRLFCRLF
+/// terminator. Returns the status, the raw head block, the header spans, and any body
+/// bytes that were read alongside the head (the leftover after the terminator). Shared
+/// by the buffered [`read_response`] and the streaming [`ResponseStream`] path.
+async fn read_head(
+    stream: &mut Conn,
+) -> Result<(u16, Vec<u8>, Vec<(Range<usize>, Range<usize>)>, Vec<u8>), HttpError> {
     let mut buf = Vec::with_capacity(4096);
 
     // Read until the header terminator (CRLFCRLF) is in `buf`.
@@ -579,10 +922,19 @@ async fn read_response(stream: &mut Conn) -> Result<(Response, bool), HttpError>
         }
     };
 
-    // Split without copying the head: `body` takes the tail, `head_block` reuses buf.
-    let mut body = buf.split_off(head_end);
+    // Split without copying the head: `leftover` takes the tail (already-read body
+    // bytes), `head_block` reuses buf.
+    let leftover = buf.split_off(head_end);
     let head_block = buf;
     let (status, spans) = parse_head_spans(&head_block)?;
+    Ok((status, head_block, spans, leftover))
+}
+
+/// Read the whole response, following `Content-Length`, chunked, or read-to-close. The
+/// returned bool is whether the body was framed (so the connection can be kept alive);
+/// a read-to-close body consumes the connection.
+async fn read_response(stream: &mut Conn) -> Result<(Response, bool), HttpError> {
+    let (status, head_block, spans, mut body) = read_head(stream).await?;
 
     let keepable = match body_plan(&head_block, &spans) {
         BodyPlan::Length(n) => {
@@ -752,6 +1104,90 @@ fn decode_chunked(bytes: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
+/// Where an incremental chunked decode currently sits between reads.
+enum ChunkState {
+    /// Reading the `<hex>\r\n` chunk-size line.
+    Size,
+    /// Reading `n` more bytes of the current chunk's data.
+    Data(usize),
+    /// Skipping the CRLF that follows a chunk's data.
+    DataCrlf,
+    /// Past the terminating `0` chunk, consuming the final CRLF (trailers not surfaced).
+    Trailer,
+    /// The terminating chunk has been fully consumed.
+    Done,
+}
+
+/// A stateful chunked-transfer decoder that consumes bytes across many reads — the
+/// streaming counterpart of [`decode_chunked`], which must see the whole body at once.
+/// [`pull`](Self::pull) decodes as much of `buf` as it can, leaving any partial tail for
+/// the next call. Kept O(consumed): it never re-parses from the start.
+struct ChunkDecoder {
+    state: ChunkState,
+}
+
+impl ChunkDecoder {
+    fn new() -> Self {
+        Self { state: ChunkState::Size }
+    }
+
+    /// Whether the terminating zero-length chunk has been fully consumed.
+    fn is_done(&self) -> bool {
+        matches!(self.state, ChunkState::Done)
+    }
+
+    /// Consume as much of `buf` as possible, appending decoded body bytes to `out`.
+    /// Unconsumed partial bytes are left at the front of `buf` for the next call.
+    fn pull(&mut self, buf: &mut Vec<u8>, out: &mut Vec<u8>) -> Result<(), HttpError> {
+        let bad = || HttpError::Protocol("malformed chunked body".into());
+        let mut pos = 0;
+        loop {
+            match self.state {
+                ChunkState::Done => break,
+                ChunkState::Size => match find(&buf[pos..], b"\r\n") {
+                    Some(i) => {
+                        let hex = std::str::from_utf8(&buf[pos..pos + i])
+                            .ok()
+                            .and_then(|s| s.split(';').next())
+                            .map(str::trim)
+                            .ok_or_else(bad)?;
+                        let size = usize::from_str_radix(hex, 16).map_err(|_| bad())?;
+                        pos += i + 2;
+                        self.state = if size == 0 { ChunkState::Trailer } else { ChunkState::Data(size) };
+                    }
+                    None => break, // size line not fully arrived
+                },
+                ChunkState::Data(rem) => {
+                    let avail = buf.len() - pos;
+                    if avail == 0 {
+                        break;
+                    }
+                    let take = rem.min(avail);
+                    out.extend_from_slice(&buf[pos..pos + take]);
+                    pos += take;
+                    self.state = if take == rem { ChunkState::DataCrlf } else { ChunkState::Data(rem - take) };
+                }
+                ChunkState::DataCrlf => {
+                    if buf.len() - pos < 2 {
+                        break;
+                    }
+                    pos += 2; // skip the CRLF terminating the chunk data
+                    self.state = ChunkState::Size;
+                }
+                ChunkState::Trailer => match find(&buf[pos..], b"\r\n") {
+                    Some(i) => {
+                        pos += i + 2; // consume the final (empty-trailer) CRLF
+                        self.state = ChunkState::Done;
+                    }
+                    None => break,
+                },
+            }
+        }
+        buf.drain(..pos);
+        Ok(())
+    }
+}
+
 /// Serialise a request to the wire, adding Host/Content-Length/Connection/User-Agent
 /// (and `Cookie` when the jar supplied one). `keep_alive` picks `Connection:
 /// keep-alive` (pooled) vs `close`.
@@ -907,6 +1343,17 @@ pub fn bench_decode_chunked(bytes: &[u8]) -> usize {
     decode_chunked(bytes).map(|v| v.len()).unwrap_or(0)
 }
 
+/// Benchmark hook — decode a chunked body incrementally (the streaming decoder),
+/// returning its length. Fed the whole buffer at once here, but O(consumed) either way.
+#[doc(hidden)]
+pub fn bench_chunk_decoder_incremental(bytes: &[u8]) -> usize {
+    let mut dec = ChunkDecoder::new();
+    let mut buf = bytes.to_vec();
+    let mut out = Vec::new();
+    let _ = dec.pull(&mut buf, &mut out);
+    out.len()
+}
+
 /// Index of the first occurrence of `needle` in `haystack`.
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
@@ -1015,6 +1462,170 @@ mod tests {
         assert_eq!(resp.status, 200);
         assert_eq!(resp.text(), "hello");
         assert_eq!(resp.header("content-length"), Some("5"));
+        server.join().unwrap();
+    }
+
+    /// Spawn a one-shot loopback server that replies with `response` bytes to the first
+    /// connection. Returns the port and the join handle.
+    fn one_shot(response: Vec<u8>) -> (u16, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).unwrap();
+            sock.write_all(&response).unwrap();
+        });
+        (port, handle)
+    }
+
+    #[test]
+    fn streams_a_content_length_body_in_chunks() {
+        // A 2 MiB framed body — far larger than the 4 KiB socket read.
+        let payload = vec![b'z'; 2 * 1024 * 1024];
+        let mut response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", payload.len()).into_bytes();
+        response.extend_from_slice(&payload);
+        let (port, server) = one_shot(response);
+
+        let received = rt_core::Executor::new()
+            .unwrap()
+            .block_on(async {
+                let mut stream = HttpClient::new().get_streaming(&format!("http://127.0.0.1:{port}/big")).await?;
+                assert_eq!(stream.status(), 200);
+                let mut body = Vec::new();
+                while let Some(part) = stream.chunk().await? {
+                    // Each delivered slice is bounded by the socket read size, NOT the
+                    // 2 MiB total — this is the O(chunk) memory guarantee.
+                    assert!(part.len() <= 4096, "slice {} exceeds the read size", part.len());
+                    body.extend_from_slice(&part);
+                }
+                Ok::<_, HttpError>(body)
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(received.len(), payload.len());
+        assert!(received.iter().all(|&b| b == b'z'));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn streams_a_chunked_body_incrementally() {
+        // Three chunks + terminator, delivered as one write; the incremental decoder must
+        // reassemble "HelloWorld!!".
+        let body = "5\r\nHello\r\n5\r\nWorld\r\n2\r\n!!\r\n0\r\n\r\n";
+        let response = format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{body}").into_bytes();
+        let (port, server) = one_shot(response);
+
+        let text = rt_core::Executor::new()
+            .unwrap()
+            .block_on(async {
+                let mut stream = HttpClient::new().get_streaming(&format!("http://127.0.0.1:{port}/c")).await?;
+                let mut out = Vec::new();
+                while let Some(part) = stream.chunk().await? {
+                    out.extend_from_slice(&part);
+                }
+                Ok::<_, HttpError>(String::from_utf8(out).unwrap())
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(text, "HelloWorld!!");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn streaming_memory_stays_bounded() {
+        // Stream 8 MiB and assert the internal buffer never grows toward the body size —
+        // it stays within a couple of socket reads, independent of the total.
+        let payload = vec![b'x'; 8 * 1024 * 1024];
+        let mut response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", payload.len()).into_bytes();
+        response.extend_from_slice(&payload);
+        let (port, server) = one_shot(response);
+
+        let (total, peak_buf) = rt_core::Executor::new()
+            .unwrap()
+            .block_on(async {
+                let mut stream = HttpClient::new().get_streaming(&format!("http://127.0.0.1:{port}/huge")).await?;
+                let mut total = 0usize;
+                let mut peak = stream.buf.len();
+                while let Some(part) = stream.chunk().await? {
+                    total += part.len();
+                    peak = peak.max(stream.buf.len());
+                }
+                Ok::<_, HttpError>((total, peak))
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(total, payload.len(), "streamed the whole body");
+        assert!(peak_buf <= 8192, "internal buffer stayed O(chunk): peak was {peak_buf} bytes for an 8 MiB body");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn streaming_returns_connection_to_pool_after_drain() {
+        // One server connection serves two requests: the pooled connection is reused only
+        // if the first stream returned it after being fully drained.
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap(); // exactly ONE connection
+            let mut buf = [0u8; 512];
+            let _ = sock.read(&mut buf).unwrap();
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc").unwrap();
+            let _ = sock.read(&mut buf).unwrap(); // second request on the same connection
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\ndef").unwrap();
+        });
+
+        let second = rt_core::Executor::new()
+            .unwrap()
+            .block_on(async {
+                let client = HttpClient::new();
+                let url = format!("http://127.0.0.1:{port}/x");
+                let mut s1 = client.get_streaming(&url).await?;
+                let mut b1 = Vec::new();
+                while let Some(p) = s1.chunk().await? {
+                    b1.extend_from_slice(&p);
+                }
+                assert_eq!(b1, b"abc");
+                // Reuses the pooled connection — the server only ever accepts one.
+                let s2 = client.get_streaming(&url).await?;
+                s2.read_to_end().await
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(second.text(), "def");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn dropping_stream_early_does_not_pool() {
+        // A half-read stream must NOT return its connection to the pool.
+        let payload = vec![b'q'; 64 * 1024];
+        let mut response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", payload.len()).into_bytes();
+        response.extend_from_slice(&payload);
+        let (port, server) = one_shot(response);
+
+        let client = HttpClient::new();
+        rt_core::Executor::new()
+            .unwrap()
+            .block_on(async {
+                let mut stream = client.get_streaming(&format!("http://127.0.0.1:{port}/p")).await?;
+                let _first = stream.chunk().await?.unwrap(); // read one slice, then drop
+                drop(stream);
+                Ok::<_, HttpError>(())
+            })
+            .unwrap()
+            .unwrap();
+
+        let pooled: usize = client.pool.idle.lock().unwrap().values().map(Vec::len).sum();
+        assert_eq!(pooled, 0, "a partially-read connection must not be pooled");
         server.join().unwrap();
     }
 
