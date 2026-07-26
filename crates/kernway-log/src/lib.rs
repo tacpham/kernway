@@ -231,9 +231,23 @@ impl<T> Future for Scoped<'_, T> {
         // `Scoped` is `Unpin` (an `Arc` and a `Pin<Box<…>>`), so no unsafe needed.
         let this = self.as_mut().get_mut();
         let previous = CURRENT.with(|current| current.borrow_mut().replace(Arc::clone(&this.context)));
-        let result = this.future.as_mut().poll(cx);
-        CURRENT.with(|current| *current.borrow_mut() = previous);
-        result
+        // Restore on the way out via a guard, so the context is put back even if the
+        // inner poll *panics* (unwinds) — otherwise a panicking request would leak its
+        // context onto the thread for the next task. Composes with panic isolation.
+        let _restore = RestoreContext(Some(previous));
+        this.future.as_mut().poll(cx)
+    }
+}
+
+/// Restores the previous context when dropped — at the end of a poll, or during a
+/// panic unwind through it.
+struct RestoreContext(Option<Option<Arc<Context>>>);
+
+impl Drop for RestoreContext {
+    fn drop(&mut self) {
+        if let Some(previous) = self.0.take() {
+            CURRENT.with(|current| *current.borrow_mut() = previous);
+        }
     }
 }
 

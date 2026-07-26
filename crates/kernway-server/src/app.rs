@@ -7,9 +7,14 @@
 //! handler signature. Making them `async` is the next step, and belongs with
 //! the `kernway-core` spec work.
 
+use std::any::Any;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context as TaskCx, Poll};
 use std::time::Duration;
 
 use di_core::{AppContext, RequestScope};
@@ -977,23 +982,75 @@ fn apply_range(response: &mut Response, header: &str, len: u64) {
     }
 }
 
-/// Run the async middleware chain and the matched route ([KEP-0006]).
-///
-/// TODO(panic-safety): the sync path caught a handler panic and turned it into a
-/// 500 so one bad request could not kill every connection on the shard. Catching a
-/// panic across `.await` needs a `CatchUnwind` future wrapper; until that lands the
-/// executor's per-task isolation is the backstop. Tracked as a follow-on.
+/// Run the async middleware chain and the matched route ([KEP-0006]), with panic
+/// isolation: a handler (or middleware) that panics becomes a `500`, so one bad
+/// request cannot take down the connection task or the requests sharing it.
 async fn handle(
     request: Request,
     router: &Router,
     context: &AppContext,
     middlewares: &[Arc<dyn Middleware>],
 ) -> Response {
-    // One request scope per request (KEP-0005), over the application context.
-    // Middleware may set request-scoped beans on it; the handler resolves them.
-    let scope = RequestScope::new(context);
-    let terminal = move |req: Request, scope: &RequestScope| run_handler(req, router, scope);
-    Next { rest: middlewares, terminal: &terminal }.run(request, &scope).await
+    // Build and run the whole chain *inside* the wrapped future, so a panic caught
+    // by `CatchUnwind` covers not just an `.await` deep in a handler but also the
+    // eager work of dispatch itself (scope, terminal, `Next::run`).
+    let inner: BoxFuture<'_, Response> = Box::pin(async move {
+        // One request scope per request (KEP-0005), over the application context.
+        // Middleware may set request-scoped beans on it; the handler resolves them.
+        let scope = RequestScope::new(context);
+        let terminal = move |req: Request, scope: &RequestScope| run_handler(req, router, scope);
+        Next { rest: middlewares, terminal: &terminal }.run(request, &scope).await
+    });
+    CatchUnwind { inner }.await
+}
+
+/// Wraps the request future so a panic on any poll is caught and turned into a
+/// `500` — the async equivalent of the sync path's per-request `catch_unwind`
+/// (the KEP-0002/KEP-0006 follow-on). Universal: every request goes through it,
+/// independent of which middleware are installed.
+struct CatchUnwind<'a> {
+    inner: BoxFuture<'a, Response>,
+}
+
+impl Future for CatchUnwind<'_> {
+    type Output = Response;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut TaskCx<'_>) -> Poll<Response> {
+        let this = self.as_mut().get_mut(); // `inner` is a `Pin<Box<…>>`, so `Unpin`.
+        // `AssertUnwindSafe`: on a caught panic we return a 500 and drop the future,
+        // never re-polling it, so no observer sees a broken half-state.
+        match catch_unwind(AssertUnwindSafe(|| this.inner.as_mut().poll(cx))) {
+            Ok(poll) => poll,
+            Err(payload) => {
+                kernway_log::error!(
+                    target: "kernway_server",
+                    "handler panicked: {}",
+                    panic_message(payload.as_ref())
+                );
+                Poll::Ready(panic_response())
+            }
+        }
+    }
+}
+
+/// A best-effort message from a panic payload (`&str`/`String`, else a placeholder).
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
+/// The `500` a caught panic becomes — RFC 7807, no internal detail leaked to the client.
+fn panic_response() -> Response {
+    Response::new(StatusCode::INTERNAL_SERVER_ERROR)
+        .content_type("application/json; charset=utf-8")
+        .body(
+            br#"{"status":500,"title":"Internal Server Error","detail":"the request handler failed"}"#.to_vec(),
+        )
 }
 
 /// Wrap a synchronous test body as an async [`Handler`](crate::router::Handler).
@@ -1083,7 +1140,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "async panic isolation (CatchUnwind future wrapper) is a KEP-0006 follow-on; catch_unwind across .await is not yet wired"]
     fn a_panicking_handler_becomes_a_500() {
         let mut router = Router::new();
         router.add("GET", "/boom", sync_handler(|_req, _ctx| -> Response {
