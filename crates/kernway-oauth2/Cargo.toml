@@ -1,0 +1,19 @@
+[package]
+name        = "kernway-oauth2"
+description = "OAuth2 / OIDC client (authorization-code + PKCE) on the Kernway HTTP client — login with Google, GitHub, or any provider"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+
+[dependencies]
+kernway-http-client = { workspace = true }        # the outbound calls (token, userinfo)
+kernway-security    = { workspace = true }        # sha256 (PKCE), base64url
+getrandom  = "0.2"                                # random code_verifier + state
+serde      = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+rt-core = { workspace = true }
+
+[lints]
+workspace = true
