@@ -19,10 +19,36 @@
 
 #![forbid(unsafe_code)]
 
+mod tls;
+
 use std::fmt;
 use std::net::ToSocketAddrs;
+use std::sync::Arc;
 
 use rt_net::AsyncTcpStream;
+
+/// A live connection — a plain socket, or a TLS session over one. Both expose the
+/// same `read`/`write_all`, so the HTTP layer is oblivious to which it holds.
+enum Conn {
+    Plain(AsyncTcpStream),
+    Tls(Box<tls::AsyncTlsStream>),
+}
+
+impl Conn {
+    async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Conn::Plain(s) => s.read(buf).await,
+            Conn::Tls(s) => s.read(buf).await,
+        }
+    }
+
+    async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        match self {
+            Conn::Plain(s) => s.write_all(buf).await,
+            Conn::Tls(s) => s.write_all(buf).await,
+        }
+    }
+}
 
 /// An HTTP method. `as_str` is the wire token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,18 +227,19 @@ impl From<std::io::Error> for HttpError {
     }
 }
 
-/// An HTTP/1.1 client. Cheap to create; one request opens (and closes) one connection
-/// — a connection pool can come later, but OAuth-style call volumes do not need one.
-#[derive(Debug, Default, Clone)]
+/// An HTTP/1.1 client (plain + TLS). Cheap to clone (shares one TLS config); one
+/// request opens and closes one connection — a pool can come later, but OAuth-style
+/// call volumes do not need one.
+#[derive(Clone)]
 pub struct HttpClient {
-    _private: (),
+    tls: Arc<rustls::ClientConfig>,
 }
 
 impl HttpClient {
-    /// A new client.
+    /// A new client with the default TLS config (verifies against Mozilla's roots).
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self { tls: tls::default_config() }
     }
 
     /// `GET url`.
@@ -229,18 +256,29 @@ impl HttpClient {
         self.send(req).await
     }
 
-    /// Send a request and read the full response.
+    /// Send a request and read the full response — over TLS for an `https` URL, plain
+    /// otherwise.
     pub async fn send(&self, req: Request) -> Result<Response, HttpError> {
-        if req.url.is_tls() {
-            return Err(HttpError::Tls("https needs TLS, which lands in the next cut".into()));
-        }
         let addr = resolve(&req.url.host, req.url.port)?;
-        let mut stream = AsyncTcpStream::connect(addr).await?;
-        stream.set_nodelay(true).ok();
+        let tcp = AsyncTcpStream::connect(addr).await?;
+        tcp.set_nodelay(true).ok();
+
+        let mut conn = if req.url.is_tls() {
+            let tls = tls::AsyncTlsStream::connect(tcp, self.tls.clone(), &req.url.host).await?;
+            Conn::Tls(Box::new(tls))
+        } else {
+            Conn::Plain(tcp)
+        };
 
         let raw = encode_request(&req);
-        stream.write_all(&raw).await?;
-        read_response(&mut stream).await
+        conn.write_all(&raw).await?;
+        read_response(&mut conn).await
+    }
+}
+
+impl Default for HttpClient {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -257,7 +295,7 @@ fn resolve(host: &str, port: u16) -> Result<std::net::SocketAddr, HttpError> {
 
 /// Read the whole response from a connection, following `Content-Length`, chunked, or
 /// read-to-close.
-async fn read_response(stream: &mut AsyncTcpStream) -> Result<Response, HttpError> {
+async fn read_response(stream: &mut Conn) -> Result<Response, HttpError> {
     let mut buf = Vec::with_capacity(4096);
 
     // Read until the header terminator (CRLFCRLF) is in `buf`.
@@ -302,12 +340,12 @@ async fn read_response(stream: &mut AsyncTcpStream) -> Result<Response, HttpErro
     Ok(Response { status: head.status, headers: head.headers, body })
 }
 
-/// Read one chunk from the socket into `buf`; `false` at EOF.
-async fn read_more(stream: &mut AsyncTcpStream, buf: &mut Vec<u8>) -> Result<bool, HttpError> {
+/// Read one chunk from the connection into `buf`; `false` at EOF.
+async fn read_more(stream: &mut Conn, buf: &mut Vec<u8>) -> Result<bool, HttpError> {
     read_more_into(stream, buf).await
 }
 
-async fn read_more_into(stream: &mut AsyncTcpStream, buf: &mut Vec<u8>) -> Result<bool, HttpError> {
+async fn read_more_into(stream: &mut Conn, buf: &mut Vec<u8>) -> Result<bool, HttpError> {
     let mut chunk = [0u8; 4096];
     let n = stream.read(&mut chunk).await?;
     if n == 0 {
@@ -557,14 +595,19 @@ mod tests {
         server.join().unwrap();
     }
 
+    // A real HTTPS request — proves the rustls handshake + cert verification over the
+    // async socket. Ignored (needs network); run with:
+    //   cargo test -p kernway-http-client -- --ignored
     #[test]
-    fn https_without_tls_is_a_clear_error() {
+    #[ignore = "needs network (real HTTPS to example.com)"]
+    fn fetches_over_real_https() {
         let client = HttpClient::new();
-        let err = rt_core::Executor::new()
+        let resp = rt_core::Executor::new()
             .unwrap()
             .block_on(client.get("https://example.com/"))
-            .unwrap() // executor result
-            .unwrap_err(); // the request result — an error
-        assert!(matches!(err, HttpError::Tls(_)));
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp.status, 200, "TLS handshake + verified cert + 200 from example.com");
+        assert!(resp.text().contains("Example Domain"), "got the page body over TLS");
     }
 }
