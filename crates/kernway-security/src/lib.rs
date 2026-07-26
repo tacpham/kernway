@@ -62,6 +62,11 @@ pub use redis_store::RedisSessionStore;
 pub mod redis_bans;
 #[cfg(feature = "redis")]
 pub use redis_bans::{PersistentBans, RedisBanStore};
+// The persistence knobs surfaced in the file-backed stores' public API (the `open`
+// signatures take an `Fsync`; mutations return a `PersistError`), re-exported so a
+// consumer needs only kernway-security in scope.
+#[cfg(feature = "persist")]
+pub use kernway_persist::{Fsync, PersistError};
 /// File-backed (local disk) persistence for the ban list (feature = `persist`).
 #[cfg(feature = "persist")]
 pub mod file_bans;

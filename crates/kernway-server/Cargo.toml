@@ -25,6 +25,10 @@ thiserror      = { workspace = true }
 # Activity store from kernway-security, which is itself behind that crate's
 # `presence` feature. Off by default — tracking visitor id + bans needs none of it.
 presence = ["kernway-security/presence"]
+# Config-driven backend selection (`backends` module): pick memory / file / redis
+# per store from `kernway.*.store`. These forward the kernway-security backends.
+persist = ["kernway-security/persist"]
+redis = ["kernway-security/redis"]
 
 [dev-dependencies]
 criterion = { workspace = true }

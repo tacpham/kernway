@@ -36,11 +36,15 @@ htmx = ["dep:kernway-htmx"]
 yaml = ["kernway-config/yaml"]
 ## Security: CSRF tokens, security headers, and sessions (KEP-0004).
 security = ["dep:kernway-security"]
-## Presence / heartbeat — who is online now. Independent of `security`.
-presence = ["dep:kernway-security", "kernway-security/presence"]
-## Redis-backed session store — a shared registry for a multi-instance
+## Presence / heartbeat — who is online now, plus the live-activity middleware.
+## Independent of `security`.
+presence = ["dep:kernway-security", "kernway-security/presence", "kernway-server/presence"]
+## Redis-backed stores — a shared session/ban/activity registry for a multi-instance
 ## deployment. Implies `security`. With `presence`, also the Redis presence tracker.
-redis = ["security", "kernway-security/redis"]
+redis = ["security", "kernway-security/redis", "kernway-server/redis"]
+## File-backed (local disk) durable stores — sessions/bans/activity survive a
+## restart with no server (single-node). Implies `security`.
+persist = ["security", "kernway-security/persist", "kernway-server/persist"]
 
 [lints]
 workspace = true
