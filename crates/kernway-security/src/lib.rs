@@ -42,6 +42,15 @@ pub use presence::{InMemoryPresence, Presence};
 #[cfg(all(feature = "presence", feature = "redis"))]
 pub use presence::RedisPresence;
 
+/// Activity — who is here right now and on what page, recorded per request (the live
+/// "who's on the site" view). Same feature as presence.
+#[cfg(feature = "presence")]
+pub mod activity;
+#[cfg(feature = "presence")]
+pub use activity::{ActiveVisitor, Activity, InMemoryActivity};
+#[cfg(all(feature = "presence", feature = "redis"))]
+pub use activity::RedisActivity;
+
 /// Redis-backed [`SessionStore`](session::SessionStore) — the distributed backend
 /// (feature = `redis`).
 #[cfg(feature = "redis")]

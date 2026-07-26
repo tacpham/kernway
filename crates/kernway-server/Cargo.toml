@@ -20,6 +20,12 @@ rt-core        = { workspace = true }
 di-core        = { workspace = true }
 thiserror      = { workspace = true }
 
+[features]
+# The ActivityTracking middleware (a live "who's on the site" view) needs the
+# Activity store from kernway-security, which is itself behind that crate's
+# `presence` feature. Off by default — tracking visitor id + bans needs none of it.
+presence = ["kernway-security/presence"]
+
 [dev-dependencies]
 criterion = { workspace = true }
 # Benchmark-only: the radix-trie router axum uses, as the incumbent to measure

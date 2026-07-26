@@ -13,5 +13,9 @@ kernway-validation = { workspace = true } # #[derive(Validate)] for a Validated<
 di-macro           = { workspace = true }
 serde              = { workspace = true }
 
+[features]
+# Demonstrates the live-activity middleware (who's on the site + where).
+presence = ["kernway-server/presence"]
+
 [lints]
 workspace = true
