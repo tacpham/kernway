@@ -32,6 +32,10 @@ kernway-persist = { workspace = true, optional = true }
 serde      = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
+# RSA signature verification for RS256/JWKS (feature = "jwks"). ring is the audited
+# crypto behind rustls (already in the tree via the HTTP client) — never hand-roll RSA.
+ring = { version = "0.17", optional = true }
+
 [features]
 # Presence / heartbeat — who is online now (KEP-0004 sibling). Off by default:
 # an app that does not need it compiles none of it.
@@ -45,6 +49,9 @@ persist = ["dep:kernway-persist"]
 # JSON Web Tokens (RFC 7519), HS256 — a standards-compliant, stateless bearer
 # token alongside the stateful session token. Pulls in serde for the claims JSON.
 jwt = ["dep:serde", "dep:serde_json"]
+# RS256 verification against a JWKS — accept tokens from an external issuer
+# (Auth0/Keycloak/Google) using their published public keys. Adds ring (RSA verify).
+jwks = ["jwt", "dep:ring"]
 
 [dev-dependencies]
 criterion = { workspace = true }

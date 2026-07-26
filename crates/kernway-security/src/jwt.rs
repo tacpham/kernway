@@ -39,9 +39,11 @@ const HEADER_JSON: &str = r#"{"alg":"HS256","typ":"JWT"}"#;
 pub enum JwtError {
     /// Not `header.payload.signature`, or a part is not valid base64url / JSON.
     Malformed,
-    /// The header's `alg` is not `HS256` (includes `none`) — refused, not verified.
+    /// The header's `alg` is not the expected one (includes `none`) — refused, not verified.
     UnsupportedAlg,
-    /// The HMAC signature does not match — the token was forged or tampered with.
+    /// No key in the JWKS matches the token's `kid` (RS256) — cannot verify.
+    UnknownKey,
+    /// The signature does not match — the token was forged or tampered with.
     InvalidSignature,
     /// `exp` is in the past (beyond the leeway).
     Expired,
@@ -59,7 +61,8 @@ impl std::fmt::Display for JwtError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
             JwtError::Malformed => "malformed token",
-            JwtError::UnsupportedAlg => "unsupported algorithm (only HS256)",
+            JwtError::UnsupportedAlg => "unsupported algorithm",
+            JwtError::UnknownKey => "no matching key in the JWKS",
             JwtError::InvalidSignature => "invalid signature",
             JwtError::Expired => "token expired",
             JwtError::NotYetValid => "token not yet valid",
@@ -261,34 +264,39 @@ impl Jwt {
         // Only now decode and validate the claims.
         let payload_bytes = b64url_decode(payload_b64).ok_or(JwtError::Malformed)?;
         let claims: Claims = serde_json::from_slice(&payload_bytes).map_err(|_| JwtError::Malformed)?;
-
-        if validation.validate_exp {
-            if let Some(exp) = claims.exp {
-                if now > exp.saturating_add(validation.leeway_secs) {
-                    return Err(JwtError::Expired);
-                }
-            }
-        }
-        if validation.validate_nbf {
-            if let Some(nbf) = claims.nbf {
-                if now.saturating_add(validation.leeway_secs) < nbf {
-                    return Err(JwtError::NotYetValid);
-                }
-            }
-        }
-        if let Some(expected_iss) = &validation.expected_iss {
-            if claims.iss.as_deref() != Some(expected_iss.as_str()) {
-                return Err(JwtError::InvalidIssuer);
-            }
-        }
-        if let Some(expected_aud) = &validation.expected_aud {
-            if claims.aud.as_deref() != Some(expected_aud.as_str()) {
-                return Err(JwtError::InvalidAudience);
-            }
-        }
-
+        validate_claims(&claims, now, validation)?;
         Ok(claims)
     }
+}
+
+/// Check the time + identity claims against `validation` — shared by HS256
+/// ([`Jwt::decode`]) and RS256 ([`Jwks::verify`]).
+pub(crate) fn validate_claims(claims: &Claims, now: u64, validation: &Validation) -> Result<(), JwtError> {
+    if validation.validate_exp {
+        if let Some(exp) = claims.exp {
+            if now > exp.saturating_add(validation.leeway_secs) {
+                return Err(JwtError::Expired);
+            }
+        }
+    }
+    if validation.validate_nbf {
+        if let Some(nbf) = claims.nbf {
+            if now.saturating_add(validation.leeway_secs) < nbf {
+                return Err(JwtError::NotYetValid);
+            }
+        }
+    }
+    if let Some(expected_iss) = &validation.expected_iss {
+        if claims.iss.as_deref() != Some(expected_iss.as_str()) {
+            return Err(JwtError::InvalidIssuer);
+        }
+    }
+    if let Some(expected_aud) = &validation.expected_aud {
+        if claims.aud.as_deref() != Some(expected_aud.as_str()) {
+            return Err(JwtError::InvalidAudience);
+        }
+    }
+    Ok(())
 }
 
 /// The JWT header, parsed only to read `alg`.
@@ -296,6 +304,117 @@ impl Jwt {
 struct Header {
     alg: String,
 }
+
+/// RS256 verification against a JSON Web Key Set (feature = `jwks`).
+#[cfg(feature = "jwks")]
+mod jwks {
+    use ring::signature::{RsaPublicKeyComponents, RSA_PKCS1_2048_8192_SHA256};
+    use serde::Deserialize;
+
+    use super::{validate_claims, Claims, JwtError, Validation};
+    use crate::token::b64url_decode;
+
+    /// A set of public keys from an issuer's JWKS document, for verifying RS256 tokens
+    /// they signed. Fetch the JSON from the issuer's `jwks_uri` (their public keys) and
+    /// parse it with [`from_json`](Jwks::from_json); a `JwksClient` (kernway-oauth2)
+    /// does the fetching + caching.
+    pub struct Jwks {
+        keys: Vec<RsaKey>,
+    }
+
+    /// One RSA public key: its `kid` and the modulus/exponent bytes.
+    struct RsaKey {
+        kid: Option<String>,
+        n: Vec<u8>,
+        e: Vec<u8>,
+    }
+
+    #[derive(Deserialize)]
+    struct RawJwks {
+        keys: Vec<RawJwk>,
+    }
+
+    #[derive(Deserialize)]
+    struct RawJwk {
+        kty: String,
+        #[serde(default)]
+        kid: Option<String>,
+        n: Option<String>,
+        e: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct RsaHeader {
+        alg: String,
+        #[serde(default)]
+        kid: Option<String>,
+    }
+
+    impl Jwks {
+        /// Parse a JWKS JSON document, keeping the RSA signing keys.
+        pub fn from_json(bytes: &[u8]) -> Result<Jwks, JwtError> {
+            let raw: RawJwks = serde_json::from_slice(bytes).map_err(|_| JwtError::Malformed)?;
+            let keys = raw
+                .keys
+                .into_iter()
+                .filter(|k| k.kty == "RSA")
+                .filter_map(|k| {
+                    Some(RsaKey { kid: k.kid, n: b64url_decode(k.n.as_deref()?)?, e: b64url_decode(k.e.as_deref()?)? })
+                })
+                .collect();
+            Ok(Jwks { keys })
+        }
+
+        /// Whether this set contains a key with the given `kid`.
+        #[must_use]
+        pub fn contains_kid(&self, kid: &str) -> bool {
+            self.keys.iter().any(|k| k.kid.as_deref() == Some(kid))
+        }
+
+        fn find(&self, kid: Option<&str>) -> Option<&RsaKey> {
+            match kid {
+                Some(kid) => self.keys.iter().find(|k| k.kid.as_deref() == Some(kid)),
+                None => self.keys.first(), // no kid → the only/first key
+            }
+        }
+
+        /// Verify an **RS256** `token` against these keys and validate its claims. The
+        /// signature is checked with the RSA public key whose `kid` matches the token
+        /// header, before any claim is trusted. `now` is unix seconds.
+        pub fn verify(&self, token: &str, now: u64, validation: &Validation) -> Result<Claims, JwtError> {
+            let mut parts = token.split('.');
+            let (header_b64, payload_b64, signature_b64) =
+                match (parts.next(), parts.next(), parts.next(), parts.next()) {
+                    (Some(h), Some(p), Some(s), None) => (h, p, s),
+                    _ => return Err(JwtError::Malformed),
+                };
+
+            // Header → algorithm + key id. Only RS256 here.
+            let header_bytes = b64url_decode(header_b64).ok_or(JwtError::Malformed)?;
+            let header: RsaHeader = serde_json::from_slice(&header_bytes).map_err(|_| JwtError::Malformed)?;
+            if header.alg != "RS256" {
+                return Err(JwtError::UnsupportedAlg);
+            }
+            let key = self.find(header.kid.as_deref()).ok_or(JwtError::UnknownKey)?;
+
+            // Verify the RSA signature over `header.payload` BEFORE trusting the claims.
+            let signing_input = format!("{header_b64}.{payload_b64}");
+            let signature = b64url_decode(signature_b64).ok_or(JwtError::Malformed)?;
+            let public_key = RsaPublicKeyComponents { n: &key.n, e: &key.e };
+            public_key
+                .verify(&RSA_PKCS1_2048_8192_SHA256, signing_input.as_bytes(), &signature)
+                .map_err(|_| JwtError::InvalidSignature)?;
+
+            let claims: Claims = serde_json::from_slice(&b64url_decode(payload_b64).ok_or(JwtError::Malformed)?)
+                .map_err(|_| JwtError::Malformed)?;
+            validate_claims(&claims, now, validation)?;
+            Ok(claims)
+        }
+    }
+}
+
+#[cfg(feature = "jwks")]
+pub use jwks::Jwks;
 
 #[cfg(test)]
 mod tests {
@@ -392,6 +511,50 @@ mod tests {
         assert_eq!(jwt().decode("not-a-jwt", NOW), Err(JwtError::Malformed));
         assert_eq!(jwt().decode("only.two", NOW), Err(JwtError::Malformed));
         assert_eq!(jwt().decode("a.b.c.d", NOW), Err(JwtError::Malformed));
+    }
+
+    // A real RS256 token + its JWKS (generated with an RSA-2048 key). Proves we verify
+    // a token signed by an external issuer using only their published public key.
+    #[cfg(feature = "jwks")]
+    const RS256_TOKEN: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6InRlc3Qta2V5LTEifQ.eyJzdWIiOiIxMjM0NTY3ODkwIiwiaXNzIjoiaHR0cHM6Ly9pc3N1ZXIuZXhhbXBsZSIsImF1ZCI6Im15LWFwaSIsImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxNzAwMDAwMDAwfQ.j5o1170qMzys95RZy2KKrssW-KuQ-KRbRkYjoVOeIxa9oReChs2sea_qE943SApq58XLvswxZUCnO2vZ7IPz82pGc6gYFG1uXiDnyJOCkeSwtkAHWGJ6EWl79rULFGzi4DMNO-y3FcM0VWekeev4Y6NQB_bNAnLPwmyKY3BiRgK9Oo7FwdO8EQNJqXJ_I851pH88P39S9pdSq4He4Hi91xRsGspcSKPNMwMxAgZIXAlF5zVbOr6dLv-jMypGNsu3ev4jBz0V9A58XPGWafdMguwmnPjZwBeASDywqoCJbzH-pxcwvs7V0RnOQs9hUHArsXamD1CvJmWmvflL1hkpJQ";
+    #[cfg(feature = "jwks")]
+    const RS256_JWKS: &str = r#"{"keys":[{"kty":"RSA","use":"sig","kid":"test-key-1","alg":"RS256","n":"oYaIi_50A0cWJapMnTI2JVjtCt0jdeamBgsLkhaS_IhTMOBUAjCSNxLb4Xx6dFZv3RGrONWc4vTr8mnEwozfiG3YhC0UONBCboWX607pm1fDu6lxL-XqmIx86KrYrVpK7Cv55esuZopGwxglJlC3UiB8Bs_Zf2SFZp5IkHoYz_-uHMlfQpCWQDM-uI1_tNs41c98eLnMU77NIwVV7VgZNHb6AB24_VhYHWxMx2o0so0q3_qdMkMlWCNmMrR1GuabigfwryJFckUe7tuaKRRYzrLLqeCasbcIquatafi8W-7ZGnvNGVvuf7KsnqNUBEsGdyMhw3c26trdMzHCocm7jQ","e":"AQAB"}]}"#;
+
+    #[cfg(feature = "jwks")]
+    #[test]
+    fn verifies_an_rs256_token_against_a_jwks() {
+        let jwks = Jwks::from_json(RS256_JWKS.as_bytes()).unwrap();
+        assert!(jwks.contains_kid("test-key-1"));
+
+        let v = Validation {
+            expected_iss: Some("https://issuer.example".into()),
+            expected_aud: Some("my-api".into()),
+            ..Default::default()
+        };
+        let claims = jwks.verify(RS256_TOKEN, NOW, &v).expect("valid RS256 token verifies");
+        assert_eq!(claims.sub.as_deref(), Some("1234567890"));
+        assert_eq!(claims.iss.as_deref(), Some("https://issuer.example"));
+    }
+
+    #[cfg(feature = "jwks")]
+    #[test]
+    fn rs256_rejects_tampering_wrong_issuer_and_unknown_key() {
+        let jwks = Jwks::from_json(RS256_JWKS.as_bytes()).unwrap();
+
+        // A tampered payload fails the signature.
+        let mut parts: Vec<&str> = RS256_TOKEN.split('.').collect();
+        let forged = b64url_encode(br#"{"sub":"attacker","iss":"https://issuer.example","aud":"my-api","exp":4102444800}"#);
+        parts[1] = &forged;
+        let tampered = parts.join(".");
+        assert_eq!(jwks.verify(&tampered, NOW, &Validation::default()), Err(JwtError::InvalidSignature));
+
+        // The wrong expected issuer is rejected (after a valid signature).
+        let wrong_iss = Validation { expected_iss: Some("https://evil.example".into()), ..Default::default() };
+        assert_eq!(jwks.verify(RS256_TOKEN, NOW, &wrong_iss), Err(JwtError::InvalidIssuer));
+
+        // A JWKS without the token's kid cannot verify it.
+        let other = Jwks::from_json(br#"{"keys":[{"kty":"RSA","kid":"other","n":"AQAB","e":"AQAB"}]}"#).unwrap();
+        assert_eq!(other.verify(RS256_TOKEN, NOW, &Validation::default()), Err(JwtError::UnknownKey));
     }
 
     #[test]
