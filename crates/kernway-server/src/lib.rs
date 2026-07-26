@@ -42,6 +42,8 @@ pub mod router;
 pub mod app;
 /// Synchronous middleware chain and the built-in layers.
 pub mod middleware;
+/// Web security — central, path-based access rules (Spring's `HttpSecurity`).
+pub mod security;
 
 pub use app::{AppBuilder, Controller, KeepAliveConfig, KernwayApp};
 pub use middleware::{Middleware, Next};
@@ -57,5 +59,7 @@ pub use kernway_core::error::StatusCode;
 pub use kernway_core::request::Request;
 pub use kernway_core::response::Response;
 // The role check `#[require_role]` compiles to (reads the SecurityContext the auth
-// middleware put in the scope, KEP-0005) and the 403 it returns when denied.
-pub use app::{forbidden, role_allowed};
+// middleware put in the scope, KEP-0005) and the 401/403 responses.
+pub use app::{forbidden, role_allowed, unauthorized};
+// Central, path-based access rules (Spring's HttpSecurity).
+pub use security::{Access, HttpSecurity, SecurityLayer};
