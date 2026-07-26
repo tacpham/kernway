@@ -33,6 +33,8 @@ use rt_net::AsyncTcpStream;
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default cap on the whole request (connect through reading the full response).
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default maximum number of redirects to follow before returning the 3xx response.
+pub const DEFAULT_MAX_REDIRECTS: usize = 10;
 
 /// A live connection — a plain socket, or a TLS session over one. Both expose the
 /// same `read`/`write_all`, so the HTTP layer is oblivious to which it holds.
@@ -273,19 +275,29 @@ pub struct HttpClient {
     tls: Arc<rustls::ClientConfig>,
     connect_timeout: Option<Duration>,
     timeout: Option<Duration>,
+    max_redirects: usize,
 }
 
 impl HttpClient {
-    /// A new client with the default TLS config (verifies against Mozilla's roots) and
-    /// the default timeouts ([`DEFAULT_CONNECT_TIMEOUT`], [`DEFAULT_TIMEOUT`]) — so a
-    /// hung server can never hang a request forever. Override them per client.
+    /// A new client with the default TLS config (verifies against Mozilla's roots), the
+    /// default timeouts ([`DEFAULT_CONNECT_TIMEOUT`], [`DEFAULT_TIMEOUT`]) — so a hung
+    /// server can never hang a request forever — and redirect following
+    /// ([`DEFAULT_MAX_REDIRECTS`]). Override them per client.
     #[must_use]
     pub fn new() -> Self {
         Self {
             tls: tls::default_config(),
             connect_timeout: Some(DEFAULT_CONNECT_TIMEOUT),
             timeout: Some(DEFAULT_TIMEOUT),
+            max_redirects: DEFAULT_MAX_REDIRECTS,
         }
+    }
+
+    /// How many redirects to follow (`0` returns the 3xx response without following).
+    #[must_use]
+    pub fn max_redirects(mut self, max: usize) -> Self {
+        self.max_redirects = max;
+        self
     }
 
     /// Cap the whole request (connect through reading the full response). `None`
@@ -330,12 +342,24 @@ impl HttpClient {
         }
     }
 
-    async fn send_inner(&self, req: Request) -> Result<Response, HttpError> {
-        let addr = resolve(&req.url.host, req.url.port)?;
-        let mut conn = self.connect(addr, &req.url).await?;
-        let raw = encode_request(&req);
-        conn.write_all(&raw).await?;
-        read_response(&mut conn).await
+    async fn send_inner(&self, mut req: Request) -> Result<Response, HttpError> {
+        let mut redirects = 0;
+        loop {
+            let addr = resolve(&req.url.host, req.url.port)?;
+            let mut conn = self.connect(addr, &req.url).await?;
+            conn.write_all(&encode_request(&req)).await?;
+            let response = read_response(&mut conn).await?;
+
+            // Follow a redirect if we have budget and the response points somewhere.
+            if redirects < self.max_redirects {
+                if let Some(next) = redirect_target(&req, &response)? {
+                    redirects += 1;
+                    req = next;
+                    continue;
+                }
+            }
+            return Ok(response);
+        }
     }
 
     /// Establish the connection (TCP + TLS handshake for https), bounded by the
@@ -583,6 +607,70 @@ fn encode_request(req: &Request) -> Vec<u8> {
     bytes
 }
 
+/// Build the follow-up request for a redirect response, or `None` if it is not a
+/// followable redirect. Applies the standard method rules and, crucially, drops
+/// credentials when the target is a different origin (never leak `Authorization`/
+/// `Cookie` to another host).
+fn redirect_target(req: &Request, response: &Response) -> Result<Option<Request>, HttpError> {
+    if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+        return Ok(None);
+    }
+    let Some(location) = response.header("location") else {
+        return Ok(None);
+    };
+    let url = resolve_location(&req.url, location)?;
+
+    // 307/308 preserve the method + body; 301/302/303 become GET (HEAD stays HEAD) and
+    // drop the body.
+    let (method, body): (Method, Vec<u8>) = match response.status {
+        307 | 308 => (req.method, req.body.clone()),
+        _ if req.method == Method::Head => (Method::Head, Vec::new()),
+        _ => (Method::Get, Vec::new()),
+    };
+
+    let same_origin =
+        url.scheme == req.url.scheme && url.host.eq_ignore_ascii_case(&req.url.host) && url.port == req.url.port;
+    let dropped_body = body.is_empty() && !req.body.is_empty();
+
+    let headers = req
+        .headers
+        .iter()
+        .filter(|(name, _)| {
+            let n = name.to_ascii_lowercase();
+            // Never carry credentials across origins.
+            if !same_origin && (n == "authorization" || n == "cookie") {
+                return false;
+            }
+            // Body headers are stale once the body is dropped (they are recomputed).
+            if dropped_body && (n == "content-type" || n == "content-length") {
+                return false;
+            }
+            true
+        })
+        .cloned()
+        .collect();
+
+    Ok(Some(Request { method, url, headers, body }))
+}
+
+/// Resolve a `Location` value against the request URL — absolute, absolute-path, or a
+/// path relative to the current directory.
+fn resolve_location(base: &Url, location: &str) -> Result<Url, HttpError> {
+    let loc = location.trim();
+    if loc.contains("://") {
+        Url::parse(loc)
+    } else if loc.starts_with('/') {
+        Ok(Url { path_and_query: loc.to_string(), ..base.clone() })
+    } else {
+        // Relative to the current path's directory.
+        let dir = match base.path_and_query.rfind('/') {
+            Some(i) => &base.path_and_query[..=i],
+            None => "/",
+        };
+        Ok(Url { path_and_query: format!("{dir}{loc}"), ..base.clone() })
+    }
+}
+
 /// `application/x-www-form-urlencoded` from key/value pairs.
 fn encode_form(form: &[(&str, &str)]) -> Vec<u8> {
     let mut out = String::new();
@@ -733,6 +821,77 @@ mod tests {
         assert_eq!(resp.text(), "hello");
         assert_eq!(resp.header("content-length"), Some("5"));
         server.join().unwrap();
+    }
+
+    /// Build a Response with a status + headers (empty body), via the real parser.
+    fn mk_response(status: u16, headers: &[(&str, &str)]) -> Response {
+        let mut head = format!("HTTP/1.1 {status} X\r\n");
+        for (k, v) in headers {
+            head.push_str(&format!("{k}: {v}\r\n"));
+        }
+        head.push_str("\r\n");
+        let head = head.into_bytes();
+        let (status, spans) = parse_head_spans(&head).unwrap();
+        Response { status, body: Vec::new(), head, spans }
+    }
+
+    #[test]
+    fn redirect_applies_method_rules_and_drops_credentials_across_origins() {
+        let req = Request::new(Method::Post, Url::parse("https://a.example/login").unwrap())
+            .header("authorization", "Bearer secret")
+            .body("application/json", b"{}".to_vec());
+
+        // 302 to a DIFFERENT origin → GET, body + credentials dropped.
+        let cross = redirect_target(&req, &mk_response(302, &[("location", "https://b.evil/cb")])).unwrap().unwrap();
+        assert_eq!(cross.url.host, "b.evil");
+        assert_eq!(cross.method, Method::Get, "302 on POST becomes GET");
+        assert!(cross.body.is_empty(), "body dropped");
+        assert!(
+            !cross.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization")),
+            "Authorization must not leak to another origin"
+        );
+
+        // 307 to the SAME origin → method + body + credentials preserved.
+        let same = redirect_target(&req, &mk_response(307, &[("location", "/next")])).unwrap().unwrap();
+        assert_eq!(same.url.host, "a.example");
+        assert_eq!(same.url.path_and_query, "/next");
+        assert_eq!(same.method, Method::Post, "307 preserves the method");
+        assert_eq!(same.body, b"{}", "307 preserves the body");
+        assert!(same.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization")), "auth kept same-origin");
+
+        // A non-redirect status → no follow.
+        assert!(redirect_target(&req, &mk_response(200, &[])).unwrap().is_none());
+    }
+
+    #[test]
+    fn follows_a_redirect_over_sockets() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            // First connection: redirect to /final.
+            let (mut s1, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 512];
+            let _ = s1.read(&mut buf).unwrap();
+            s1.write_all(b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n").unwrap();
+            // Second connection: the followed request.
+            let (mut s2, _) = listener.accept().unwrap();
+            let n = s2.read(&mut buf).unwrap();
+            s2.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndone").unwrap();
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        });
+
+        let resp = rt_core::Executor::new()
+            .unwrap()
+            .block_on(HttpClient::new().get(&format!("http://127.0.0.1:{port}/start")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.text(), "done");
+        let followed = server.join().unwrap();
+        assert!(followed.starts_with("GET /final "), "followed to /final: {followed}");
     }
 
     #[test]
