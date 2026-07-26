@@ -56,6 +56,23 @@ pub enum Parsed {
     Incomplete,
 }
 
+/// Result of parsing only the head of a request (see [`parse_head`]).
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
+pub enum ParsedHead {
+    /// The head was decoded; the body (of `content_length` bytes) begins at `head_end`.
+    Complete {
+        /// The decoded request, with an empty body (the caller reads the body).
+        request: Request,
+        /// Byte offset where the body begins (just past the head's blank line).
+        head_end: usize,
+        /// The declared `Content-Length` (0 if absent).
+        content_length: usize,
+    },
+    /// The head has not fully arrived yet — read more and call again.
+    Incomplete,
+}
+
 /// Parse an HTTP/1.1 request out of a byte buffer.
 ///
 /// This is the entry point for async transports: the caller owns the socket and
@@ -65,13 +82,45 @@ pub enum Parsed {
 /// Accepts LF as well as CRLF line endings, so a request typed by hand through
 /// `nc` parses like one sent by `curl`.
 pub fn parse_bytes(buf: &[u8]) -> Result<Parsed, ParseError> {
+    let Some((mut request, head_end, content_length)) = parse_head_inner(buf)? else {
+        return Ok(Parsed::Incomplete);
+    };
+    // The buffered path caps the body: this whole request lives in memory.
+    if content_length > MAX_BODY_BYTES {
+        return Err(ParseError::TooLarge);
+    }
+    let total = head_end + content_length;
+    if buf.len() < total {
+        return Ok(Parsed::Incomplete);
+    }
+    request.body = buf[head_end..total].to_vec();
+    Ok(Parsed::Complete { request, consumed: total })
+}
+
+/// Parse only the head (request line + headers), WITHOUT requiring the body. Returns the
+/// decoded request (empty body), the offset where the body begins, and the declared
+/// `Content-Length`, so the caller can decide how to read the body — buffer it, or stream
+/// it to disk for a large upload. Unlike [`parse_bytes`] it does **not** cap the body:
+/// the server enforces its own `max_upload_size`.
+pub fn parse_head(buf: &[u8]) -> Result<ParsedHead, ParseError> {
+    match parse_head_inner(buf)? {
+        Some((request, head_end, content_length)) => {
+            Ok(ParsedHead::Complete { request, head_end, content_length })
+        }
+        None => Ok(ParsedHead::Incomplete),
+    }
+}
+
+/// Head-only decode shared by [`parse_bytes`] and [`parse_head`]. `Ok(None)` means the
+/// head has not fully arrived yet. The returned request carries an empty body.
+fn parse_head_inner(buf: &[u8]) -> Result<Option<(Request, usize, usize)>, ParseError> {
     let Some((head_end, line_count)) = find_head_end(buf) else {
         // No blank line yet. Bound the wait, or a client that never sends one
         // could grow this buffer without limit.
         if buf.len() > MAX_HEAD_BYTES {
             return Err(ParseError::TooLarge);
         }
-        return Ok(Parsed::Incomplete);
+        return Ok(None);
     };
     if head_end > MAX_HEAD_BYTES {
         return Err(ParseError::TooLarge);
@@ -103,28 +152,19 @@ pub fn parse_bytes(buf: &[u8]) -> Result<Parsed, ParseError> {
         .get("content-length")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    if content_length > MAX_BODY_BYTES {
-        return Err(ParseError::TooLarge);
-    }
 
-    let total = head_end + content_length;
-    if buf.len() < total {
-        return Ok(Parsed::Incomplete);
-    }
-
-    Ok(Parsed::Complete {
-        request: Request {
-            method,
-            path,
-            version,
-            headers,
-            query,
-            path_params: HashMap::new(), // filled by the router
-            body: buf[head_end..total].to_vec(),
-            remote_addr: None, // set by the server from the socket peer
-        },
-        consumed: total,
-    })
+    let request = Request {
+        method,
+        path,
+        version,
+        headers,
+        query,
+        path_params: HashMap::new(), // filled by the router
+        body: Vec::new(),
+        body_spool: None,
+        remote_addr: None, // set by the server from the socket peer
+    };
+    Ok(Some((request, head_end, content_length)))
 }
 
 /// Byte offset just past the blank line that ends the head, plus how many lines
@@ -262,6 +302,7 @@ pub fn parse_from_reader<R: BufRead>(mut reader: R) -> Result<Request, ParseErro
         query,
         path_params: HashMap::new(), // filled by router
         body,
+        body_spool: None,
         remote_addr: None, // set by the server from the socket peer
     })
 }
@@ -380,6 +421,22 @@ mod byte_parser_tests {
         assert_eq!(req.path, "/health");
         assert_eq!(req.headers.get("host"), Some("localhost"));
         assert_eq!(consumed, raw.len(), "a bodyless request consumes exactly its head");
+    }
+
+    #[test]
+    fn parse_head_completes_before_the_body_arrives() {
+        // Head present, body (content-length 100) not yet — parse_head is Complete while
+        // parse_bytes is still Incomplete (it waits for the whole body).
+        let buf = b"POST /up HTTP/1.1\r\ncontent-length: 100\r\n\r\n";
+        match parse_head(buf).unwrap() {
+            ParsedHead::Complete { request, head_end, content_length } => {
+                assert_eq!(content_length, 100);
+                assert_eq!(head_end, buf.len());
+                assert!(request.body.is_empty(), "the head-only request carries no body");
+            }
+            ParsedHead::Incomplete => panic!("the head is complete"),
+        }
+        assert!(matches!(parse_bytes(buf).unwrap(), Parsed::Incomplete));
     }
 
     #[test]
