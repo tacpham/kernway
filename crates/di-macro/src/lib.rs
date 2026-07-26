@@ -490,6 +490,17 @@ pub fn transactional(args: TokenStream, input: TokenStream) -> TokenStream {
 ///
 /// Rules: `not_blank`, `email` (no args, on `&str`/`String`); `length(min, max)`
 /// (on `&str`/`String`); `range(min, max)` (on a numeric field, by value).
+///
+/// **Custom message** — any built-in rule takes `message = "…"` to replace its
+/// default: `#[validate(email(message = "please enter a valid email"))]`,
+/// `#[validate(length(min = 3, message = "too short"))]`.
+///
+/// **Custom validator** — `custom = my_fn` calls `my_fn(&self.field) -> Result<(),
+/// String>` (its own message on failure): `#[validate(custom = validate_username)]`.
+///
+/// For anything the derive does not cover (cross-field checks, a bespoke error
+/// shape), hand-write `impl Validate` — the trait, `rules`, and `ValidationErrors`
+/// are all public, so the derive is never the only path.
 #[proc_macro_derive(Validate, attributes(validate))]
 pub fn derive_validate(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -517,36 +528,32 @@ pub fn derive_validate(input: TokenStream) -> TokenStream {
                 Err(e) => return e.to_compile_error().into(),
             };
             for meta in metas {
-                match meta {
-                    // `not_blank`, `email` — no-arg rules on the string field (by ref).
+                let check = match &meta {
+                    // A bare rule: `not_blank`, `email` — default message.
                     Meta::Path(path) => {
-                        let rule = path.segments.last().map(|s| &s.ident);
-                        checks.push(quote! {
-                            if let ::std::result::Result::Err(__m) =
-                                ::kernway_validation::rules::#rule(&self.#fname)
-                            {
-                                __errors.push(#fstr, __m);
-                            }
-                        });
+                        builtin_check(fname, &fstr, path.segments.last().map(|s| &s.ident), None, None, None)
                     }
-                    // `length(min, max)`, `range(min, max)` — bounded rules.
+                    // A rule with args: `length(min = .., max = .., message = "..")`,
+                    // `range(...)`, or a message-only override `email(message = "..")`.
                     Meta::List(list) => {
-                        let rule = list.path.segments.last().map(|s| s.ident.clone());
-                        let (min, max) = parse_min_max(&list);
-                        let min_tokens = min.map_or_else(|| quote! { None }, |e| quote! { Some(#e) });
-                        let max_tokens = max.map_or_else(|| quote! { None }, |e| quote! { Some(#e) });
-                        // range takes the numeric field by value; length by ref.
-                        let is_range = rule.as_ref().is_some_and(|r| r == "range");
-                        let arg = if is_range { quote! { self.#fname } } else { quote! { &self.#fname } };
-                        checks.push(quote! {
-                            if let ::std::result::Result::Err(__m) =
-                                ::kernway_validation::rules::#rule(#arg, #min_tokens, #max_tokens)
-                            {
+                        let (min, max, message) = parse_rule_args(list);
+                        builtin_check(fname, &fstr, list.path.segments.last().map(|s| &s.ident), min, max, message)
+                    }
+                    // A user validator: `custom = my_fn` — calls `my_fn(&self.field)`,
+                    // which returns `Result<(), String>` (its own message on failure).
+                    Meta::NameValue(nv) if nv.path.is_ident("custom") => {
+                        let func = &nv.value;
+                        Ok(quote! {
+                            if let ::std::result::Result::Err(__m) = #func(&self.#fname) {
                                 __errors.push(#fstr, __m);
                             }
-                        });
+                        })
                     }
-                    Meta::NameValue(_) => {}
+                    other => Err(syn::Error::new_spanned(other, "unexpected `#[validate(...)]` entry")),
+                };
+                match check {
+                    Ok(tokens) => checks.push(tokens),
+                    Err(e) => return e.to_compile_error().into(),
                 }
             }
         }
@@ -569,21 +576,67 @@ fn named_iter(named: &Punctuated<syn::Field, Comma>) -> impl Iterator<Item = &sy
     named.iter()
 }
 
-/// Pull `min`/`max` expressions out of a `length(min = .., max = ..)` /
-/// `range(...)` attribute list; either may be absent.
-fn parse_min_max(list: &MetaList) -> (Option<syn::Expr>, Option<syn::Expr>) {
-    let mut min = None;
-    let mut max = None;
+/// Pull `min`/`max`/`message` expressions out of a `length(...)` / `range(...)` /
+/// `email(message = "..")` attribute list; any may be absent.
+fn parse_rule_args(list: &MetaList) -> (Option<syn::Expr>, Option<syn::Expr>, Option<syn::Expr>) {
+    let (mut min, mut max, mut message) = (None, None, None);
     if let Ok(pairs) = list.parse_args_with(Punctuated::<syn::MetaNameValue, Comma>::parse_terminated) {
         for pair in pairs {
             if pair.path.is_ident("min") {
                 min = Some(pair.value);
             } else if pair.path.is_ident("max") {
                 max = Some(pair.value);
+            } else if pair.path.is_ident("message") {
+                message = Some(pair.value);
             }
         }
     }
-    (min, max)
+    (min, max, message)
+}
+
+/// `Some(#e)` or `None` tokens for an optional bound.
+fn opt_tokens(expr: Option<syn::Expr>) -> TokenStream2 {
+    expr.map_or_else(|| quote! { None }, |e| quote! { Some(#e) })
+}
+
+/// The check for one built-in rule (`not_blank`/`email`/`length`/`range`) on a
+/// field, with an optional `message` override replacing the rule's default.
+fn builtin_check(
+    fname: &syn::Ident,
+    fstr: &str,
+    rule: Option<&syn::Ident>,
+    min: Option<syn::Expr>,
+    max: Option<syn::Expr>,
+    message: Option<syn::Expr>,
+) -> Result<TokenStream2, syn::Error> {
+    let Some(rule) = rule else {
+        return Ok(quote! {});
+    };
+    let call = if rule == "not_blank" || rule == "email" {
+        quote! { ::kernway_validation::rules::#rule(&self.#fname) }
+    } else if rule == "length" {
+        let (min, max) = (opt_tokens(min), opt_tokens(max));
+        quote! { ::kernway_validation::rules::length(&self.#fname, #min, #max) }
+    } else if rule == "range" {
+        // range takes the numeric field by value.
+        let (min, max) = (opt_tokens(min), opt_tokens(max));
+        quote! { ::kernway_validation::rules::range(self.#fname, #min, #max) }
+    } else {
+        return Err(syn::Error::new_spanned(
+            rule,
+            format!("unknown validation rule `{rule}` — expected not_blank, email, length, range, or `custom = fn`"),
+        ));
+    };
+    // With a `message`, ignore the rule's default and push the override.
+    let push = match message {
+        Some(message) => quote! {
+            if #call.is_err() { __errors.push(#fstr, #message); }
+        },
+        None => quote! {
+            if let ::std::result::Result::Err(__m) = #call { __errors.push(#fstr, __m); }
+        },
+    };
+    Ok(push)
 }
 
 /// Bind a configuration section to a struct — Spring's `@ConfigurationProperties`

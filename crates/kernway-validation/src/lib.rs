@@ -26,6 +26,18 @@
 //!
 //! `#[derive(Validate)]` generates exactly that from `#[validate(not_blank,
 //! length(min = 3, max = 50))]` field attributes.
+//!
+//! ## Customisation
+//!
+//! - **Message** — any built-in rule takes `message = "…"`:
+//!   `#[validate(email(message = "please enter a valid email"))]`.
+//! - **Validator** — `custom = my_fn` runs `my_fn(&self.field) -> Result<(), String>`.
+//! - **Rules and error shape** — hand-write `impl Validate` (the trait, `rules`, and
+//!   [`ValidationErrors`] are public), so cross-field checks and bespoke messages are
+//!   always possible.
+//! - **Error response** — the `Validated<T>` extractor renders RFC 7807; for a
+//!   different response, call `value.validate()` yourself and turn the returned
+//!   [`ValidationErrors`] (its `errors()` are public) into whatever you want.
 
 #![forbid(unsafe_code)]
 
@@ -231,6 +243,36 @@ mod tests {
         // No #[validate] → not checked.
         #[allow(dead_code)]
         note: String,
+    }
+
+    /// A user-defined validator: signature `fn(&FieldType) -> Result<(), String>`.
+    fn is_even(value: &u8) -> Result<(), String> {
+        if value % 2 == 0 {
+            Ok(())
+        } else {
+            Err("must be even".to_string())
+        }
+    }
+
+    #[derive(DeriveValidate)]
+    struct Form {
+        #[validate(email(message = "Email không hợp lệ"))] // custom message
+        email: String,
+        #[validate(custom = is_even)] // custom validator function
+        ticket: u8,
+    }
+
+    #[test]
+    fn custom_message_and_custom_validator() {
+        let bad = Form { email: "nope".into(), ticket: 3 };
+        let errors = bad.validate().unwrap_err();
+        let pairs: Vec<(&str, &str)> =
+            errors.errors().iter().map(|e| (e.field.as_str(), e.message.as_str())).collect();
+        assert!(pairs.contains(&("email", "Email không hợp lệ")), "custom message used: {errors}");
+        assert!(pairs.contains(&("ticket", "must be even")), "custom validator ran: {errors}");
+
+        let ok = Form { email: "a@b.com".into(), ticket: 4 };
+        assert!(ok.validate().is_ok());
     }
 
     #[test]
