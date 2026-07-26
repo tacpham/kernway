@@ -83,11 +83,11 @@ fn decode_claims(bytes: &[u8]) -> Option<Claims> {
     Some(Claims { sid, user, roles, version, exp })
 }
 
-// --- base64url (no padding) ---
+// --- base64url (no padding) — shared with the password hasher and JWT ---
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-fn b64url_encode(data: &[u8]) -> String {
+pub(crate) fn b64url_encode(data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
@@ -106,7 +106,7 @@ fn b64url_encode(data: &[u8]) -> String {
     out
 }
 
-fn b64url_decode(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn b64url_decode(s: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(s.len() * 3 / 4);
     let mut acc = 0u32;
     let mut bits = 0u32;
