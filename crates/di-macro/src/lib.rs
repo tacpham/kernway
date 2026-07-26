@@ -13,8 +13,9 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
-    parse_macro_input, punctuated::Punctuated, token::Comma, Data, DataStruct, DeriveInput, Fields,
-    FieldsNamed, GenericArgument, ItemStruct, Meta, MetaList, PathArguments, Type,
+    parse_macro_input, punctuated::Punctuated, token::Comma, Attribute, Data, DataStruct,
+    DeriveInput, Expr, Fields, FieldsNamed, GenericArgument, ImplItem, ItemImpl, ItemStruct, Lit,
+    LitStr, Meta, MetaList, PathArguments, Type,
 };
 
 // ============================================================
@@ -421,13 +422,35 @@ pub fn inject(args: TokenStream, input: TokenStream) -> TokenStream {
     input
 }
 
-/// HTTP Controller bean.
+/// HTTP controller — Spring's `@Controller`.
+///
+/// On an **`impl` block**, `#[controller("/prefix")]` turns each `#[route(METHOD,
+/// "/path")]` method into a handler and implements [`Controller`], so
+/// `AppBuilder::controller(Arc::new(c))` mounts them all. A method is
+/// `async fn name(&self, req: Request) -> Response`; `#[require_role("ROLE")]` on it
+/// guards the route (403 when the request's `SecurityContext` lacks the role).
+///
+/// ```rust,ignore
+/// #[controller("/users")]
+/// impl UserController {
+///     #[route(GET, "/{id}")]                 fn get(&self, req: Request) -> Response { … }
+///     #[route(DELETE, "/{id}")] #[require_role("ADMIN")]
+///                                            fn delete(&self, req: Request) -> Response { … }
+/// }
+/// ```
+///
+/// On a **struct**, it keeps the v0.1 marker behaviour (`KernwayComponent` +
+/// `KernwayController`).
 #[proc_macro_attribute]
 pub fn controller(args: TokenStream, input: TokenStream) -> TokenStream {
+    // An `impl` block → generate route registration; a struct → the old markers.
+    if let Ok(item_impl) = syn::parse::<ItemImpl>(input.clone()) {
+        return controller_impl(&args.to_string(), item_impl);
+    }
     let input_struct = parse_macro_input!(input as ItemStruct);
-    let struct_name  = &input_struct.ident;
-    let path_prefix  = args.to_string();
-    let path_prefix  = path_prefix.trim().trim_matches('"');
+    let struct_name = &input_struct.ident;
+    let path_prefix = args.to_string();
+    let path_prefix = path_prefix.trim().trim_matches('"');
 
     let expanded = quote! {
         #input_struct
@@ -442,6 +465,107 @@ pub fn controller(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+/// Generate the `Controller` impl for a `#[controller("/prefix")] impl` block.
+fn controller_impl(args: &str, mut item_impl: ItemImpl) -> TokenStream {
+    let prefix = args.trim().trim_matches('"').to_string();
+    let self_ty = item_impl.self_ty.clone();
+
+    let mut registrations = Vec::new();
+    for item in &mut item_impl.items {
+        let ImplItem::Fn(method) = item else { continue };
+        let route = extract_route(&method.attrs);
+        let role = extract_role(&method.attrs);
+        // Strip the helper attributes so they do not re-expand on the output.
+        method.attrs.retain(|a| !a.path().is_ident("route") && !a.path().is_ident("require_role"));
+
+        let Some((http, path)) = route else { continue };
+        let name = method.sig.ident.clone();
+        match route_registration(&name, &http, &format!("{prefix}{path}"), role.as_deref()) {
+            Ok(tokens) => registrations.push(tokens),
+            Err(e) => return e.to_compile_error().into(),
+        }
+    }
+
+    let expanded = quote! {
+        #item_impl
+
+        impl ::kernway_server::Controller for #self_ty {
+            fn register(self: ::std::sync::Arc<Self>, app: ::kernway_server::AppBuilder) -> ::kernway_server::AppBuilder {
+                let mut __app = app;
+                #(#registrations)*
+                __app
+            }
+        }
+    };
+    expanded.into()
+}
+
+/// One route method → a `.get/.post/…(path, handler)` on the builder. The role
+/// guard is computed synchronously (it borrows the scope) before the `'static`
+/// handler future, which then owns only the request and the `Arc<Self>`.
+fn route_registration(
+    method: &syn::Ident,
+    http: &str,
+    full_path: &str,
+    role: Option<&str>,
+) -> Result<TokenStream2, syn::Error> {
+    let builder = match http.to_ascii_uppercase().as_str() {
+        "GET" => quote! { get },
+        "POST" => quote! { post },
+        "PUT" => quote! { put },
+        "DELETE" => quote! { delete },
+        "PATCH" => quote! { patch },
+        other => {
+            return Err(syn::Error::new(
+                method.span(),
+                format!("unknown HTTP method `{other}` in #[route] (expected GET/POST/PUT/DELETE/PATCH)"),
+            ));
+        }
+    };
+    let allowed = match role {
+        Some(role) => quote! { ::kernway_server::role_allowed(scope, #role) },
+        None => quote! { true },
+    };
+    Ok(quote! {
+        __app = {
+            let __this = ::std::sync::Arc::clone(&self);
+            __app.#builder(#full_path, move |req: ::kernway_server::Request, scope: &::kernway_server::RequestScope| {
+                // Guard runs now (borrows the scope); the future is `'static`.
+                let __allowed = #allowed;
+                let __this = ::std::sync::Arc::clone(&__this);
+                async move {
+                    if !__allowed {
+                        return ::kernway_server::forbidden();
+                    }
+                    __this.#method(req).await
+                }
+            })
+        };
+    })
+}
+
+/// Read `#[route(METHOD, "/path")]` → `(method, path)`.
+fn extract_route(attrs: &[Attribute]) -> Option<(String, String)> {
+    let attr = attrs.iter().find(|a| a.path().is_ident("route"))?;
+    let args = attr.parse_args_with(Punctuated::<Expr, Comma>::parse_terminated).ok()?;
+    let mut it = args.iter();
+    let method = match it.next()? {
+        Expr::Path(p) => p.path.segments.last()?.ident.to_string(),
+        _ => return None,
+    };
+    let path = match it.next()? {
+        Expr::Lit(syn::ExprLit { lit: Lit::Str(s), .. }) => s.value(),
+        _ => return None,
+    };
+    Some((method, path))
+}
+
+/// Read `#[require_role("ROLE")]` → the role name.
+fn extract_role(attrs: &[Attribute]) -> Option<String> {
+    let attr = attrs.iter().find(|a| a.path().is_ident("require_role"))?;
+    attr.parse_args::<LitStr>().ok().map(|lit| lit.value())
 }
 
 /// HTTP route handler.

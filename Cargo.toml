@@ -42,6 +42,7 @@ members = [
     "examples/hello-log",
     "examples/hello-config",
     "examples/hello-validate",
+    "examples/hello-controller",
 ]
 resolver = "2"
 
