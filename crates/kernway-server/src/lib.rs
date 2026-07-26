@@ -50,6 +50,8 @@ pub mod extract;
 pub mod tracking;
 /// CORS — cross-origin resource sharing middleware (Spring's `cors()`).
 pub mod cors;
+/// Rate limiting — a per-client token bucket returning `429`.
+pub mod rate_limit;
 /// Config-driven backend selection (memory / file / redis) for the security stores.
 pub mod backends;
 /// JWT bearer authentication middleware (`BearerAuth`, feature = `jwt`).
@@ -77,6 +79,7 @@ pub use app::{forbidden, role_allowed, unauthorized};
 pub use kernway_security::SecurityHeaders;
 pub use security::{Access, HttpSecurity, SecurityLayer};
 pub use cors::Cors;
+pub use rate_limit::RateLimit;
 // Typed argument extraction + the extractors, re-exported so `#[controller]` method
 // params (`id: Path<u64>`, `body: Validated<T>`) reference only `::kernway_server::`.
 pub use extract::Extract;

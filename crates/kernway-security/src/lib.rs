@@ -37,6 +37,10 @@ pub use tracking::{BanList, Bans, RequestMeta};
 pub mod password;
 pub use password::{hash_password, verify_password};
 
+/// Login throttling / account lockout — brute-force protection for the login flow.
+pub mod lockout;
+pub use lockout::LoginGuard;
+
 /// JSON Web Tokens (RFC 7519), HS256 — a stateless bearer token (feature = `jwt`).
 #[cfg(feature = "jwt")]
 pub mod jwt;
