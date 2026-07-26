@@ -48,6 +48,11 @@ pub struct Request {
     pub path_params: HashMap<String, String>,
     /// Raw request body. Left empty when the request carries none.
     pub body:        Vec<u8>,
+    /// The TCP peer address the request arrived on — the direct client, or a
+    /// reverse proxy when one sits in front. `None` on a hand-built request. The
+    /// *real* client IP behind a proxy is resolved from this plus the forwarded
+    /// headers against a trusted-proxy list (`kernway-security`'s `client_ip`).
+    pub remote_addr: Option<std::net::SocketAddr>,
 }
 
 impl Request {
@@ -61,6 +66,7 @@ impl Request {
             query:       QueryParams::new(),
             path_params: HashMap::new(),
             body:        Vec::new(),
+            remote_addr: None,
         }
     }
 

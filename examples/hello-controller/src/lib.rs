@@ -16,8 +16,8 @@ use std::sync::Arc;
 use di_macro::{controller, Validate};
 use kernway_security::SecurityContext;
 use kernway_server::{
-    BoxFuture, KernwayApp, Middleware, Next, Path, Request, RequestScope, Response, StatusCode,
-    Validated,
+    BanFilter, Bans, BoxFuture, KernwayApp, Middleware, Next, Path, Request, RequestScope, Response,
+    StatusCode, Validated, VisitorTracking,
 };
 
 /// Demo auth: turn an `X-Role` header into a `SecurityContext`. No header →
@@ -111,6 +111,18 @@ pub fn build_app(addr: &str) -> KernwayApp {
         .layer(HeaderAuth)
         .controller(Arc::new(UserController))
         .controller(Arc::new(ItemController))
+        .build()
+}
+
+/// Visitor tracking + a runtime ban list: every request gets a `kw_visitor` cookie
+/// (first visit), and `BanFilter` rejects a banned IP/UA before the handler. The
+/// caller keeps a `Bans` handle to `ban_ip`/`unban_ip` while the server runs.
+pub fn build_app_tracked(addr: &str, bans: Bans) -> KernwayApp {
+    KernwayApp::builder()
+        .bind(addr)
+        .layer(VisitorTracking::new()) // sets kw_visitor + RequestMeta
+        .layer(BanFilter::new(bans)) // rejects banned requests early
+        .get("/hello", |_req: Request, _scope: &RequestScope| async { json_ok(r#"{"ok":true}"#) })
         .build()
 }
 
