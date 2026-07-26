@@ -43,7 +43,7 @@ pub mod app;
 /// Synchronous middleware chain and the built-in layers.
 pub mod middleware;
 
-pub use app::{AppBuilder, KeepAliveConfig, KernwayApp};
+pub use app::{AppBuilder, Controller, KeepAliveConfig, KernwayApp};
 pub use middleware::{Middleware, Next};
 pub use router::Router;
 // The async handler/middleware future type (KEP-0006).
@@ -51,3 +51,11 @@ pub use kernway_core::layer::BoxFuture;
 // The per-request DI scope handlers receive (KEP-0005), re-exported so a handler
 // signature `|req, scope| …` needs only kernway-server in scope.
 pub use di_core::RequestScope;
+// Re-exported so `#[controller]`/`#[route]`-generated code references only
+// `::kernway_server::…` — a controller crate needs just this one dependency.
+pub use kernway_core::error::StatusCode;
+pub use kernway_core::request::Request;
+pub use kernway_core::response::Response;
+// The role check `#[require_role]` compiles to (reads the SecurityContext the auth
+// middleware put in the scope, KEP-0005) and the 403 it returns when denied.
+pub use app::{forbidden, role_allowed};

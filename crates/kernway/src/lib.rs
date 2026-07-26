@@ -44,8 +44,8 @@
 pub use kernway_core::prelude::*;
 pub use kernway_core::{error, error as http_error, request, response};
 
-// --- server: the builder, router, middleware, static files ---
-pub use kernway_server::{AppBuilder, BoxFuture, KernwayApp, Router};
+// --- server: the builder, router, middleware, static files, controllers ---
+pub use kernway_server::{AppBuilder, BoxFuture, Controller, KernwayApp, Router};
 
 // --- the per-request DI scope a handler receives (KEP-0005) ---
 pub use di_core::RequestScope;

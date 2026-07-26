@@ -438,6 +438,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hello-controller"
+version = "0.1.0"
+dependencies = [
+ "di-macro",
+ "kernway-security",
+ "kernway-server",
+]
+
+[[package]]
 name = "hello-di"
 version = "0.1.0"
 dependencies = [
@@ -747,6 +756,7 @@ dependencies = [
  "kernway-core",
  "kernway-http",
  "kernway-log",
+ "kernway-security",
  "kernway-static",
  "matchit",
  "rt-core",
