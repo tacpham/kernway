@@ -21,11 +21,13 @@
 
 mod tls;
 
+use std::collections::HashMap;
 use std::fmt;
+use std::io::ErrorKind;
 use std::net::ToSocketAddrs;
 use std::ops::Range;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 use rt_net::AsyncTcpStream;
 
@@ -35,6 +37,10 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default maximum number of redirects to follow before returning the 3xx response.
 pub const DEFAULT_MAX_REDIRECTS: usize = 10;
+/// Default number of idle keep-alive connections kept per origin.
+pub const DEFAULT_MAX_IDLE_PER_HOST: usize = 8;
+/// Drop a pooled connection idle longer than this (servers close idle keep-alives).
+const POOL_IDLE_TIMEOUT_MS: u64 = 20_000;
 
 /// A live connection — a plain socket, or a TLS session over one. Both expose the
 /// same `read`/`write_all`, so the HTTP layer is oblivious to which it holds.
@@ -57,6 +63,64 @@ impl Conn {
             Conn::Tls(s) => s.write_all(buf).await,
         }
     }
+}
+
+/// The pooling key: one bucket of idle connections per `(scheme, host, port)`.
+type Origin = (String, String, u16);
+
+fn origin_of(url: &Url) -> Origin {
+    (url.scheme.clone(), url.host.to_ascii_lowercase(), url.port)
+}
+
+/// A pooled connection plus when it went idle (for staleness eviction).
+struct Idle {
+    conn: Conn,
+    since_ms: u64,
+}
+
+/// A pool of idle keep-alive connections, keyed by origin, shared across cores. Like
+/// [`kernway_redis::Pool`], the `Mutex` is held only to pop/push a connection, never
+/// across a request's `.await`, so a slow request never blocks another core at the lock.
+struct ConnPool {
+    idle: Mutex<HashMap<Origin, Vec<Idle>>>,
+    max_per_origin: usize,
+}
+
+impl ConnPool {
+    fn new(max_per_origin: usize) -> Self {
+        Self { idle: Mutex::new(HashMap::new()), max_per_origin }
+    }
+
+    /// Take a fresh-enough idle connection for `origin`, discarding any that have sat
+    /// too long (a server would have closed them).
+    fn take(&self, origin: &Origin, now_ms: u64) -> Option<Conn> {
+        let mut map = self.idle.lock().unwrap();
+        let bucket = map.get_mut(origin)?;
+        while let Some(entry) = bucket.pop() {
+            if now_ms.saturating_sub(entry.since_ms) < POOL_IDLE_TIMEOUT_MS {
+                return Some(entry.conn);
+            }
+            // otherwise the connection is likely dead — drop it and try the next
+        }
+        None
+    }
+
+    /// Return a reusable connection to the pool (dropped if the bucket is full).
+    fn put(&self, origin: Origin, conn: Conn, now_ms: u64) {
+        if self.max_per_origin == 0 {
+            return;
+        }
+        let mut map = self.idle.lock().unwrap();
+        let bucket = map.entry(origin).or_default();
+        if bucket.len() < self.max_per_origin {
+            bucket.push(Idle { conn, since_ms: now_ms });
+        }
+    }
+}
+
+/// Unix milliseconds now (for pool idle timestamps).
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 /// An HTTP method. `as_str` is the wire token.
@@ -273,24 +337,39 @@ impl From<std::io::Error> for HttpError {
 #[derive(Clone)]
 pub struct HttpClient {
     tls: Arc<rustls::ClientConfig>,
+    pool: Arc<ConnPool>,
     connect_timeout: Option<Duration>,
     timeout: Option<Duration>,
     max_redirects: usize,
+    max_idle_per_host: usize,
 }
 
 impl HttpClient {
     /// A new client with the default TLS config (verifies against Mozilla's roots), the
     /// default timeouts ([`DEFAULT_CONNECT_TIMEOUT`], [`DEFAULT_TIMEOUT`]) — so a hung
-    /// server can never hang a request forever — and redirect following
-    /// ([`DEFAULT_MAX_REDIRECTS`]). Override them per client.
+    /// server can never hang a request forever — redirect following
+    /// ([`DEFAULT_MAX_REDIRECTS`]), and connection pooling
+    /// ([`DEFAULT_MAX_IDLE_PER_HOST`]). Override them per client. Clone to share the
+    /// same pool across cores.
     #[must_use]
     pub fn new() -> Self {
         Self {
             tls: tls::default_config(),
+            pool: Arc::new(ConnPool::new(DEFAULT_MAX_IDLE_PER_HOST)),
             connect_timeout: Some(DEFAULT_CONNECT_TIMEOUT),
             timeout: Some(DEFAULT_TIMEOUT),
             max_redirects: DEFAULT_MAX_REDIRECTS,
+            max_idle_per_host: DEFAULT_MAX_IDLE_PER_HOST,
         }
+    }
+
+    /// How many idle keep-alive connections to keep per origin (`0` disables pooling —
+    /// every request opens and closes its own connection). Set before first use.
+    #[must_use]
+    pub fn max_idle_per_host(mut self, max: usize) -> Self {
+        self.max_idle_per_host = max;
+        self.pool = Arc::new(ConnPool::new(max));
+        self
     }
 
     /// How many redirects to follow (`0` returns the 3xx response without following).
@@ -345,10 +424,7 @@ impl HttpClient {
     async fn send_inner(&self, mut req: Request) -> Result<Response, HttpError> {
         let mut redirects = 0;
         loop {
-            let addr = resolve(&req.url.host, req.url.port)?;
-            let mut conn = self.connect(addr, &req.url).await?;
-            conn.write_all(&encode_request(&req)).await?;
-            let response = read_response(&mut conn).await?;
+            let response = self.roundtrip(&req).await?;
 
             // Follow a redirect if we have budget and the response points somewhere.
             if redirects < self.max_redirects {
@@ -360,6 +436,44 @@ impl HttpClient {
             }
             return Ok(response);
         }
+    }
+
+    /// One request→response: reuse a pooled connection when possible, retry once on a
+    /// fresh connection if the pooled one turned out to be stale, and return the
+    /// connection to the pool when it can be kept alive.
+    async fn roundtrip(&self, req: &Request) -> Result<Response, HttpError> {
+        let origin = origin_of(&req.url);
+        let keep_alive = self.max_idle_per_host > 0;
+
+        // First, try a connection already in the pool.
+        if let Some(mut conn) = self.pool.take(&origin, now_ms()) {
+            match send_on(&mut conn, req, keep_alive).await {
+                Ok((response, keepable)) => {
+                    self.maybe_return(origin, conn, keepable, &response);
+                    return Ok(response);
+                }
+                // A stale pooled connection (server closed it) — fall through to a dial.
+                Err(e) if is_stale(&e) => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        // A fresh connection (first use for this origin, or the pooled one was stale).
+        let addr = resolve(&req.url.host, req.url.port)?;
+        let mut conn = self.connect(addr, &req.url).await?;
+        let (response, keepable) = send_on(&mut conn, req, keep_alive).await?;
+        self.maybe_return(origin, conn, keepable, &response);
+        Ok(response)
+    }
+
+    /// Return the connection to the pool if pooling is on and the exchange left it in a
+    /// reusable state (framed body, no `Connection: close`).
+    fn maybe_return(&self, origin: Origin, conn: Conn, keepable: bool, response: &Response) {
+        let close = response.header("connection").is_some_and(|c| c.eq_ignore_ascii_case("close"));
+        if self.max_idle_per_host > 0 && keepable && !close {
+            self.pool.put(origin, conn, now_ms());
+        }
+        // Otherwise `conn` is dropped here (closed).
     }
 
     /// Establish the connection (TCP + TLS handshake for https), bounded by the
@@ -402,9 +516,17 @@ fn resolve(host: &str, port: u16) -> Result<std::net::SocketAddr, HttpError> {
         .ok_or_else(|| HttpError::Dns(format!("no address for {host}:{port}")))
 }
 
-/// Read the whole response from a connection, following `Content-Length`, chunked, or
-/// read-to-close.
-async fn read_response(stream: &mut Conn) -> Result<Response, HttpError> {
+/// Write a request and read its full response. Returns the response and whether the
+/// connection is at a clean boundary for reuse (a framed body, not read-to-close).
+async fn send_on(conn: &mut Conn, req: &Request, keep_alive: bool) -> Result<(Response, bool), HttpError> {
+    conn.write_all(&encode_request(req, keep_alive)).await?;
+    read_response(conn).await
+}
+
+/// Read the whole response, following `Content-Length`, chunked, or read-to-close. The
+/// returned bool is whether the body was framed (so the connection can be kept alive);
+/// a read-to-close body consumes the connection.
+async fn read_response(stream: &mut Conn) -> Result<(Response, bool), HttpError> {
     let mut buf = Vec::with_capacity(4096);
 
     // Read until the header terminator (CRLFCRLF) is in `buf`.
@@ -422,7 +544,7 @@ async fn read_response(stream: &mut Conn) -> Result<Response, HttpError> {
     let head_block = buf;
     let (status, spans) = parse_head_spans(&head_block)?;
 
-    match body_plan(&head_block, &spans) {
+    let framed = match body_plan(&head_block, &spans) {
         BodyPlan::Length(n) => {
             while body.len() < n {
                 if !read_more_into(stream, &mut body).await? {
@@ -430,9 +552,9 @@ async fn read_response(stream: &mut Conn) -> Result<Response, HttpError> {
                 }
             }
             body.truncate(n);
+            true
         }
         BodyPlan::Chunked => {
-            // Read until the chunked stream can be fully decoded.
             loop {
                 if let Some(decoded) = decode_chunked(&body) {
                     body = decoded;
@@ -442,13 +564,28 @@ async fn read_response(stream: &mut Conn) -> Result<Response, HttpError> {
                     return Err(HttpError::Protocol("connection closed mid-chunk".into()));
                 }
             }
+            true
         }
         BodyPlan::UntilClose => {
             while read_more_into(stream, &mut body).await? {}
+            false // the connection was consumed to EOF — not reusable
         }
-    }
+    };
 
-    Ok(Response { status, body, head: head_block, spans })
+    Ok((Response { status, body, head: head_block, spans }, framed))
+}
+
+/// Whether an error means the connection was closed under us (so a retry on a fresh
+/// connection is worthwhile) — the classic stale-pooled-keep-alive case.
+fn is_stale(error: &HttpError) -> bool {
+    match error {
+        HttpError::Io(e) => matches!(
+            e.kind(),
+            ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted | ErrorKind::BrokenPipe | ErrorKind::UnexpectedEof
+        ),
+        HttpError::Protocol(m) => m.contains("closed before headers"),
+        _ => false,
+    }
 }
 
 /// Read one chunk from the connection into `buf`; `false` at EOF.
@@ -574,7 +711,8 @@ fn decode_chunked(bytes: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Serialise a request to the wire, adding Host/Content-Length/Connection/User-Agent.
-fn encode_request(req: &Request) -> Vec<u8> {
+/// `keep_alive` picks `Connection: keep-alive` (pooled) vs `close`.
+fn encode_request(req: &Request, keep_alive: bool) -> Vec<u8> {
     let mut out = format!("{} {} HTTP/1.1\r\n", req.method.as_str(), req.url.path_and_query);
 
     let has = |name: &str| req.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(name));
@@ -596,9 +734,8 @@ fn encode_request(req: &Request) -> Vec<u8> {
     if !req.body.is_empty() && !has("content-length") {
         out.push_str(&format!("Content-Length: {}\r\n", req.body.len()));
     }
-    // One request per connection for now — simplest, and fine for OAuth-style volumes.
     if !has("connection") {
-        out.push_str("Connection: close\r\n");
+        out.push_str(if keep_alive { "Connection: keep-alive\r\n" } else { "Connection: close\r\n" });
     }
     out.push_str("\r\n");
 
@@ -703,7 +840,7 @@ pub fn percent_encode(s: &str) -> String {
 /// Benchmark hook — encode a request to the wire (see `benches/client.rs`).
 #[doc(hidden)]
 pub fn bench_encode_request(req: &Request) -> Vec<u8> {
-    encode_request(req)
+    encode_request(req, true)
 }
 
 /// Benchmark hook — parse a response head, returning the header count.
@@ -753,7 +890,7 @@ mod tests {
     fn encodes_a_request_with_default_headers() {
         let req = Request::new(Method::Post, Url::parse("http://api.example.com/v1/things").unwrap())
             .body("application/json", b"{}".to_vec());
-        let wire = String::from_utf8(encode_request(&req)).unwrap();
+        let wire = String::from_utf8(encode_request(&req, false)).unwrap();
         assert!(wire.starts_with("POST /v1/things HTTP/1.1\r\n"));
         assert!(wire.contains("Host: api.example.com\r\n"));
         // Custom headers are emitted as stored (lowercased); wire header names are
@@ -762,6 +899,9 @@ mod tests {
         assert!(wire.contains("Content-Length: 2\r\n"));
         assert!(wire.contains("Connection: close\r\n"));
         assert!(wire.ends_with("\r\n\r\n{}"));
+        // With pooling on, the connection is kept alive instead.
+        let ka = String::from_utf8(encode_request(&req, true)).unwrap();
+        assert!(ka.contains("Connection: keep-alive\r\n"));
     }
 
     #[test]
@@ -871,15 +1011,14 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
-            // First connection: redirect to /final.
-            let (mut s1, _) = listener.accept().unwrap();
+            // One keep-alive connection serving both the redirect and the followed
+            // request (the client reuses the pooled connection for the redirect).
+            let (mut sock, _) = listener.accept().unwrap();
             let mut buf = [0u8; 512];
-            let _ = s1.read(&mut buf).unwrap();
-            s1.write_all(b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n").unwrap();
-            // Second connection: the followed request.
-            let (mut s2, _) = listener.accept().unwrap();
-            let n = s2.read(&mut buf).unwrap();
-            s2.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndone").unwrap();
+            let _ = sock.read(&mut buf).unwrap(); // /start
+            sock.write_all(b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n").unwrap();
+            let n = sock.read(&mut buf).unwrap(); // /final, same connection
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndone").unwrap();
             String::from_utf8_lossy(&buf[..n]).into_owned()
         });
 
@@ -892,6 +1031,40 @@ mod tests {
         assert_eq!(resp.text(), "done");
         let followed = server.join().unwrap();
         assert!(followed.starts_with("GET /final "), "followed to /final: {followed}");
+    }
+
+    #[test]
+    fn reuses_a_pooled_connection() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // The server accepts ONE connection and serves two requests on it. If the
+        // client failed to reuse the connection it would open a second one, which this
+        // server never accepts — so the second request completing proves reuse.
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 512];
+            for _ in 0..2 {
+                let _ = sock.read(&mut buf).unwrap();
+                sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").unwrap();
+            }
+        });
+
+        let client = HttpClient::new();
+        let url = format!("http://127.0.0.1:{port}/");
+        let (r1, r2) = rt_core::Executor::new()
+            .unwrap()
+            .block_on(async {
+                let a = client.get(&url).await; // opens a connection, pools it
+                let b = client.get(&url).await; // reuses the pooled connection
+                (a, b)
+            })
+            .unwrap();
+        assert_eq!(r1.unwrap().status, 200, "first request");
+        assert_eq!(r2.unwrap().status, 200, "second request reused the pooled connection");
+        server.join().unwrap();
     }
 
     #[test]
