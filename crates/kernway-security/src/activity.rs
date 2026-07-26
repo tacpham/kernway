@@ -75,6 +75,14 @@ impl InMemoryActivity {
     fn since(&self, now: u64) -> u64 {
         now.saturating_sub(self.window_secs)
     }
+
+    /// Every recorded visitor (stale ones included) — for a durable backend to
+    /// snapshot the whole map at a checkpoint.
+    #[cfg(feature = "persist")]
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<ActiveVisitor> {
+        self.visitors.read().unwrap().values().cloned().collect()
+    }
 }
 
 impl Activity for InMemoryActivity {
@@ -218,11 +226,11 @@ mod redis_impl {
     }
 }
 
-// A length-prefixed binary encoding for the Redis record (the same approach as the
+// A length-prefixed binary encoding for a persisted record (the same approach as the
 // session store), so kernway-security stays serde-free. Binary-safe: an arbitrary
-// User-Agent or path survives intact.
-#[cfg(feature = "redis")]
-fn encode_visitor(v: &ActiveVisitor) -> Vec<u8> {
+// User-Agent or path survives intact. Shared by the Redis and file-backed backends.
+#[cfg(any(feature = "redis", feature = "persist"))]
+pub(crate) fn encode_visitor(v: &ActiveVisitor) -> Vec<u8> {
     let mut out = Vec::new();
     put_str(&mut out, &v.id);
     out.push(u8::from(v.authenticated));
@@ -234,8 +242,8 @@ fn encode_visitor(v: &ActiveVisitor) -> Vec<u8> {
     out
 }
 
-#[cfg(feature = "redis")]
-fn decode_visitor(b: &[u8]) -> Option<ActiveVisitor> {
+#[cfg(any(feature = "redis", feature = "persist"))]
+pub(crate) fn decode_visitor(b: &[u8]) -> Option<ActiveVisitor> {
     let mut pos = 0;
     let id = take_str(b, &mut pos)?;
     let authenticated = *b.get(pos)? != 0;
@@ -249,19 +257,19 @@ fn decode_visitor(b: &[u8]) -> Option<ActiveVisitor> {
     Some(ActiveVisitor { id, authenticated, ip, user_agent, path, method, last_seen })
 }
 
-#[cfg(feature = "redis")]
+#[cfg(any(feature = "redis", feature = "persist"))]
 fn put_str(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(&(s.len() as u32).to_le_bytes());
     out.extend_from_slice(s.as_bytes());
 }
 
-#[cfg(feature = "redis")]
+#[cfg(any(feature = "redis", feature = "persist"))]
 fn put_opt(out: &mut Vec<u8>, s: Option<&str>) {
     out.push(u8::from(s.is_some()));
     put_str(out, s.unwrap_or(""));
 }
 
-#[cfg(feature = "redis")]
+#[cfg(any(feature = "redis", feature = "persist"))]
 fn take_opt(b: &[u8], pos: &mut usize) -> Option<Option<String>> {
     let present = *b.get(*pos)? != 0;
     *pos += 1;
@@ -269,7 +277,7 @@ fn take_opt(b: &[u8], pos: &mut usize) -> Option<Option<String>> {
     Some(present.then_some(s))
 }
 
-#[cfg(feature = "redis")]
+#[cfg(any(feature = "redis", feature = "persist"))]
 fn take_str(b: &[u8], pos: &mut usize) -> Option<String> {
     let len = take_u32(b, pos)? as usize;
     let end = pos.checked_add(len)?;
@@ -278,7 +286,7 @@ fn take_str(b: &[u8], pos: &mut usize) -> Option<String> {
     Some(s)
 }
 
-#[cfg(feature = "redis")]
+#[cfg(any(feature = "redis", feature = "persist"))]
 fn take_u32(b: &[u8], pos: &mut usize) -> Option<u32> {
     let end = pos.checked_add(4)?;
     let v = u32::from_le_bytes(b.get(*pos..end)?.try_into().ok()?);
@@ -286,7 +294,7 @@ fn take_u32(b: &[u8], pos: &mut usize) -> Option<u32> {
     Some(v)
 }
 
-#[cfg(feature = "redis")]
+#[cfg(any(feature = "redis", feature = "persist"))]
 fn take_u64(b: &[u8], pos: &mut usize) -> Option<u64> {
     let end = pos.checked_add(8)?;
     let v = u64::from_le_bytes(b.get(*pos..end)?.try_into().ok()?);

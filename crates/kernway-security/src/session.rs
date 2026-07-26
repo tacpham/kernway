@@ -125,6 +125,13 @@ impl MemorySessionStore {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Every live session as `(sid, record)` — for a durable backend to snapshot the
+    /// whole registry at a checkpoint.
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<(String, SessionRecord)> {
+        self.inner.read().unwrap().iter().map(|(sid, r)| (sid.clone(), r.clone())).collect()
+    }
 }
 
 // A read/write on an uncontended in-process `RwLock` resolves immediately; each

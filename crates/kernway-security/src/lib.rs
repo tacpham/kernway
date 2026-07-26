@@ -67,6 +67,16 @@ pub use redis_bans::{PersistentBans, RedisBanStore};
 pub mod file_bans;
 #[cfg(feature = "persist")]
 pub use file_bans::FileBackedBans;
+/// File-backed (local disk) [`SessionStore`](session::SessionStore) (feature = `persist`).
+#[cfg(feature = "persist")]
+pub mod file_sessions;
+#[cfg(feature = "persist")]
+pub use file_sessions::FileBackedSessionStore;
+/// File-backed (local disk) [`Activity`](activity::Activity) (features = `persist` + `presence`).
+#[cfg(all(feature = "persist", feature = "presence"))]
+pub mod file_activity;
+#[cfg(all(feature = "persist", feature = "presence"))]
+pub use file_activity::FileBackedActivity;
 
 // Used by the `csrf` module and the tests via `use super::*`; the lint can't see
 // through the glob re-export, so the import looks unused at the top level.
