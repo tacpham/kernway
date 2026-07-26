@@ -1228,6 +1228,19 @@ mod tests {
     }
 
     #[test]
+    fn role_allowed_reads_the_role_from_the_scope() {
+        // What #[require_role] compiles to. No context (no auth) → not allowed.
+        let app = AppContext::new();
+        let scope = RequestScope::new(&app);
+        assert!(!role_allowed(&scope, "ADMIN"), "no SecurityContext → denied");
+
+        // An authenticated context with the role → allowed; another role → denied.
+        scope.set(kernway_security::SecurityContext::authenticated("u", ["ADMIN"]));
+        assert!(role_allowed(&scope, "ADMIN"));
+        assert!(!role_allowed(&scope, "USER"));
+    }
+
+    #[test]
     fn on_panic_customises_the_panic_response() {
         let mut router = Router::new();
         router.add("GET", "/boom", sync_handler(|_req, _ctx| -> Response { panic!("kaboom") }));
