@@ -585,6 +585,7 @@ dependencies = [
  "kernway-log",
  "kernway-security",
  "kernway-server",
+ "kernway-validation",
  "kernway-web",
 ]
 
@@ -758,10 +759,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernway-validation"
+version = "0.1.0"
+dependencies = [
+ "di-macro",
+]
+
+[[package]]
 name = "kernway-web"
 version = "0.1.0"
 dependencies = [
  "kernway-core",
+ "kernway-validation",
  "serde",
  "serde_json",
  "thiserror",

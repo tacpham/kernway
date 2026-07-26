@@ -1,0 +1,24 @@
+[package]
+name        = "kernway-validation"
+description = "Kernway validation — request-input constraints (Validate trait, rules) rendered as RFC 7807"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+homepage.workspace   = true
+rust-version.workspace = true
+
+# No dependencies: validation is pure in-memory constraint checking on data already
+# deserialized — no I/O, no DB (KEP-0000 §1). The `#[derive(Validate)]` proc-macro
+# lives in di-macro; the `Validated<T>` extractor in kernway-web.
+[dependencies]
+
+[dev-dependencies]
+di-macro = { workspace = true } # exercises #[derive(Validate)]
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
