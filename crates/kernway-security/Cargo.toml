@@ -22,6 +22,10 @@ getrandom = "0.2"
 # in-memory store needs nothing, and this pulls in the async RESP client.
 kernway-redis = { workspace = true, optional = true }
 
+# File-backed durability (feature = "persist"): the snapshot + append-log engine,
+# for stores that stay in memory but survive a restart without a Redis server.
+kernway-persist = { workspace = true, optional = true }
+
 [features]
 # Presence / heartbeat — who is online now (KEP-0004 sibling). Off by default:
 # an app that does not need it compiles none of it.
@@ -29,6 +33,9 @@ presence = []
 # A distributed SessionStore backed by Redis, for multi-instance deployments.
 # With `presence`, also brings the Redis-backed presence tracker.
 redis = ["dep:kernway-redis"]
+# Local, durable-on-disk backends (bans / sessions / activity): fast in-memory
+# reads, but a restart keeps the data. Single-node (no sharing across instances).
+persist = ["dep:kernway-persist"]
 
 [dev-dependencies]
 criterion = { workspace = true }
