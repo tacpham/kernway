@@ -94,6 +94,8 @@ pub struct AppBuilder {
     config:       Option<Config>,
     /// Deferred typed-config bean registrations, run once the config is resolved.
     config_beans: Vec<Box<dyn FnOnce(&Config, &mut AppContext)>>,
+    /// Custom response for a caught handler panic (`on_panic`); default 500 if unset.
+    panic_handler: Option<Box<dyn Fn(&str) -> Response + Send + Sync>>,
 }
 
 impl AppBuilder {
@@ -114,6 +116,7 @@ impl AppBuilder {
             drain: rt_net::DEFAULT_DRAIN_TIMEOUT,
             config: None,
             config_beans: Vec::new(),
+            panic_handler: None,
         }
     }
 
@@ -137,6 +140,24 @@ impl AppBuilder {
         self.config_beans.push(Box::new(|config, context| {
             let _ = context.register_instance::<T>(Arc::new(T::from_config(config)));
         }));
+        self
+    }
+
+    /// Customise the response when a handler panics (default: a 500 RFC 7807). The
+    /// closure receives the panic message; return whatever response you want —
+    /// central, customisable error handling for the unexpected-failure case.
+    ///
+    /// ```rust,ignore
+    /// KernwayApp::builder().on_panic(|msg| {
+    ///     eprintln!("panic: {msg}");
+    ///     Response::new(StatusCode::INTERNAL_SERVER_ERROR).body(b"oops".to_vec())
+    /// })
+    /// ```
+    pub fn on_panic<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&str) -> Response + Send + Sync + 'static,
+    {
+        self.panic_handler = Some(Box::new(handler));
         self
     }
 
@@ -277,6 +298,10 @@ impl AppBuilder {
             register(&config, &mut self.context);
         }
         let _ = self.context.register_instance::<Config>(Arc::new(config));
+        // The custom panic response (if any), as a bean the dispatch resolves.
+        if let Some(handler) = self.panic_handler.take() {
+            let _ = self.context.register_instance::<PanicHandler>(Arc::new(PanicHandler(handler)));
+        }
 
         // Apply the precompression toggle here so it is independent of whether
         // `.precompressed()` was called before or after `.static_files()`.
@@ -1001,15 +1026,23 @@ async fn handle(
         let terminal = move |req: Request, scope: &RequestScope| run_handler(req, router, scope);
         Next { rest: middlewares, terminal: &terminal }.run(request, &scope).await
     });
-    CatchUnwind { inner }.await
+    // A custom panic response, if the app registered one (`on_panic`).
+    let on_panic = context.get::<PanicHandler>().ok();
+    CatchUnwind { inner, on_panic }.await
 }
+
+/// A caller-supplied response for a caught panic — set with
+/// [`AppBuilder::on_panic`], registered as a bean so the dispatch can find it.
+pub(crate) struct PanicHandler(pub(crate) Box<dyn Fn(&str) -> Response + Send + Sync>);
 
 /// Wraps the request future so a panic on any poll is caught and turned into a
 /// `500` — the async equivalent of the sync path's per-request `catch_unwind`
 /// (the KEP-0002/KEP-0006 follow-on). Universal: every request goes through it,
-/// independent of which middleware are installed.
+/// independent of which middleware are installed. A caller's `on_panic` handler
+/// customises the response; otherwise a default RFC 7807 `500`.
 struct CatchUnwind<'a> {
     inner: BoxFuture<'a, Response>,
+    on_panic: Option<Arc<PanicHandler>>,
 }
 
 impl Future for CatchUnwind<'_> {
@@ -1022,12 +1055,13 @@ impl Future for CatchUnwind<'_> {
         match catch_unwind(AssertUnwindSafe(|| this.inner.as_mut().poll(cx))) {
             Ok(poll) => poll,
             Err(payload) => {
-                kernway_log::error!(
-                    target: "kernway_server",
-                    "handler panicked: {}",
-                    panic_message(payload.as_ref())
-                );
-                Poll::Ready(panic_response())
+                let message = panic_message(payload.as_ref());
+                kernway_log::error!(target: "kernway_server", "handler panicked: {message}");
+                let response = match &this.on_panic {
+                    Some(handler) => (handler.0)(&message),
+                    None => panic_response(),
+                };
+                Poll::Ready(response)
             }
         }
     }
@@ -1147,6 +1181,26 @@ mod tests {
         }));
         let response = block_on(handle(get("/boom"), &router, &AppContext::new(), &[]));
         assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn on_panic_customises_the_panic_response() {
+        let mut router = Router::new();
+        router.add("GET", "/boom", sync_handler(|_req, _ctx| -> Response { panic!("kaboom") }));
+        // Register a custom panic handler the way `build()` does from `on_panic`.
+        let mut context = AppContext::new();
+        context
+            .register_instance::<PanicHandler>(Arc::new(PanicHandler(Box::new(|message: &str| {
+                Response::new(StatusCode::SERVICE_UNAVAILABLE).body(format!("caught: {message}").into_bytes())
+            }))))
+            .unwrap();
+
+        let response = block_on(handle(get("/boom"), &router, &context, &[]));
+        assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE, "custom status used");
+        assert!(
+            String::from_utf8_lossy(response.body_bytes()).contains("caught: kaboom"),
+            "custom body carries the panic message"
+        );
     }
 
     #[test]
