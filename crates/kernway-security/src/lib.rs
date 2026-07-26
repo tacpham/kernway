@@ -33,6 +33,10 @@ pub mod session;
 pub mod tracking;
 pub use tracking::{BanList, Bans, RequestMeta};
 
+/// Password hashing — PBKDF2-HMAC-SHA256, salted and slow (RFC 8018).
+pub mod password;
+pub use password::{hash_password, verify_password};
+
 /// Presence / heartbeat — who is online now, distinct from who has a session
 /// (feature = `presence`).
 #[cfg(feature = "presence")]
