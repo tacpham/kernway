@@ -1,9 +1,9 @@
-use crate::{entity::Entity, error::OrmError, page::Page};
+use crate::{entity::Entity, error::OrmError, page::Page, BoxFuture};
 
 /// Fluent, chainable query builder.
 /// Equivalent to CriteriaBuilder + TypedQuery in JPA.
 ///
-/// Sync — terminal methods return Result directly.
+/// Chaining methods stay synchronous; terminal methods return boxed futures.
 pub trait QueryBuilder<T: Entity>: Send {
     // --- Filters ---
     // Every filter narrows the result; they combine with AND. There is no OR —
@@ -18,7 +18,8 @@ pub trait QueryBuilder<T: Entity>: Send {
     /// `field < value`.
     fn filter_lt(self: Box<Self>, field: &'static str, value: &str) -> Box<dyn QueryBuilder<T>>;
     /// `field LIKE pattern` — `%` and `_` carry their usual SQL meaning.
-    fn filter_like(self: Box<Self>, field: &'static str, pattern: &str) -> Box<dyn QueryBuilder<T>>;
+    fn filter_like(self: Box<Self>, field: &'static str, pattern: &str)
+        -> Box<dyn QueryBuilder<T>>;
 
     // --- Ordering ---
 
@@ -47,14 +48,18 @@ pub trait QueryBuilder<T: Entity>: Send {
     // --- Terminal operations ---
 
     /// Execute and return all matching records.
-    fn fetch_all(self: Box<Self>) -> Result<Vec<T>, OrmError>;
+    fn fetch_all(self: Box<Self>) -> BoxFuture<'static, Result<Vec<T>, OrmError>>;
 
     /// Execute and return the first matching record.
-    fn fetch_one(self: Box<Self>) -> Result<Option<T>, OrmError>;
+    fn fetch_one(self: Box<Self>) -> BoxFuture<'static, Result<Option<T>, OrmError>>;
 
     /// Count matching records.
-    fn fetch_count(self: Box<Self>) -> Result<u64, OrmError>;
+    fn fetch_count(self: Box<Self>) -> BoxFuture<'static, Result<u64, OrmError>>;
 
     /// Paginated result. `page` is 0-indexed.
-    fn fetch_page(self: Box<Self>, page: u64, size: u64) -> Result<Page<T>, OrmError>;
+    fn fetch_page(
+        self: Box<Self>,
+        page: u64,
+        size: u64,
+    ) -> BoxFuture<'static, Result<Page<T>, OrmError>>;
 }

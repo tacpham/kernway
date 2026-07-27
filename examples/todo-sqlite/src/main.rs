@@ -6,7 +6,12 @@ use kernway_orm_sqlite::SqliteRepository;
 use kernway_server::{middleware::LoggingMiddleware, KernwayApp};
 use kernway_web::{Json, Path, ProblemDetail};
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::sync::Arc;
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    rt_core::Executor::new().unwrap().block_on(future).unwrap()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[entity(table = "todos")]
@@ -27,20 +32,20 @@ impl TodoRepository {
     }
 
     pub fn find_all(&self) -> Vec<Todo> {
-        self.inner.find_all().unwrap_or_default()
+        block_on(self.inner.find_all()).unwrap_or_default()
     }
 
     pub fn find_by_id(&self, id: u64) -> Option<Todo> {
-        self.inner.find_by_id(&id).unwrap_or(None)
+        block_on(self.inner.find_by_id(&id)).unwrap_or(None)
     }
 
     pub fn save(&self, todo: Todo) -> Todo {
-        self.inner.save(todo).unwrap()
+        block_on(self.inner.save(todo)).unwrap()
     }
 
     pub fn delete_by_id(&self, id: u64) -> bool {
-        if self.inner.exists_by_id(&id).unwrap_or(false) {
-            self.inner.delete_by_id(&id).unwrap();
+        if block_on(self.inner.exists_by_id(&id)).unwrap_or(false) {
+            block_on(self.inner.delete_by_id(&id)).unwrap();
             true
         } else {
             false
@@ -48,7 +53,7 @@ impl TodoRepository {
     }
 
     pub fn count(&self) -> u64 {
-        self.inner.count().unwrap_or(0)
+        block_on(self.inner.count()).unwrap_or(0)
     }
 }
 
@@ -102,12 +107,15 @@ fn main() {
     // let repo: Arc<dyn Repository<Todo>> = Arc::new(InMemoryRepository::new());
     //
     // --- AFTER (SqliteRepository) — zero service changes ---
-    let repo: Arc<dyn Repository<Todo>> = Arc::new(SqliteRepository::<Todo>::open(&db_path).unwrap());
+    let repo: Arc<dyn Repository<Todo>> =
+        Arc::new(SqliteRepository::<Todo>::open(&db_path).unwrap());
 
     let mut ctx = AppContext::new();
     let todo_repo = Arc::new(TodoRepository::new(repo));
-    ctx.register_instance::<TodoRepository>(Arc::clone(&todo_repo)).unwrap();
-    ctx.register_instance::<TodoService>(Arc::new(TodoService::new(todo_repo))).unwrap();
+    ctx.register_instance::<TodoRepository>(Arc::clone(&todo_repo))
+        .unwrap();
+    ctx.register_instance::<TodoService>(Arc::new(TodoService::new(todo_repo)))
+        .unwrap();
 
     println!("🗃️  SQLite file: {}", db_path);
 

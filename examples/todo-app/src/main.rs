@@ -30,11 +30,18 @@ use kernway_server::{
 use kernway_sse::{SseEvent, SseStream};
 use kernway_web::{Json, Path, ProblemDetail};
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+fn block_on<F: Future>(future: F) -> F::Output {
+    rt_core::Executor::new().unwrap().block_on(future).unwrap()
+}
+
 fn now_str() -> String {
-    let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     format!("{}", t.as_secs())
 }
 
@@ -69,29 +76,33 @@ pub struct TodoRepository {
 }
 
 impl Default for TodoRepository {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TodoRepository {
     pub fn new() -> Self {
-        Self { inner: Arc::new(InMemoryRepository::new()) }
+        Self {
+            inner: Arc::new(InMemoryRepository::new()),
+        }
     }
 
     pub fn find_all(&self) -> Vec<Todo> {
-        self.inner.find_all().unwrap_or_default()
+        block_on(self.inner.find_all()).unwrap_or_default()
     }
 
     pub fn find_by_id(&self, id: u64) -> Option<Todo> {
-        self.inner.find_by_id(&id).unwrap_or(None)
+        block_on(self.inner.find_by_id(&id)).unwrap_or(None)
     }
 
     pub fn save(&self, todo: Todo) -> Todo {
-        self.inner.save(todo).unwrap()
+        block_on(self.inner.save(todo)).unwrap()
     }
 
     pub fn delete_by_id(&self, id: u64) -> bool {
-        if self.inner.exists_by_id(&id).unwrap_or(false) {
-            self.inner.delete_by_id(&id).unwrap();
+        if block_on(self.inner.exists_by_id(&id)).unwrap_or(false) {
+            block_on(self.inner.delete_by_id(&id)).unwrap();
             true
         } else {
             false
@@ -99,7 +110,7 @@ impl TodoRepository {
     }
 
     pub fn count(&self) -> u64 {
-        self.inner.count().unwrap_or(0)
+        block_on(self.inner.count()).unwrap_or(0)
     }
 }
 
@@ -108,12 +119,16 @@ pub struct EventBus {
 }
 
 impl Default for EventBus {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EventBus {
     pub fn new() -> Self {
-        Self { events: Mutex::new(Vec::new()) }
+        Self {
+            events: Mutex::new(Vec::new()),
+        }
     }
 
     pub fn publish(&self, event: impl Into<String>) {
@@ -221,13 +236,15 @@ fn main() {
     let mut ctx = AppContext::new();
 
     let repo = Arc::new(TodoRepository::new());
-    ctx.register_instance::<TodoRepository>(Arc::clone(&repo)).unwrap();
+    ctx.register_instance::<TodoRepository>(Arc::clone(&repo))
+        .unwrap();
 
     let bus = Arc::new(EventBus::new());
     ctx.register_instance::<EventBus>(Arc::clone(&bus)).unwrap();
 
     let service = TodoService::new_with_deps(repo, Arc::clone(&bus));
-    ctx.register_instance::<TodoService>(Arc::new(service)).unwrap();
+    ctx.register_instance::<TodoService>(Arc::new(service))
+        .unwrap();
 
     {
         let svc = ctx.get::<TodoService>().unwrap();
@@ -255,23 +272,28 @@ fn main() {
         .description("Full-featured Todo API — Kernway v1.0 flagship example");
 
     openapi.add_route(
-        RouteDoc::new("Health check")
-            .tag("system")
-            .response_json(200, "Server health + stats", "#/components/schemas/Health"),
-        "GET", "/health",
+        RouteDoc::new("Health check").tag("system").response_json(
+            200,
+            "Server health + stats",
+            "#/components/schemas/Health",
+        ),
+        "GET",
+        "/health",
     );
     openapi.add_route(
         RouteDoc::new("OpenAPI specification")
             .tag("system")
             .response(200, "OpenAPI 3.0 JSON"),
-        "GET", "/openapi.json",
+        "GET",
+        "/openapi.json",
     );
     openapi.add_route(
         RouteDoc::new("List todos")
             .tag("todos")
             .query_param("done", "Filter by completion status", "boolean", false)
             .response_json(200, "Todo list", "#/components/schemas/Todo"),
-        "GET", "/todos",
+        "GET",
+        "/todos",
     );
     openapi.add_route(
         RouteDoc::new("Get todo by ID")
@@ -279,14 +301,16 @@ fn main() {
             .path_param("id", "Todo ID", "integer")
             .response_json(200, "Todo found", "#/components/schemas/Todo")
             .response(404, "Not found"),
-        "GET", "/todos/{id}",
+        "GET",
+        "/todos/{id}",
     );
     openapi.add_route(
         RouteDoc::new("Create todo")
             .tag("todos")
             .body_json("Todo to create", "#/components/schemas/CreateTodo")
             .response_json(201, "Created", "#/components/schemas/Todo"),
-        "POST", "/todos",
+        "POST",
+        "/todos",
     );
     openapi.add_route(
         RouteDoc::new("Update todo")
@@ -295,7 +319,8 @@ fn main() {
             .body_json("Fields to update", "#/components/schemas/UpdateTodo")
             .response_json(200, "Updated", "#/components/schemas/Todo")
             .response(404, "Not found"),
-        "PUT", "/todos/{id}",
+        "PUT",
+        "/todos/{id}",
     );
     openapi.add_route(
         RouteDoc::new("Complete todo")
@@ -303,7 +328,8 @@ fn main() {
             .path_param("id", "Todo ID", "integer")
             .response_json(200, "Marked complete", "#/components/schemas/Todo")
             .response(404, "Not found"),
-        "PATCH", "/todos/{id}/complete",
+        "PATCH",
+        "/todos/{id}/complete",
     );
     openapi.add_route(
         RouteDoc::new("Delete todo")
@@ -311,13 +337,15 @@ fn main() {
             .path_param("id", "Todo ID", "integer")
             .response(204, "Deleted")
             .response(404, "Not found"),
-        "DELETE", "/todos/{id}",
+        "DELETE",
+        "/todos/{id}",
     );
     openapi.add_route(
         RouteDoc::new("Change event stream (SSE)")
             .tag("events")
             .response(200, "SSE: todo.created|updated|completed|deleted events"),
-        "GET", "/events",
+        "GET",
+        "/events",
     );
 
     let openapi_json = Arc::new(openapi.to_json());
@@ -387,7 +415,9 @@ fn main() {
             async move {
                 let body: CreateTodo = match serde_json::from_slice(&req.body) {
                     Ok(body) => body,
-                    Err(err) => return ProblemDetail::bad_request(format!("invalid body: {}", err)),
+                    Err(err) => {
+                        return ProblemDetail::bad_request(format!("invalid body: {}", err))
+                    }
                 };
                 let todo = svc.create(body);
                 let mut resp = Json(todo).into_response();
@@ -404,7 +434,9 @@ fn main() {
                 };
                 let body: UpdateTodo = match serde_json::from_slice(&req.body) {
                     Ok(body) => body,
-                    Err(err) => return ProblemDetail::bad_request(format!("invalid body: {}", err)),
+                    Err(err) => {
+                        return ProblemDetail::bad_request(format!("invalid body: {}", err))
+                    }
                 };
                 match svc.update(id, body) {
                     Some(todo) => Json(todo).into_response(),
@@ -412,19 +444,22 @@ fn main() {
                 }
             }
         })
-        .patch("/todos/{id}/complete", |req: Request, ctx: &RequestScope| {
-            let svc = ctx.get::<TodoService>().unwrap();
-            async move {
-                let id = match Path::<u64>::from_request(&req, "id") {
-                    Ok(path) => *path,
-                    Err(err) => return ProblemDetail::bad_request(err),
-                };
-                match svc.complete(id) {
-                    Some(todo) => Json(todo).into_response(),
-                    None => ProblemDetail::not_found(format!("todo {} not found", id)),
+        .patch(
+            "/todos/{id}/complete",
+            |req: Request, ctx: &RequestScope| {
+                let svc = ctx.get::<TodoService>().unwrap();
+                async move {
+                    let id = match Path::<u64>::from_request(&req, "id") {
+                        Ok(path) => *path,
+                        Err(err) => return ProblemDetail::bad_request(err),
+                    };
+                    match svc.complete(id) {
+                        Some(todo) => Json(todo).into_response(),
+                        None => ProblemDetail::not_found(format!("todo {} not found", id)),
+                    }
                 }
-            }
-        })
+            },
+        )
         .delete("/todos/{id}", |req: Request, ctx: &RequestScope| {
             let svc = ctx.get::<TodoService>().unwrap();
             async move {
@@ -448,7 +483,8 @@ fn main() {
                     r#"{"service":"todo-api","version":"1.0.0"}"#,
                 )];
                 let sse_events = events.iter().enumerate().map(|(i, event)| {
-                    let (event_type, data) = event.split_once(':').unwrap_or(("event", event.as_str()));
+                    let (event_type, data) =
+                        event.split_once(':').unwrap_or(("event", event.as_str()));
                     SseEvent::with_id((i + 1).to_string(), event_type, data)
                 });
                 all.extend(sse_events);

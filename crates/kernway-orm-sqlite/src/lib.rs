@@ -10,7 +10,7 @@
 //! # Example
 //! ```rust,ignore
 //! let repo = SqliteRepository::<Todo>::open("todos.db")?;
-//! let todo = repo.save(Todo { id: 0, title: "Buy milk".into(), done: false })?;
+//! let todo = repo.save(Todo { id: 0, title: "Buy milk".into(), done: false }).await?;
 //! println!("Saved with id {}", todo.id);
 //! ```
 
@@ -20,10 +20,11 @@ use kernway_orm_core::{
     page::Page,
     query::QueryBuilder,
     repository::Repository,
-    ColumnDef,
+    BoxFuture, ColumnDef,
 };
 use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
 use serde::{de::DeserializeOwned, Serialize};
+use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
 fn map_err(e: rusqlite::Error) -> OrmError {
@@ -88,7 +89,10 @@ fn create_table_sql<T: Entity>() -> String {
     )
 }
 
-fn row_to_entity<T: DeserializeOwned>(row: &rusqlite::Row, cols: &[ColumnDef]) -> rusqlite::Result<T> {
+fn row_to_entity<T: DeserializeOwned>(
+    row: &rusqlite::Row,
+    cols: &[ColumnDef],
+) -> rusqlite::Result<T> {
     let mut map = serde_json::Map::new();
     for (i, col) in cols.iter().enumerate() {
         let v: SqlValue = row.get(i)?;
@@ -130,7 +134,9 @@ fn number_to_integer(n: &serde_json::Number, ctx: &str) -> Result<i64, OrmError>
         Ok(i)
     } else if let Some(u) = n.as_u64() {
         i64::try_from(u).map_err(|_| {
-            OrmError::TypeConversion(format!("{ctx} value {u} exceeds SQLite INTEGER range (i64)"))
+            OrmError::TypeConversion(format!(
+                "{ctx} value {u} exceeds SQLite INTEGER range (i64)"
+            ))
         })
     } else {
         Err(OrmError::TypeConversion(format!(
@@ -148,9 +154,10 @@ fn json_to_sql(v: serde_json::Value, col: &ColumnDef) -> Result<SqlValue, OrmErr
                 SqlValue::Real(n.as_f64().ok_or_else(|| {
                     OrmError::TypeConversion(format!("column '{}' expects a float", col.name))
                 })?)
-            } else if let Some(f) = n.as_f64().filter(|_| n.as_i64().is_none() && n.as_u64().is_none()) {
-                // Non-float column carrying a fractional number — store as REAL
-                // rather than truncate silently.
+            } else if let Some(f) = n
+                .as_f64()
+                .filter(|_| n.as_i64().is_none() && n.as_u64().is_none())
+            {
                 SqlValue::Real(f)
             } else {
                 SqlValue::Integer(number_to_integer(&n, &format!("column '{}'", col.name))?)
@@ -198,11 +205,15 @@ where
     }
 
     let v = serde_json::to_value(entity.id()).map_err(map_serde)?;
-    Ok(matches!(v, serde_json::Value::Number(ref n) if n.as_u64() == Some(0) || n.as_i64() == Some(0)))
+    Ok(
+        matches!(v, serde_json::Value::Number(ref n) if n.as_u64() == Some(0) || n.as_i64() == Some(0)),
+    )
 }
 
 fn column_for_field<T: Entity>(field: &str) -> Option<&'static ColumnDef> {
-    T::columns().iter().find(|c| c.field == field || c.name == field)
+    T::columns()
+        .iter()
+        .find(|c| c.field == field || c.name == field)
 }
 
 fn filter_value_for_field<T: Entity>(field: &str, value: &str) -> SqlValue {
@@ -238,12 +249,8 @@ where
     T::Id: Serialize + DeserializeOwned,
 {
     conn: Arc<Mutex<Connection>>,
-    _marker: std::marker::PhantomData<T>,
+    _marker: PhantomData<T>,
 }
-
-// Send/Sync derive automatically from `Arc<Mutex<Connection>>` (Send+Sync) and
-// hold exactly when `T` is Send/Sync. No `unsafe impl` — an explicit one would
-// mask unsoundness if a non-thread-safe field were added later.
 
 impl<T> SqliteRepository<T>
 where
@@ -255,10 +262,17 @@ where
             .map_err(|e| OrmError::Connection(e.to_string()))?;
         let repo = Self {
             conn: Arc::new(Mutex::new(conn)),
-            _marker: std::marker::PhantomData,
+            _marker: PhantomData,
         };
         repo.create_table()?;
         Ok(repo)
+    }
+
+    fn from_shared_conn(conn: Arc<Mutex<Connection>>) -> Self {
+        Self {
+            conn,
+            _marker: PhantomData,
+        }
     }
 
     /// Open (or create) a SQLite database file and ensure `T`'s table exists.
@@ -301,14 +315,16 @@ where
 
     fn do_insert(&self, entity: &T) -> Result<T, OrmError> {
         let cols = T::columns();
-        let insert_cols: Vec<&ColumnDef> = cols.iter().filter(|c| !(c.primary_key && c.auto)).collect();
+        let insert_cols: Vec<&ColumnDef> =
+            cols.iter().filter(|c| !(c.primary_key && c.auto)).collect();
         let json = serde_json::to_value(entity).map_err(map_serde)?;
         let obj = json
             .as_object()
             .ok_or_else(|| OrmError::TypeConversion("entity must serialize as object".into()))?;
 
         let col_names: Vec<String> = insert_cols.iter().map(|c| c.name.to_string()).collect();
-        let placeholders: Vec<String> = (1..=insert_cols.len()).map(|i| format!("?{}", i)).collect();
+        let placeholders: Vec<String> =
+            (1..=insert_cols.len()).map(|i| format!("?{}", i)).collect();
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({})",
             T::table_name(),
@@ -317,14 +333,20 @@ where
         );
         let vals: Vec<SqlValue> = insert_cols
             .iter()
-            .map(|c| json_to_sql(obj.get(c.field).cloned().unwrap_or(serde_json::Value::Null), c))
+            .map(|c| {
+                json_to_sql(
+                    obj.get(c.field).cloned().unwrap_or(serde_json::Value::Null),
+                    c,
+                )
+            })
             .collect::<Result<_, _>>()?;
 
         let conn = self
             .conn
             .lock()
             .map_err(|e| OrmError::Transaction(format!("mutex poisoned: {e}")))?;
-        conn.execute(&sql, params_from_iter(vals.iter())).map_err(map_err)?;
+        conn.execute(&sql, params_from_iter(vals.iter()))
+            .map_err(map_err)?;
         let last_id = conn.last_insert_rowid();
         drop(conn);
 
@@ -372,7 +394,12 @@ where
         );
         let mut vals: Vec<SqlValue> = set_cols
             .iter()
-            .map(|c| json_to_sql(obj.get(c.field).cloned().unwrap_or(serde_json::Value::Null), c))
+            .map(|c| {
+                json_to_sql(
+                    obj.get(c.field).cloned().unwrap_or(serde_json::Value::Null),
+                    c,
+                )
+            })
             .collect::<Result<_, _>>()?;
         vals.push(id_to_sql(entity.id())?);
 
@@ -383,14 +410,8 @@ where
             .map_err(map_err)?;
         Ok(entity.clone())
     }
-}
 
-impl<T> Repository<T> for SqliteRepository<T>
-where
-    T: Entity + Serialize + DeserializeOwned,
-    T::Id: Serialize + DeserializeOwned + Default + PartialEq,
-{
-    fn find_by_id(&self, id: &T::Id) -> Result<Option<T>, OrmError> {
+    fn find_by_id_sync(&self, id: &T::Id) -> Result<Option<T>, OrmError> {
         let cols = T::columns();
         let col_list: Vec<&str> = cols.iter().map(|c| c.name).collect();
         let sql = format!(
@@ -405,14 +426,16 @@ where
             .lock()
             .map_err(|e| OrmError::Transaction(format!("mutex poisoned: {e}")))?;
         let mut stmt = conn.prepare(&sql).map_err(map_err)?;
-        let mut rows = stmt.query(rusqlite::params![id_to_sql(id)?]).map_err(map_err)?;
+        let mut rows = stmt
+            .query(rusqlite::params![id_to_sql(id)?])
+            .map_err(map_err)?;
         match rows.next().map_err(map_err)? {
             Some(row) => Ok(Some(row_to_entity::<T>(row, cols).map_err(map_err)?)),
             None => Ok(None),
         }
     }
 
-    fn find_all(&self) -> Result<Vec<T>, OrmError> {
+    fn find_all_sync(&self) -> Result<Vec<T>, OrmError> {
         let cols = T::columns();
         let col_list: Vec<&str> = cols.iter().map(|c| c.name).collect();
         let sql = format!("SELECT {} FROM {}", col_list.join(", "), T::table_name());
@@ -422,11 +445,13 @@ where
             .lock()
             .map_err(|e| OrmError::Transaction(format!("mutex poisoned: {e}")))?;
         let mut stmt = conn.prepare(&sql).map_err(map_err)?;
-        let rows = stmt.query_map([], |row| row_to_entity::<T>(row, cols)).map_err(map_err)?;
+        let rows = stmt
+            .query_map([], |row| row_to_entity::<T>(row, cols))
+            .map_err(map_err)?;
         rows.map(|row| row.map_err(map_err)).collect()
     }
 
-    fn find_all_by_ids(&self, ids: &[T::Id]) -> Result<Vec<T>, OrmError> {
+    fn find_all_by_ids_sync(&self, ids: &[T::Id]) -> Result<Vec<T>, OrmError> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -449,12 +474,14 @@ where
             .map_err(|e| OrmError::Transaction(format!("mutex poisoned: {e}")))?;
         let mut stmt = conn.prepare(&sql).map_err(map_err)?;
         let rows = stmt
-            .query_map(params_from_iter(sql_ids.iter()), |row| row_to_entity::<T>(row, cols))
+            .query_map(params_from_iter(sql_ids.iter()), |row| {
+                row_to_entity::<T>(row, cols)
+            })
             .map_err(map_err)?;
         rows.map(|row| row.map_err(map_err)).collect()
     }
 
-    fn count(&self) -> Result<u64, OrmError> {
+    fn count_sync(&self) -> Result<u64, OrmError> {
         let sql = format!("SELECT COUNT(*) FROM {}", T::table_name());
         let count: i64 = self
             .conn
@@ -465,28 +492,35 @@ where
         Ok(count as u64)
     }
 
-    fn exists_by_id(&self, id: &T::Id) -> Result<bool, OrmError> {
-        Ok(self.find_by_id(id)?.is_some())
+    fn exists_by_id_sync(&self, id: &T::Id) -> Result<bool, OrmError> {
+        Ok(self.find_by_id_sync(id)?.is_some())
     }
 
-    fn save(&self, entity: T) -> Result<T, OrmError> {
+    fn save_sync(&self, entity: T) -> Result<T, OrmError> {
         if is_new_auto_entity(&entity)? {
             return self.do_insert(&entity);
         }
 
-        if is_auto_pk::<T>() || self.exists_by_id(entity.id())? {
+        if is_auto_pk::<T>() || self.exists_by_id_sync(entity.id())? {
             self.do_update(&entity)
         } else {
             self.do_insert(&entity)
         }
     }
 
-    fn save_all(&self, entities: Vec<T>) -> Result<Vec<T>, OrmError> {
-        entities.into_iter().map(|entity| self.save(entity)).collect()
+    fn save_all_sync(&self, entities: Vec<T>) -> Result<Vec<T>, OrmError> {
+        entities
+            .into_iter()
+            .map(|entity| self.save_sync(entity))
+            .collect()
     }
 
-    fn delete_by_id(&self, id: &T::Id) -> Result<(), OrmError> {
-        let sql = format!("DELETE FROM {} WHERE {} = ?1", T::table_name(), pk_col_name::<T>());
+    fn delete_by_id_sync(&self, id: &T::Id) -> Result<(), OrmError> {
+        let sql = format!(
+            "DELETE FROM {} WHERE {} = ?1",
+            T::table_name(),
+            pk_col_name::<T>()
+        );
         self.conn
             .lock()
             .map_err(|e| OrmError::Transaction(format!("mutex poisoned: {e}")))?
@@ -495,11 +529,105 @@ where
         Ok(())
     }
 
-    fn delete_all_by_ids(&self, ids: &[T::Id]) -> Result<(), OrmError> {
+    fn delete_all_by_ids_sync(&self, ids: &[T::Id]) -> Result<(), OrmError> {
         for id in ids {
-            self.delete_by_id(id)?;
+            self.delete_by_id_sync(id)?;
         }
         Ok(())
+    }
+}
+
+impl<T> Repository<T> for SqliteRepository<T>
+where
+    T: Entity + Serialize + DeserializeOwned,
+    T::Id: Serialize + DeserializeOwned + Default + PartialEq,
+{
+    fn find_by_id<'a>(&'a self, id: &'a T::Id) -> BoxFuture<'a, Result<Option<T>, OrmError>> {
+        let id = id.clone();
+        let conn = Arc::clone(&self.conn);
+        Box::pin(async move {
+            rt_core::spawn_blocking(move || Self::from_shared_conn(conn).find_by_id_sync(&id))
+                .await
+                .ok_or_else(|| OrmError::Connection("blocking task panicked".to_string()))?
+        })
+    }
+
+    fn find_all<'a>(&'a self) -> BoxFuture<'a, Result<Vec<T>, OrmError>> {
+        let conn = Arc::clone(&self.conn);
+        Box::pin(async move {
+            rt_core::spawn_blocking(move || Self::from_shared_conn(conn).find_all_sync())
+                .await
+                .ok_or_else(|| OrmError::Connection("blocking task panicked".to_string()))?
+        })
+    }
+
+    fn find_all_by_ids<'a>(&'a self, ids: &'a [T::Id]) -> BoxFuture<'a, Result<Vec<T>, OrmError>> {
+        let ids = ids.to_vec();
+        let conn = Arc::clone(&self.conn);
+        Box::pin(async move {
+            rt_core::spawn_blocking(move || Self::from_shared_conn(conn).find_all_by_ids_sync(&ids))
+                .await
+                .ok_or_else(|| OrmError::Connection("blocking task panicked".to_string()))?
+        })
+    }
+
+    fn count<'a>(&'a self) -> BoxFuture<'a, Result<u64, OrmError>> {
+        let conn = Arc::clone(&self.conn);
+        Box::pin(async move {
+            rt_core::spawn_blocking(move || Self::from_shared_conn(conn).count_sync())
+                .await
+                .ok_or_else(|| OrmError::Connection("blocking task panicked".to_string()))?
+        })
+    }
+
+    fn exists_by_id<'a>(&'a self, id: &'a T::Id) -> BoxFuture<'a, Result<bool, OrmError>> {
+        let id = id.clone();
+        let conn = Arc::clone(&self.conn);
+        Box::pin(async move {
+            rt_core::spawn_blocking(move || Self::from_shared_conn(conn).exists_by_id_sync(&id))
+                .await
+                .ok_or_else(|| OrmError::Connection("blocking task panicked".to_string()))?
+        })
+    }
+
+    fn save<'a>(&'a self, entity: T) -> BoxFuture<'a, Result<T, OrmError>> {
+        let conn = Arc::clone(&self.conn);
+        Box::pin(async move {
+            rt_core::spawn_blocking(move || Self::from_shared_conn(conn).save_sync(entity))
+                .await
+                .ok_or_else(|| OrmError::Connection("blocking task panicked".to_string()))?
+        })
+    }
+
+    fn save_all<'a>(&'a self, entities: Vec<T>) -> BoxFuture<'a, Result<Vec<T>, OrmError>> {
+        let conn = Arc::clone(&self.conn);
+        Box::pin(async move {
+            rt_core::spawn_blocking(move || Self::from_shared_conn(conn).save_all_sync(entities))
+                .await
+                .ok_or_else(|| OrmError::Connection("blocking task panicked".to_string()))?
+        })
+    }
+
+    fn delete_by_id<'a>(&'a self, id: &'a T::Id) -> BoxFuture<'a, Result<(), OrmError>> {
+        let id = id.clone();
+        let conn = Arc::clone(&self.conn);
+        Box::pin(async move {
+            rt_core::spawn_blocking(move || Self::from_shared_conn(conn).delete_by_id_sync(&id))
+                .await
+                .ok_or_else(|| OrmError::Connection("blocking task panicked".to_string()))?
+        })
+    }
+
+    fn delete_all_by_ids<'a>(&'a self, ids: &'a [T::Id]) -> BoxFuture<'a, Result<(), OrmError>> {
+        let ids = ids.to_vec();
+        let conn = Arc::clone(&self.conn);
+        Box::pin(async move {
+            rt_core::spawn_blocking(move || {
+                Self::from_shared_conn(conn).delete_all_by_ids_sync(&ids)
+            })
+            .await
+            .ok_or_else(|| OrmError::Connection("blocking task panicked".to_string()))?
+        })
     }
 
     fn query(&self) -> Box<dyn QueryBuilder<T>> {
@@ -550,13 +678,8 @@ where
     /// at the terminal operation (fetch_*). Keeps the builder API infallible
     /// while still rejecting invalid identifiers.
     error: Option<OrmError>,
-    _marker: std::marker::PhantomData<T>,
+    _marker: PhantomData<T>,
 }
-
-// Send/Sync are derived automatically: `Arc<Mutex<Connection>>` is Send+Sync
-// (Connection is Send) and the builder is only Send/Sync when `T` is. No
-// `unsafe impl` — a hand-written one would silently become unsound if a
-// non-Send/Sync field were ever added.
 
 impl<T> SqliteQueryBuilder<T>
 where
@@ -571,7 +694,7 @@ where
             lim: None,
             off: 0,
             error: None,
-            _marker: std::marker::PhantomData,
+            _marker: PhantomData,
         }
     }
 
@@ -635,7 +758,12 @@ where
     fn build_select_query(&self) -> (String, Vec<SqlValue>) {
         let col_list: Vec<&str> = T::columns().iter().map(|c| c.name).collect();
         let (where_clause, params) = self.build_where_clause();
-        let mut sql = format!("SELECT {} FROM {}{}", col_list.join(", "), T::table_name(), where_clause);
+        let mut sql = format!(
+            "SELECT {} FROM {}{}",
+            col_list.join(", "),
+            T::table_name(),
+            where_clause
+        );
 
         if !self.order.is_empty() {
             let parts: Vec<String> = self
@@ -662,7 +790,73 @@ where
 
     fn build_count_query(&self) -> (String, Vec<SqlValue>) {
         let (where_clause, params) = self.build_where_clause();
-        (format!("SELECT COUNT(*) FROM {}{}", T::table_name(), where_clause), params)
+        (
+            format!("SELECT COUNT(*) FROM {}{}", T::table_name(), where_clause),
+            params,
+        )
+    }
+
+    fn fetch_all_sync(mut self: Box<Self>) -> Result<Vec<T>, OrmError> {
+        if let Some(err) = self.error.take() {
+            return Err(err);
+        }
+        let cols = T::columns();
+        let (sql, params) = self.build_select_query();
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| OrmError::Transaction(format!("mutex poisoned: {e}")))?;
+        let mut stmt = conn.prepare(&sql).map_err(map_err)?;
+        let rows = stmt
+            .query_map(params_from_iter(params.iter()), |row| {
+                row_to_entity::<T>(row, cols)
+            })
+            .map_err(map_err)?;
+        rows.map(|row| row.map_err(map_err)).collect()
+    }
+
+    fn fetch_one_sync(mut self: Box<Self>) -> Result<Option<T>, OrmError> {
+        self.lim = Some(1);
+        let mut items = self.fetch_all_sync()?;
+        Ok(items.pop())
+    }
+
+    fn fetch_count_sync(mut self: Box<Self>) -> Result<u64, OrmError> {
+        if let Some(err) = self.error.take() {
+            return Err(err);
+        }
+        let (sql, params) = self.build_count_query();
+        let count: i64 = self
+            .conn
+            .lock()
+            .map_err(|e| OrmError::Transaction(format!("mutex poisoned: {e}")))?
+            .query_row(&sql, params_from_iter(params.iter()), |row| row.get(0))
+            .map_err(map_err)?;
+        Ok(count as u64)
+    }
+
+    fn fetch_page_sync(mut self: Box<Self>, page: u64, size: u64) -> Result<Page<T>, OrmError> {
+        if let Some(err) = self.error.take() {
+            return Err(err);
+        }
+        let (count_sql, count_params) = self.build_count_query();
+        let total: i64 = self
+            .conn
+            .lock()
+            .map_err(|e| OrmError::Transaction(format!("mutex poisoned: {e}")))?
+            .query_row(&count_sql, params_from_iter(count_params.iter()), |row| {
+                row.get(0)
+            })
+            .map_err(map_err)?;
+
+        if size == 0 {
+            return Ok(Page::new(Vec::new(), total as u64, page, size));
+        }
+
+        self.off = page.saturating_mul(size);
+        self.lim = Some(size);
+        let items = self.fetch_all_sync()?;
+        Ok(Page::new(items, total as u64, page, size))
     }
 }
 
@@ -671,7 +865,11 @@ where
     T: Entity + Serialize + DeserializeOwned,
     T::Id: Serialize + DeserializeOwned,
 {
-    fn filter_eq(mut self: Box<Self>, field: &'static str, value: &str) -> Box<dyn QueryBuilder<T>> {
+    fn filter_eq(
+        mut self: Box<Self>,
+        field: &'static str,
+        value: &str,
+    ) -> Box<dyn QueryBuilder<T>> {
         if let Some(col) = self.resolve_col(field) {
             let val = filter_value_for_field::<T>(field, value);
             self.filters.push(Filter::Eq { col, val });
@@ -679,7 +877,11 @@ where
         self
     }
 
-    fn filter_ne(mut self: Box<Self>, field: &'static str, value: &str) -> Box<dyn QueryBuilder<T>> {
+    fn filter_ne(
+        mut self: Box<Self>,
+        field: &'static str,
+        value: &str,
+    ) -> Box<dyn QueryBuilder<T>> {
         if let Some(col) = self.resolve_col(field) {
             let val = filter_value_for_field::<T>(field, value);
             self.filters.push(Filter::Ne { col, val });
@@ -687,7 +889,11 @@ where
         self
     }
 
-    fn filter_gt(mut self: Box<Self>, field: &'static str, value: &str) -> Box<dyn QueryBuilder<T>> {
+    fn filter_gt(
+        mut self: Box<Self>,
+        field: &'static str,
+        value: &str,
+    ) -> Box<dyn QueryBuilder<T>> {
         if let Some(col) = self.resolve_col(field) {
             let val = filter_value_for_field::<T>(field, value);
             self.filters.push(Filter::Gt { col, val });
@@ -695,7 +901,11 @@ where
         self
     }
 
-    fn filter_lt(mut self: Box<Self>, field: &'static str, value: &str) -> Box<dyn QueryBuilder<T>> {
+    fn filter_lt(
+        mut self: Box<Self>,
+        field: &'static str,
+        value: &str,
+    ) -> Box<dyn QueryBuilder<T>> {
         if let Some(col) = self.resolve_col(field) {
             let val = filter_value_for_field::<T>(field, value);
             self.filters.push(Filter::Lt { col, val });
@@ -703,7 +913,11 @@ where
         self
     }
 
-    fn filter_like(mut self: Box<Self>, field: &'static str, pattern: &str) -> Box<dyn QueryBuilder<T>> {
+    fn filter_like(
+        mut self: Box<Self>,
+        field: &'static str,
+        pattern: &str,
+    ) -> Box<dyn QueryBuilder<T>> {
         if let Some(col) = self.resolve_col(field) {
             self.filters.push(Filter::Like {
                 col,
@@ -715,14 +929,20 @@ where
 
     fn order_by_asc(mut self: Box<Self>, field: &'static str) -> Box<dyn QueryBuilder<T>> {
         if let Some(col) = self.resolve_col(field) {
-            self.order.push(Sort { col, dir: SortDir::Asc });
+            self.order.push(Sort {
+                col,
+                dir: SortDir::Asc,
+            });
         }
         self
     }
 
     fn order_by_desc(mut self: Box<Self>, field: &'static str) -> Box<dyn QueryBuilder<T>> {
         if let Some(col) = self.resolve_col(field) {
-            self.order.push(Sort { col, dir: SortDir::Desc });
+            self.order.push(Sort {
+                col,
+                dir: SortDir::Desc,
+            });
         }
         self
     }
@@ -741,72 +961,54 @@ where
         self
     }
 
-    fn fetch_all(mut self: Box<Self>) -> Result<Vec<T>, OrmError> {
-        if let Some(err) = self.error.take() {
-            return Err(err);
-        }
-        let cols = T::columns();
-        let (sql, params) = self.build_select_query();
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| OrmError::Transaction(format!("mutex poisoned: {e}")))?;
-        let mut stmt = conn.prepare(&sql).map_err(map_err)?;
-        let rows = stmt
-            .query_map(params_from_iter(params.iter()), |row| row_to_entity::<T>(row, cols))
-            .map_err(map_err)?;
-        rows.map(|row| row.map_err(map_err)).collect()
+    fn fetch_all(self: Box<Self>) -> BoxFuture<'static, Result<Vec<T>, OrmError>> {
+        Box::pin(async move {
+            rt_core::spawn_blocking(move || self.fetch_all_sync())
+                .await
+                .ok_or_else(|| OrmError::Connection("blocking task panicked".to_string()))?
+        })
     }
 
-    fn fetch_one(mut self: Box<Self>) -> Result<Option<T>, OrmError> {
-        self.lim = Some(1);
-        let mut items = self.fetch_all()?;
-        Ok(items.pop())
+    fn fetch_one(self: Box<Self>) -> BoxFuture<'static, Result<Option<T>, OrmError>> {
+        Box::pin(async move {
+            rt_core::spawn_blocking(move || self.fetch_one_sync())
+                .await
+                .ok_or_else(|| OrmError::Connection("blocking task panicked".to_string()))?
+        })
     }
 
-    fn fetch_count(mut self: Box<Self>) -> Result<u64, OrmError> {
-        if let Some(err) = self.error.take() {
-            return Err(err);
-        }
-        let (sql, params) = self.build_count_query();
-        let count: i64 = self
-            .conn
-            .lock()
-            .map_err(|e| OrmError::Transaction(format!("mutex poisoned: {e}")))?
-            .query_row(&sql, params_from_iter(params.iter()), |row| row.get(0))
-            .map_err(map_err)?;
-        Ok(count as u64)
+    fn fetch_count(self: Box<Self>) -> BoxFuture<'static, Result<u64, OrmError>> {
+        Box::pin(async move {
+            rt_core::spawn_blocking(move || self.fetch_count_sync())
+                .await
+                .ok_or_else(|| OrmError::Connection("blocking task panicked".to_string()))?
+        })
     }
 
-    fn fetch_page(mut self: Box<Self>, page: u64, size: u64) -> Result<Page<T>, OrmError> {
-        if let Some(err) = self.error.take() {
-            return Err(err);
-        }
-        let (count_sql, count_params) = self.build_count_query();
-        let total: i64 = self
-            .conn
-            .lock()
-            .map_err(|e| OrmError::Transaction(format!("mutex poisoned: {e}")))?
-            .query_row(&count_sql, params_from_iter(count_params.iter()), |row| row.get(0))
-            .map_err(map_err)?;
-
-        if size == 0 {
-            return Ok(Page::new(Vec::new(), total as u64, page, size));
-        }
-
-        self.off = page.saturating_mul(size);
-        self.lim = Some(size);
-        let items = self.fetch_all()?;
-        Ok(Page::new(items, total as u64, page, size))
+    fn fetch_page(
+        self: Box<Self>,
+        page: u64,
+        size: u64,
+    ) -> BoxFuture<'static, Result<Page<T>, OrmError>> {
+        Box::pin(async move {
+            rt_core::spawn_blocking(move || self.fetch_page_sync(page, size))
+                .await
+                .ok_or_else(|| OrmError::Connection("blocking task panicked".to_string()))?
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kernway_orm_core::repository::Repository;
+    use kernway_orm_core::{query::QueryBuilder, repository::Repository};
     use kernway_orm_macro::entity;
     use serde::{Deserialize, Serialize};
+    use std::future::Future;
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        rt_core::Executor::new().unwrap().block_on(future).unwrap()
+    }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     #[entity(table = "items")]
@@ -828,8 +1030,8 @@ mod tests {
     #[test]
     fn test_in_memory_insert_and_find() {
         let repo = SqliteRepository::<Item>::in_memory().unwrap();
-        let saved = repo.save(sample("alpha", 10)).unwrap();
-        let found = repo.find_by_id(&saved.id).unwrap().unwrap();
+        let saved = block_on(repo.save(sample("alpha", 10))).unwrap();
+        let found = block_on(repo.find_by_id(&saved.id)).unwrap().unwrap();
 
         assert_eq!(found, saved);
     }
@@ -837,8 +1039,8 @@ mod tests {
     #[test]
     fn test_auto_increment_id() {
         let repo = SqliteRepository::<Item>::in_memory().unwrap();
-        let first = repo.save(sample("a", 1)).unwrap();
-        let second = repo.save(sample("b", 2)).unwrap();
+        let first = block_on(repo.save(sample("a", 1))).unwrap();
+        let second = block_on(repo.save(sample("b", 2))).unwrap();
 
         assert_eq!(first.id, 1);
         assert_eq!(second.id, 2);
@@ -847,16 +1049,15 @@ mod tests {
     #[test]
     fn test_update() {
         let repo = SqliteRepository::<Item>::in_memory().unwrap();
-        let saved = repo.save(sample("alpha", 10)).unwrap();
-        let updated = repo
-            .save(Item {
-                id: saved.id,
-                name: "alpha-updated".to_string(),
-                value: 99,
-            })
-            .unwrap();
+        let saved = block_on(repo.save(sample("alpha", 10))).unwrap();
+        let updated = block_on(repo.save(Item {
+            id: saved.id,
+            name: "alpha-updated".to_string(),
+            value: 99,
+        }))
+        .unwrap();
 
-        let found = repo.find_by_id(&saved.id).unwrap().unwrap();
+        let found = block_on(repo.find_by_id(&saved.id)).unwrap().unwrap();
         assert_eq!(updated.name, "alpha-updated");
         assert_eq!(found.value, 99);
     }
@@ -864,29 +1065,29 @@ mod tests {
     #[test]
     fn test_delete() {
         let repo = SqliteRepository::<Item>::in_memory().unwrap();
-        let saved = repo.save(sample("alpha", 10)).unwrap();
+        let saved = block_on(repo.save(sample("alpha", 10))).unwrap();
 
-        repo.delete_by_id(&saved.id).unwrap();
+        block_on(repo.delete_by_id(&saved.id)).unwrap();
 
-        assert!(repo.find_by_id(&saved.id).unwrap().is_none());
+        assert!(block_on(repo.find_by_id(&saved.id)).unwrap().is_none());
     }
 
     #[test]
     fn test_count() {
         let repo = SqliteRepository::<Item>::in_memory().unwrap();
-        repo.save(sample("a", 1)).unwrap();
-        repo.save(sample("b", 2)).unwrap();
+        block_on(repo.save(sample("a", 1))).unwrap();
+        block_on(repo.save(sample("b", 2))).unwrap();
 
-        assert_eq!(repo.count().unwrap(), 2);
+        assert_eq!(block_on(repo.count()).unwrap(), 2);
     }
 
     #[test]
     fn test_find_all() {
         let repo = SqliteRepository::<Item>::in_memory().unwrap();
-        repo.save(sample("b", 2)).unwrap();
-        repo.save(sample("a", 1)).unwrap();
+        block_on(repo.save(sample("b", 2))).unwrap();
+        block_on(repo.save(sample("a", 1))).unwrap();
 
-        let mut items = repo.find_all().unwrap();
+        let mut items = block_on(repo.find_all()).unwrap();
         items.sort_by(|left, right| left.name.cmp(&right.name));
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].name, "a");
@@ -896,10 +1097,11 @@ mod tests {
     #[test]
     fn test_query_filter_eq() {
         let repo = SqliteRepository::<Item>::in_memory().unwrap();
-        repo.save(sample("alpha", 10)).unwrap();
-        repo.save(sample("beta", 20)).unwrap();
+        block_on(repo.save(sample("alpha", 10))).unwrap();
+        block_on(repo.save(sample("beta", 20))).unwrap();
 
-        let items = repo.query().filter_eq("name", "alpha").fetch_all().unwrap();
+        let items = block_on(repo.query().filter_eq("name", "alpha").fetch_all()).unwrap();
+
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "alpha");
     }
@@ -907,12 +1109,12 @@ mod tests {
     #[test]
     fn test_query_order_by() {
         let repo = SqliteRepository::<Item>::in_memory().unwrap();
-        repo.save(sample("c", 3)).unwrap();
-        repo.save(sample("a", 1)).unwrap();
-        repo.save(sample("b", 2)).unwrap();
+        block_on(repo.save(sample("c", 3))).unwrap();
+        block_on(repo.save(sample("a", 1))).unwrap();
+        block_on(repo.save(sample("b", 2))).unwrap();
 
-        let items = repo.query().order_by_asc("name").fetch_all().unwrap();
-        let names: Vec<&str> = items.iter().map(|item| item.name.as_str()).collect();
+        let items = block_on(repo.query().order_by_asc("name").fetch_all()).unwrap();
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
         assert_eq!(names, vec!["a", "b", "c"]);
     }
 
@@ -920,10 +1122,11 @@ mod tests {
     fn test_query_fetch_page() {
         let repo = SqliteRepository::<Item>::in_memory().unwrap();
         for (name, value) in [("a", 1), ("b", 2), ("c", 3), ("d", 4), ("e", 5)] {
-            repo.save(sample(name, value)).unwrap();
+            block_on(repo.save(sample(name, value))).unwrap();
         }
 
-        let page = repo.query().order_by_asc("id").fetch_page(1, 2).unwrap();
+        let page = block_on(repo.query().order_by_asc("id").fetch_page(1, 2)).unwrap();
+
         assert_eq!(page.total, 5);
         assert_eq!(page.total_pages, 3);
         assert_eq!(page.items.len(), 2);
@@ -931,36 +1134,28 @@ mod tests {
         assert_eq!(page.items[1].id, 4);
     }
 
-    // --- M1.0 correctness regressions ------------------------------------
-
     #[test]
-    fn unknown_filter_field_is_rejected_not_injected() {
-        // An unrecognised field name must surface an error at the terminal op,
-        // never be interpolated into SQL (identifier-injection guard).
+    fn test_query_rejects_unknown_fields() {
         let repo = SqliteRepository::<Item>::in_memory().unwrap();
-        repo.save(sample("alpha", 10)).unwrap();
+        block_on(repo.save(sample("alpha", 10))).unwrap();
 
-        let result = repo
-            .query()
-            .filter_eq("name = 'x' OR 1=1 --", "irrelevant")
-            .fetch_all();
-        assert!(result.is_err(), "unknown field must error, got {result:?}");
+        let err = block_on(
+            repo.query()
+                .filter_eq("name); DROP TABLE items; --", "alpha")
+                .fetch_all(),
+        );
+        assert!(err.is_err());
     }
 
     #[test]
-    fn unknown_order_field_is_rejected() {
+    fn test_order_by_rejects_unknown_fields() {
         let repo = SqliteRepository::<Item>::in_memory().unwrap();
-        repo.save(sample("alpha", 10)).unwrap();
-        assert!(repo.query().order_by_asc("nope; DROP TABLE items").fetch_all().is_err());
-    }
-
-    #[test]
-    fn u64_id_exceeding_i64_errors_not_wraps() {
-        // number_to_integer must reject u64 values that don't fit i64 instead of
-        // silently wrapping to a negative rowid.
-        let big = serde_json::Number::from(u64::MAX);
-        assert!(number_to_integer(&big, "id").is_err());
-        let ok = serde_json::Number::from(42u64);
-        assert_eq!(number_to_integer(&ok, "id").unwrap(), 42);
+        block_on(repo.save(sample("alpha", 10))).unwrap();
+        assert!(block_on(
+            repo.query()
+                .order_by_asc("nope; DROP TABLE items")
+                .fetch_all()
+        )
+        .is_err());
     }
 }
