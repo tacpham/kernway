@@ -270,26 +270,27 @@ not only what was chosen.
 
 ## Performance
 
-Measured on an Apple M2 Max, macOS, release build. Full table and reproduction
-steps in [docs/design/BENCHMARKS.md](docs/design/BENCHMARKS.md).
+Measured on an Intel Core i7-1270P inside Docker (`rust:1-bookworm`), release
+build. Full table and reproduction steps in
+[docs/design/BENCHMARKS.md](docs/design/BENCHMARKS.md).
 
 | What | Measured |
 |---|---|
-| Full request pipeline (parse→route→handle→encode) | 363 ns |
-| DI bean lookup (`#[inject]`) | 4.2 ns |
-| `TypeId` hasher vs SipHash | 5.8× faster |
-| Parse a browser GET (8 headers) | 705 ns |
-| Encode a small JSON response | 44 ns |
-| Spawn a task | ~65 ns at 1000 tasks |
-| htmx header read vs axum-htmx 0.8 | 1.39× faster (57.8 ns vs 80.2 ns) |
-| kernleaf render vs minijinja | 1.7× faster |
+| Full request pipeline (parse→route→handle→encode) | 522 ns |
+| DI bean lookup (`#[inject]`) | 15.0 ns |
+| `TypeId` hasher vs SipHash | 4.3× faster |
+| Parse a browser GET (8 headers) | 818 ns |
+| Encode a small JSON response | 68 ns |
+| Spawn a task | ~152 ns at 1000 tasks |
+| htmx header read vs axum-htmx 0.8 | 1.11× faster (91 ns vs 101 ns) |
+| kernleaf render vs minijinja | 2.22× faster |
 | Precompressed static negotiation overhead | ~200 ns; −50–55% payload |
 
 Measured against the incumbent, not just ourselves. The router is a radix trie
 tuned over three rounds against `matchit` (axum's): **static routing is within
-1.5×** (21 ns vs 14 ns), and parameterised routing went from 77× behind to 5.8×
-and is now flat in route count instead of O(n). The remaining param gap is an
-owned-vs-borrowed-parameters API choice, not the trie — recorded, with its
+2.1×** (29.7 ns vs 14.1 ns), and parameterised routing went from 77× behind to
+6.3× and is now flat in route count instead of O(n). The remaining param gap is
+an owned-vs-borrowed-parameters API choice, not the trie — recorded, with its
 reason, in [BENCHMARKS.md](docs/design/BENCHMARKS.md). We write down where we
 still lose, not only where we win.
 
@@ -391,8 +392,8 @@ Progress follows the [walking-skeleton milestones](docs/design/MILESTONES.md) �
 | **M1a** — close the front door | ✅ 2026-07-24 | `kernway` as a single dependency; `use kernway::prelude::*` |
 | **M2a** — conditional GET + symlink defence | ✅ 2026-07-24 | ETag, `Cache-Control`, `If-None-Match` → 304, symlink escape rejected |
 | **M2b** — streaming, HEAD, Range, precompressed | ✅ 2026-07-24 | `Body::File`, HEAD, Range (206/416), `.br`/`.gz` negotiation, `Vary: Accept-Encoding` |
-| **M3** — htmx | ✅ | `features = ["htmx"]`; `Vary: HX-Request` automatic; 1.39× faster than axum-htmx |
-| **M4** — templates + security | 🔶 | `kernleaf` (Thymeleaf dialect, 1.7× vs minijinja), CSRF token injection, security headers; CSRF *verify* route-guard pending |
+| **M3** — htmx | ✅ | `features = ["htmx"]`; `Vary: HX-Request` automatic; 1.11× faster than axum-htmx |
+| **M4** — templates + security | 🔶 | `kernleaf` (Thymeleaf dialect, 2.22× vs minijinja), CSRF token injection, security headers; CSRF *verify* route-guard pending |
 | **M5** — hot reload | ⏳ | Template/static reload without restart; Rust changes via zero-downtime socket handover |
 | **M6** — production build | ⏳ | `kernway build` → one static binary, assets embedded, allocator decision |
 

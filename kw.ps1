@@ -90,6 +90,12 @@ function Invoke-DockerTooled {
 }
 
 switch ($Command) {
+    "bench" {
+        $BenchArgs = if ($Arg) { @("bench", "-p", $Arg) } else { @("bench", "--workspace", "--exclude", "framework-comparison") }
+        Write-Host ">> cargo $($BenchArgs -join ' ')" -ForegroundColor Cyan
+        Invoke-Docker @BenchArgs
+    }
+
     "build" {
         Write-Host ">> cargo build --workspace" -ForegroundColor Cyan
         Invoke-Docker "build", "--workspace"
@@ -297,7 +303,7 @@ curl http://localhost:8080/hello/World
         Write-Host "  .\kw.ps1 check              Fast type-check"
         Write-Host "  .\kw.ps1 clippy             Lint"
         Write-Host "  .\kw.ps1 fmt                Format code"
-        Write-Host "  .\kw.ps1 run [name]         Run an example or the current crate"
+        Write-Host "  .\kw.ps1 bench [crate]      Run benchmarks (optional: specific crate)"
         Write-Host "  .\kw.ps1 new my-api         Create a new Kernway project"
         Write-Host "  .\kw.ps1 shell              Open a bash container"
         Write-Host "  .\kw.ps1 clean-cache        Remove cargo cache"

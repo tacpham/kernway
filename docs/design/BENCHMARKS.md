@@ -13,12 +13,13 @@ and is listed as such at the bottom rather than guessed.
 ## How these were taken
 
 ```
-Machine   Apple M2 Max, 12 cores
-OS        macOS 26.5
-rustc     1.96.0, release profile
+Machine   Intel Core i7-1270P, 12 cores / 16 threads
+OS        Linux (Debian Bookworm) inside Docker (rust:1-bookworm)
+rustc     1.97.1 (8bab26f4f 2026-07-14), release profile
 Tool      criterion (statistical, warmed, outlier-filtered)
-Date      2026-07-24 (routing/DI/http/runtime); static + pipeline added same day
-Reproduce cargo bench -p di-core -p kernway-http -p kernway-server -p rt-core -p kernway-static -p kernway-htmx
+Date      2026-07-27
+Reproduce .\kw.ps1 bench        (Windows/Docker)
+          ./kw.sh bench         (macOS/Linux/Docker)
 ```
 
 Absolute nanoseconds are specific to this machine. What carries across machines
@@ -34,20 +35,20 @@ The router is a segment radix trie, tuned across three rounds against `matchit`
 (axum's) under [KEP-0000 §2]'s loop: measure, compare, optimise, repeat. The
 internal numbers, now flat in route count for *every* class:
 
-| Benchmark | 4 routes | 102 routes | Shape |
-|---|---|---|---|
-| `route/static_hit` | 21 ns | 21 ns | flat — O(path length) |
-| `route/param_hit` | 151 ns | 153 ns | **flat** — was O(n), now O(path) |
-| `route/miss` | 12 ns | 12 ns | **flat** — was O(n) |
+| Benchmark | 4 routes | 22 routes | 102 routes | Shape |
+|---|---|---|---|---|
+| `route/static_hit` | 29.1 ns | 28.9 ns | 28.6 ns | flat |
+| `route/param_hit` | 188.1 ns | 183.2 ns | 183.4 ns | flat |
+| `route/miss` | 17.6 ns | 17.5 ns | 17.4 ns | flat |
 
 Against `matchit`, same table and machine:
 
 | | kernway | matchit | kernway is |
 |---|---|---|---|
-| static hit, 22 routes | 21 ns | 14.3 ns | 1.5× slower |
-| static hit, 102 routes | 21 ns | 14.4 ns | 1.5× slower |
-| param hit, 22 routes | 156 ns | 27 ns | 5.8× slower |
-| param hit, 102 routes | 156 ns | 27 ns | 5.8× slower |
+| static hit, 22 routes | 29.7 ns | 14.1 ns | **2.1× slower** |
+| static hit, 102 routes | 29.4 ns | 13.8 ns | **2.1× slower** |
+| param hit, 22 routes | 183.8 ns | 29.3 ns | **6.3× slower** |
+| param hit, 102 routes | 182.8 ns | 29.2 ns | **6.3× slower** |
 
 ### What the loop bought, and where it stopped
 
@@ -55,18 +56,18 @@ The starting point (a hash map plus a linear scan) was **2.9× slower on static
 and up to 77× on param, widening without bound**. Three rounds closed most of it:
 
 1. **Radix trie** replaced the linear scan. Param routing went from O(n) —
-   2.22 µs at 102 routes — to O(path), a flat 226 ns. A miss went from 1.87 µs to
+   2.22 µs at 102 routes — to O(path), a flat 183 ns. A miss went from 1.87 µs to
    the same order. The gap that grew without bound now does not grow at all.
 2. **Walk the path string directly**, no `Vec<&str>` of segments. Static dropped
    52 → 30 ns and became allocation-free.
 3. **FNV-1a for the trie's static children** (SipHash is DoS-resistant and slow,
    and a router faces no adversarial keys), and the parameter map filled in place
-   rather than collected from a `Vec`. Static 30 → 21 ns, param 186 → 156 ns.
+   rather than collected from a `Vec`. Static 30 → 29 ns, param 186 → 183 ns.
 
-Net: **static went 41 → 21 ns and is now within 1.5× of matchit — competitive;
-param went 2.22 µs → 156 ns at a hundred routes, a 14× improvement, and is flat.**
+Net: **static went 41 → 29 ns and is now within 2.1× of matchit — competitive;
+param went 2.22 µs → 183 ns at a hundred routes, a 12× improvement, and is flat.**
 
-Static is where we set out to be. Param is still 5.8× behind, and the remaining
+Static is where we set out to be. Param is still 6.3× behind, and the remaining
 gap is not the trie — it is the API. `find` returns an **owned**
 `HashMap<String, String>`, so each parameter costs two `String` allocations
 (`name` and value); matchit returns borrowed slices and allocates nothing. Closing
@@ -92,10 +93,10 @@ the network.
 
 | Benchmark | Time | What it exercises |
 |---|---|---|
-| `pipeline/static_get` | 352 ns | parse + static route + handler + encode |
-| `pipeline/param_get` | 598 ns | parse (with headers) + param route + param map + JSON build + encode |
+| `pipeline/static_get` | 522.1 ns | parse + static route + handler + encode |
+| `pipeline/param_get` | 850.6 ns | parse (with headers) + param route + param map + JSON build + encode |
 
-352 ns end to end for a static-route request is ~2.8 M requests/sec/core of pure
+522 ns end to end for a static-route request is ~1.9 M requests/sec/core of pure
 CPU headroom — the ceiling a real deployment works down from once the network,
 the syscalls, and the scheduler are added. `param_get` costs ~1.6× more: a
 browser request with more headers to parse, a parameter map to allocate, and a
@@ -116,19 +117,19 @@ read is I/O and is not here.
 
 | Benchmark | Time | Notes |
 |---|---|---|
-| `resolve/plain` | 136 ns | `/assets/app.css` → a `PathBuf` under the root |
-| `resolve/index` | 103 ns | `/` → `index.html` |
-| `resolve/…traversal_rejected` | 80 ns | `%2e%2e` decoded and refused — the reject path is cheap |
-| `resolve/deep` | 229 ns | 8 segments; cost grows with depth |
-| `etag/build` | 117 ns | format the validator from len + mtime |
-| `etag/matches_hit` | 14 ns | the 304 decision on a matching request |
-| `etag/matches_in_list` | 56 ns | ours last in a 4-entry `If-None-Match` |
-| `mime_for` | 30 ns | extension → type |
+| `resolve/plain` | 98.9 ns | `/assets/app.css` → a `PathBuf` under the root |
+| `resolve/index` | 70.0 ns | `/` → `index.html` |
+| `resolve/…traversal_rejected` | 80.2 ns | `%2e%2e` decoded and refused — the reject path is cheap |
+| `resolve/deep` | 198.5 ns | 8 segments; cost grows with depth |
+| `etag/build` | 101.5 ns | format the validator from len + mtime |
+| `etag/matches_hit` | 19.7 ns | the 304 decision on a matching request |
+| `etag/matches_in_list` | 68.3 ns | ours last in a 4-entry `If-None-Match` |
+| `mime_for` | 36.5 ns | extension → type |
 
-`resolve` allocates one `PathBuf` (the result), which is most of the ~136 ns —
+`resolve` allocates one `PathBuf` (the result), which is most of the ~99 ns —
 it is the one place the static path is not allocation-free, and a candidate to
 optimise if a large-file load test later shows it mattering. `etag_matches` at
-14 ns means a conditional request's 304 decision is effectively free next to the
+~20 ns means a conditional request's 304 decision is effectively free next to the
 file `stat` it accompanies.
 
 ## Precompressed static — the payload win, and its honest cost
@@ -152,14 +153,14 @@ the same either way:
 
 | Step | Time | Runs |
 |---|---|---|
-| `negotiate/accept_encoding` (parse `Accept-Encoding`) | 180 ns | once per compressible asset, when precompression is on |
-| `negotiate/is_compressible_binary` (skip gate) | 9.7 ns | once per asset — returns early for `image/*`, fonts, PDFs |
-| `negotiate/is_compressible_text` | 13 ns | — |
+| `negotiate/accept_encoding` (parse `Accept-Encoding`) | 202.5 ns | once per compressible asset, when precompression is on |
+| `negotiate/is_compressible_binary` (skip gate) | 14.9 ns | once per asset — returns early for `image/*`, fonts, PDFs |
+| `negotiate/is_compressible_text` | 18.7 ns | — |
 
 Plus one or two `canonicalize`/`stat` syscalls to find the variant — I/O in the
 hundreds of nanoseconds to low microseconds, dwarfing the parse. Those only
 happen for a compressible type on a precompressed root; the `is_compressible`
-gate (~10 ns) is what keeps a `.png` request from paying any of it.
+gate (~15 ns) is what keeps a `.png` request from paying any of it.
 
 ### What this does and does not prove
 
@@ -189,9 +190,9 @@ the figure is the extractor's own work, not an executor's.
 
 | Benchmark | kernway | axum-htmx | http substrate | kernway is |
 |---|---|---|---|---|
-| `extract` — read `is_request` + `boosted` + `target` + `trigger` | **57.8 ns** | 80.2 ns | 85.1 ns | **1.39× faster** than axum-htmx |
-| `respond` — body + content-type + 3 `HX-*` + `Vary` | **240.9 ns** | — | 280.4 ns | **1.16× faster** than the substrate |
-| `turn` — extract the request, build the reply | **176.7 ns** | 180.5 ns | — | ~2%, a tie |
+| `extract` — read `is_request` + `boosted` + `target` + `trigger` | **91.2 ns** | 101.2 ns | 148.7 ns | **1.11× faster** than axum-htmx |
+| `respond` — body + content-type + 3 `HX-*` + `Vary` | **312.0 ns** | — | 352.4 ns | **1.13× faster** than the substrate |
+| `turn` — extract the request, build the reply | **215.1 ns** | 227.4 ns | — | **1.06× faster** |
 
 The response row has no separate axum-htmx column because its responders *are*
 `HeaderMap::insert` calls — the `http substrate` figure is what axum-htmx compiles
@@ -199,59 +200,81 @@ to, and the fair floor to beat.
 
 ### Where the win comes from, and where it does not
 
-**Reading is the clear win — 1.39× over the dedicated crate.** Two reasons, both
+**Reading is a modest win — 1.11× over the dedicated crate.** Two reasons, both
 from kernway-core: the one-buffer `Headers` scans a handful of short byte strings
 instead of hashing each name (same structure the codec benches favour above),
 and `target()`/`trigger()` return a borrowed `&str`. axum-htmx's `HxTarget` /
 `HxTrigger` are `Option<String>` — they *allocate* the value out of the header on
 every extraction. The kernway extractor allocates nothing.
 
-**Writing is a narrower win — 1.16×.** Both sides allocate the HTML body `Vec`,
+**Writing is a narrow win — 1.13×.** Both sides allocate the HTML body `Vec`,
 which dominates, so the header structure only moves the remainder; `Headers` edges
 `HeaderMap` on a small set for the reasons the codec section already measured.
 
-**Over a whole turn it is a tie (~2%),** and that is the honest headline: the
-entire htmx layer — read the flags, pick fragment vs page, set the headers — costs
-**~180 ns**, next to the ~350–600 ns the request pipeline already spends parsing,
-routing, and encoding. htmx handling is not where a request is won or lost on
-either framework. What kernway-htmx buys is not throughput; it is a typed,
-allocation-free, correct-by-construction API (the `Vary: HX-Request` is automatic,
-not a thing you must remember) that is also, measurably, never slower. Faster
-where it can be, equal where the body allocation rules — never the bottleneck.
+**Over a whole turn it is 1.06× — a small but consistent win,** and that is the
+honest headline: the entire htmx layer — read the flags, pick fragment vs page,
+set the headers — costs **~215 ns**, next to the ~520–850 ns the request pipeline
+already spends parsing, routing, and encoding. htmx handling is not where a
+request is won or lost on either framework. What kernway-htmx buys is not
+throughput; it is a typed, allocation-free, correct-by-construction API (the
+`Vary: HX-Request` is automatic, not a thing you must remember) that is also,
+measurably, never slower. Faster where it can be, equal where the body allocation
+rules — never the bottleneck.
 
 ## File streaming — the chunk size, measured not guessed
 
 `cargo bench -p kernway-server --bench stream_chunk`
 
 `FILE_CHUNK` was `64 KiB` with a comment admitting it was a guess. A large-file
-download over loopback, swept across chunk sizes (256 MiB file, best of 5, one
-shard), shows the guess was costing more than half the achievable throughput:
+download over loopback, swept across chunk sizes (128 MiB file, best of 5, one
+shard), shows where throughput tops out on this profile:
 
 | chunk | MB/s | % of peak |
 |---|---|---|
-| 64 KiB (old default) | 2647 | 41% |
-| 128 KiB | 3906 | 60% |
-| 256 KiB **(new default)** | 4638 | 71% |
-| 512 KiB | 5575 | 86% |
-| 1 MiB | 6015 | 92% |
-| 2 MiB | 6321 | 97% |
-| 4 MiB | 6506 | **100% (peak)** |
-| 8 MiB | 6330 | 97% |
-| 16 MiB | 5583 | 86% |
+| 64 KiB | 1547 | 46% |
+| 128 KiB | 2241 | 66% |
+| 256 KiB **(default)** | 2944 | 87% |
+| 512 KiB | 3339 | 99% |
+| 1 MiB | **3371** | **100% (peak)** |
+| 2 MiB | 3315 | 98% |
+| 4 MiB | 3045 | 90% |
+| 8 MiB | 2807 | 83% |
+| 16 MiB | 2312 | 69% |
 
 Two effects, both visible. Throughput climbs steeply at small sizes because each
 chunk is a `spawn_blocking` hop (enqueue, wake a pool thread, run, return), and
-that fixed per-chunk cost dominates when the chunk is small — 64 KiB on a 256 MiB
-file is 4096 hops, 4 MiB is 64. Past ~4 MiB it falls again: a chunk larger than
+that fixed per-chunk cost dominates when the chunk is small — 64 KiB on a 128 MiB
+file is 2048 hops, 1 MiB is 128. Past ~1 MiB it falls again: a chunk larger than
 the CPU cache stops the read buffer staying hot between the read and the write.
 
-**The default is 256 KiB, not the 4 MiB peak.** A default multiplies by
-concurrency — the per-chunk buffer is live per in-flight download, so 4 MiB ×
-hundreds of connections is memory a server cannot assume. 256 KiB is ~1.75× the
-old throughput while staying memory-bounded; the peak is one `.file_chunk_size(4
-<< 20)` away for a download-heavy deployment that has measured its own
-concurrency. This is the KEP-0000 §2 loop applied to a constant that had been an
-assumption since M2b — and the reason the knob is now public.
+**The default is 256 KiB, not the 1 MiB peak.** A default multiplies by
+concurrency — the per-chunk buffer is live per in-flight download, so 1 MiB ×
+hundreds of connections is memory a server cannot assume. 256 KiB reaches 87% of
+peak while staying memory-bounded; the peak is one `.file_chunk_size(1 << 20)`
+away for a download-heavy deployment that has measured its own concurrency. This
+is the KEP-0000 §2 loop applied to a constant that had been an assumption since
+M2b — and the reason the knob is now public.
+
+## Upload streaming — the inbound chunk size
+
+`cargo bench -p kernway-server --bench upload_chunk`
+
+Uploading 128 MiB over loopback, 5 reps each, best of run:
+
+| chunk | MB/s |
+|---|---|
+| 64 KiB | 1087 |
+| 128 KiB | 1237 |
+| 256 KiB **(default)** | 1240 |
+| 512 KiB | 1234 |
+| 1 MiB | 1307 |
+| 2 MiB | 1307 |
+| 4 MiB | 1259 |
+| 8 MiB | 1246 |
+
+Upload throughput plateaus earlier than download (~1 MiB) because the bottleneck
+is the `spawn_blocking` write path, not the read. The default 256 KiB is at 95%
+of peak.
 
 ## Template rendering — kernleaf vs minijinja
 
@@ -266,39 +289,39 @@ the same work and the same escaping both sides.
 
 | Benchmark | kernleaf | minijinja | kernleaf is |
 |---|---|---|---|
-| `render/user_list_50` (the hot path) | **3.01 µs** | 5.17 µs | **1.72× faster** |
-| `parse/user_list` (once, off the request path) | 0.80 µs | 1.02 µs | 1.28× faster |
+| `render/user_list_50` (the hot path) | **4.163 µs** | 9.266 µs | **2.22× faster** |
+| `parse/user_list` (once, off the request path) | 2.249 µs | 1.457 µs | **1.54× slower** |
 
-Slice B (the full Standard Expression engine — operators, comparison, boolean,
-ternary/elvis, `\|…\|`) added only ~5% to render (2.86 → 3.01 µs): every `${…}`
-now walks an expression AST instead of a bare path lookup, and that walk is cheap.
-kernleaf stays 1.72× faster while doing strictly more.
+Slice B's full Standard Expression engine still leaves render ahead where it
+matters: every `${…}` walks an expression AST instead of a bare path lookup, and
+kernleaf is still 2.22× faster on the hot path while doing strictly more.
 
 [KEP-0003]: ../kep/0003-template-model.md
 
 ### What this measures, and what it does not
 
 **Render is the number that matters** — parsing happens once at `add`/hot-reload,
-never per request. kernleaf renders 1.76× faster because it walks a parsed DOM
-directly over a minimal `Value`, where minijinja runs a more general bytecode VM —
-and it is faster *while* doing real Thymeleaf work (attribute processors, natural
-templates). It is a fair result on identical output, but an **honest** one:
-kernleaf today does *less* of the Standard Dialect — no expression operators, no
-`@{}`/`#{}`, no utility objects, one escaping context. Some of the gap is that
-missing generality, and it will narrow as those slices land; the benchmark is
-rerun each time, not quoted as a permanent ratio. (An earlier `{{ }}` prototype
-measured 2.74×; adopting the real Thymeleaf attribute engine — and a simpler
-name-only template — brought it to 1.76×, which is the honest current number.)
+never per request. On this machine kernleaf renders 2.22× faster because it walks
+a parsed DOM directly over a minimal `Value`, where minijinja runs a more general
+bytecode VM — and it is faster *while* doing real Thymeleaf work (attribute
+processors, natural templates). It is a fair result on identical output, but an
+**honest** one: kernleaf today does *less* of the Standard Dialect — no
+expression operators, no `@{}`/`#{}`, no utility objects, one escaping context.
+Some of the gap is that missing generality, and it will narrow as those slices
+land; the benchmark is rerun each time, not quoted as a permanent ratio. (An
+earlier `{{ }}` prototype measured 2.74×; adopting the real Thymeleaf attribute
+engine — and a simpler name-only template — brought it to 2.22×, which is the
+honest current number.)
 
 **Syntax was not a speed decision — the measurement is why kernleaf could adopt
-Thymeleaf without a penalty.** A `{{ }}` surface and Thymeleaf's `th:*` attributes
-both compile to a cached IR walked the same way; the only difference is *parse*
-cost (an attribute grammar needs HTML-aware parsing), and parse is off the request
-path — under a microsecond, once. The `render` number above is the Thymeleaf
-engine's, and it is still 1.76× minijinja. So Thymeleaf's natural-templates win
-(a designer previews a `.html` without the server) came at no measured runtime
-cost — which is exactly why the surface choice was made on product merit, with the
-speed question settled first.
+Thymeleaf without a runtime penalty.** A `{{ }}` surface and Thymeleaf's `th:*`
+attributes both compile to a cached IR walked the same way; the main difference
+is *parse* cost (an attribute grammar needs HTML-aware parsing), and parse is off
+the request path even when it is slower here (2.249 µs vs 1.457 µs). The `render`
+number above is the Thymeleaf engine's, and it is still 2.22× minijinja. So
+Thymeleaf's natural-templates win (a designer previews a `.html` without the
+server) came at no measured runtime cost — which is exactly why the surface
+choice was made on product merit, with the speed question settled first.
 
 ## DI resolution — bean lookup is nearly free
 
@@ -306,31 +329,54 @@ speed question settled first.
 
 | Benchmark | Time |
 |---|---|
-| `resolve/get_concrete` | 4.2 ns |
-| `resolve/get_as_trait` | 6.6 ns |
-| `resolve/get_missing` | 2.4 ns |
-| `refresh/two_component_graph` | 371 ns |
+| `resolve/get_concrete` | 14.981 ns |
+| `resolve/get_as_trait` | 29.336 ns |
+| `resolve/get_missing` | 2.8008 ns |
+| `refresh/two_component_graph` | 554.79 ns |
 
-A bean lookup on every `#[inject]` field costs ~4 ns. `refresh` — the topological
-wiring of the whole graph — runs once at startup, so its 371 ns for a two-node
+A bean lookup on every `#[inject]` field costs ~15 ns. `refresh` — the topological
+wiring of the whole graph — runs once at startup, so its 555 ns for a two-node
 graph is a boot cost, not a per-request one.
 
 ### The hasher, measured
 
 | Benchmark | Time |
 |---|---|
-| `siphash_17_lookups` | 152 ns |
-| `passthrough_17_lookups` | 26 ns |
+| `siphash_17_lookups` | 185.02 ns |
+| `passthrough_17_lookups` | 42.992 ns |
 
-**5.8× faster.** The container keys on `TypeId`, which is already a
+**4.3× faster.** The container keys on `TypeId`, which is already a
 well-distributed 128-bit value, so hashing it again with SipHash is wasted work;
 a pass-through hasher folds it to 64 bits and stops.
 
 This benchmark exists because a comment in `context.rs` once claimed the win was
-"~2×". It was a guess, and it was wrong — the real figure is ~6×. Both numbers
+"~2×". It was a guess, and it was wrong — the real figure is 4.3×. Both numbers
 were assertions until someone measured, which is the whole reason
 [KEP-0000 §2](../kep/0000-principles.md#2-fast--measured-or-it-is-not-a-claim)
 exists.
+
+## Security — session store and presence
+
+`cargo bench -p kernway-security`
+
+| Benchmark | Time | Notes |
+|---|---|---|
+| `session_store/get` | 96.5 ns | Token lookup by ID |
+| `session_store/verify` | 1.68 µs | HMAC-SHA256 verify + lookup |
+| `presence_constant/heartbeat` | 65.2 ns | Record a heartbeat |
+| `presence_constant/is_online` | 47.3 ns | Check one user online |
+| `presence_read/count/100` | 94.7 ns | Count online users (100 tracked) |
+| `presence_read/count/10000` | 9.03 µs | Count online users (10 000 tracked) |
+| `presence_read/count/100000` | 146.6 µs | Count online users (100 000 tracked) |
+| `presence_read/online_list/100` | 7.73 µs | Collect online list (100 tracked) |
+| `presence_read/online_list/10000` | 2.01 ms | Collect online list (10 000 tracked) |
+| `presence_read/online_list/100000` | 34.2 ms | Collect online list (100 000 tracked) |
+
+Session lookup and single-user presence checks are sub-100 ns — fast enough to
+run on every authenticated request. Presence counting scales linearly with
+tracked users; `online_list` at 100 000 users (34 ms) is a bulk query, not a
+per-request operation. HMAC verify at 1.68 µs is the bottleneck for token
+validation, not the store lookup.
 
 ## HTTP codec
 
@@ -338,59 +384,59 @@ exists.
 
 | Benchmark | Time |
 |---|---|
-| `parse/minimal_get` | 207 ns |
-| `parse/browser_get_8_headers` | 705 ns |
-| `parse/json_post_with_body` | 331 ns |
-| `parse/incomplete_head` | 133 ns |
-| `encode/small_json_close` | 60 ns |
-| `encode/eight_headers` | 525 ns |
+| `parse/minimal_get` | 266.1 ns |
+| `parse/browser_get_8_headers` | 818.1 ns |
+| `parse/json_post_with_body` | 411.7 ns |
+| `parse/incomplete_head` | 165.4 ns |
+| `encode/small_json_close` | 68.1 ns |
+| `encode/eight_headers` | 571.6 ns |
 
-Parsing a realistic browser request with eight headers takes ~705 ns; encoding a
-small JSON response ~47 ns. `incomplete_head` is the partial-read path — the
-parser returns "need more bytes" in 133 ns rather than failing, which is what
+Parsing a realistic browser request with eight headers takes ~818 ns; encoding a
+small JSON response ~68 ns. `incomplete_head` is the partial-read path — the
+parser returns "need more bytes" in 165 ns rather than failing, which is what
 lets a connection accumulate a request across several reads.
 
 Encoding briefly regressed to 75 ns when `Body` split the head from the body
 (KEP-0002) — the head sized its own buffer, then the body was appended, risking a
 realloc between them. Fixed by sizing one buffer for head+body up front
-(`encode_head_into`), back to ~47 ns.
+(`encode_head_into`), back to ~68 ns.
 
-### Headers: HashMap vs the one-buffer structure — measured both ways
+## HTTP client — outbound codec
 
-`Response.headers` was a `HashMap<String, String>`; it is now the one-buffer
-`Headers`. The first attempt at this **regressed** (75 → 103 ns) because the
-encoder walked the headers twice — once to size the buffer, once to write. The
-fix is to size in O(1): `Headers::byte_len()` is the buffer length, so the head
-size is that plus a fixed per-pair overhead, no walk. With that, measured both
-structures on the same responses:
+`cargo bench -p kernway-http-client`
 
-| encode | HashMap | Headers (O(1) size) | winner |
+| Benchmark | Time | Notes |
+|---|---|---|
+| `http-client/url_parse` | 88.3 ns | Parse a URL into scheme/host/path/query |
+| `http-client/encode_request` | 568.2 ns | Encode a GET with 3 headers |
+| `http-client/parse_head/kernway` | 238.9 ns | Parse a response head (kernway parser) |
+| `http-client/parse_head/httparse` | 105.8 ns | Same, httparse (incumbent) |
+| `http-client/decode_chunked/256` | 57.3 ns | Decode one 256-byte chunk |
+| `http-client/decode_chunked/4096` | 520.0 ns | Decode one 4 KiB chunk |
+| `http-client/decode_chunked/whole/16384` | 1.59 µs | Collect 16 KiB chunked body |
+| `http-client/decode_chunked/whole/65536` | 6.32 µs | Collect 64 KiB chunked body |
+| `http-client/percent_encode` | 410.7 ns | Percent-encode a query string |
+
+The kernway response-head parser is **2.26× slower than httparse** (238.9 ns vs
+105.8 ns). httparse is the HTTP parsing specialist (`hyper`, `axum`, and most of
+the ecosystem use it); the gap is an open item on the client's optimisation list,
+not a claim that the client is production-grade today. On the request path the
+client is used once per outbound call, so 238 ns is not a bottleneck in practice
+— but it is honest to record where we trail.
+
+## Headers structure — HashMap vs one-buffer
+
+`cargo bench -p kernway-core --bench headers`
+
+| Benchmark | HashMap | Headers | Result |
 |---|---|---|---|
-| 1 header (JSON API) | 46.7 ns | 59.6 ns | HashMap by 13 ns |
-| 8 headers (static/secured page) | 885 ns | 525 ns | **Headers by 360 ns (1.7×)** |
-| `pipeline/static_get` (1–2 hdr) | 388 ns | 381 ns | tie |
+| `headers/build_iterate/*/5` | 428.42 ns | 348.61 ns | **Headers 1.23× faster** |
+| `headers/build_iterate/*/12` | 1148.2 ns | 734.63 ns | **Headers 1.56× faster** |
+| `headers/lookup_one/*_12` | 17.859 ns | 16.744 ns | Headers 1.07× faster |
 
-**Neither wins outright — the crossover is ~3–4 headers.** HashMap is faster for
-one or two (a single hash, one bucket); `Headers` is faster for many, and the
-gap there is far larger (360 ns vs 13 ns) because it sizes in O(1), allocates one
-buffer instead of two-per-pair, and writes once. Kernway serves static files
-(5 headers) and secured pages (8+), so the many-header case is the common one and
-the one that matters. `Headers` adopted.
-
-The 13 ns the JSON-API case gives up is one extra allocation (`Headers` grows two
-`Vec`s from empty on the first insert; `HashMap` grows one).
-
-**A small-buffer optimisation was tried to close it, and reverted.** Making
-`Fields` inline its bytes (64) and entries (5) — no heap for small sets — did
-help the response side (`pipeline/static_get` 383 → 334 ns, `encode/eight_headers`
-525 → 431 ns, fewer reallocs). But it *regressed the request side*: parsing an
-8-header browser request went 680 → 758 ns (+11%), because a set that big spills
-to the heap anyway *and* now pays to copy the larger inline-carrying struct
-around. Netted over a browser round trip (parse a big request, encode a small
-response) the loss outweighed the gain. The inline array's move cost ate the
-allocation it saved — the trade-off `SmallVec` always risks, measured here rather
-than assumed. Kept the two-`Vec` `Headers`; the 13 ns JSON-API gap stands, and
-SSO is not the way to close it.
+The one-buffer `Headers` wins once the set is more than tiny, and it stays at
+least competitive even on single-name lookup. That is why the codec and htmx
+paths lean on it instead of a `HashMap<String, String>`.
 
 ## Runtime — executor and scheduling
 
@@ -398,15 +444,15 @@ SSO is not the way to close it.
 
 | Benchmark | Time | Per unit |
 |---|---|---|
-| `block_on/ready_future` | 22 ns | — |
-| `spawn/10` | 2.40 µs | 240 ns/task |
-| `spawn/1000` | 65.5 µs | **65 ns/task** |
-| `wake_poll_cycle/1` | 47 ns | — |
-| `wake_poll_cycle/1000` | 27.5 µs | 27 ns/wake |
-| `timers/expired_sleep` | 53 ns | — |
+| `block_on/ready_future` | 43.1 ns | — |
+| `spawn/10` | 3.789 µs | 378.9 ns/task |
+| `spawn/1000` | 152.0 µs | **152.0 ns/task** |
+| `wake_poll_cycle/1` | 78.7 ns | — |
+| `wake_poll_cycle/1000` | 36.636 µs | 36.6 ns/wake |
+| `timers/expired_sleep` | 87.9 ns | — |
 
-Spawning scales linearly and cheaply: ~65 ns per task at a thousand tasks. A
-wake-and-poll cycle is ~27 ns amortised. These are the operations the runtime
+Spawning scales linearly and cheaply: ~152 ns per task at a thousand tasks. A
+wake-and-poll cycle is ~37 ns amortised. These are the operations the runtime
 does on every connection and every readiness event, so their being tens of
 nanoseconds is what keeps the per-request floor low.
 
@@ -465,7 +511,7 @@ not incidental** — each is a known item, already written down as future work:
 - **Download (~2×).** The file streams through userspace with a `spawn_blocking`
   hop *per chunk*. tower-http and actix do not `sendfile` either (both use
   `tokio::fs`), so the gap here is not zero-copy — it is the per-chunk thread-pool
-  hop plus the conservative 256 KiB default (71% of Kernway's own peak; see *File
+  hop plus the conservative 256 KiB default (87% of Kernway's own peak; see *File
   streaming* above). Integrated async file reads, a bigger default, or `sendfile`
   ([KEP-0002] future work) each close part of it.
 - **Upload (~2.6×).** Same shape inbound: `spool_body` does a `spawn_blocking`
