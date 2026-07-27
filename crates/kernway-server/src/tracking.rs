@@ -7,7 +7,7 @@
 //! - [`BanFilter`] rejects a request whose IP / subnet / User-Agent is on a
 //!   [`BanList`], with a default `403` or a caller-supplied response.
 //!
-//! Both resolve the IP the same safe way ([`client_ip`]): the socket peer unless it
+//! Both resolve the IP the same safe way (`client_ip`): the socket peer unless it
 //! is a trusted proxy, then the first untrusted `X-Forwarded-For` hop.
 
 use std::net::IpAddr;
@@ -156,7 +156,7 @@ fn banned_response() -> Response {
         .body(br#"{"status":403,"title":"Forbidden","detail":"access denied"}"#.to_vec())
 }
 
-/// Records the current request into an [`Activity`] store (feature = `presence`), so
+/// Records the current request into an `Activity` store (feature = `presence`), so
 /// an admin can see a live "who is on the site and where" list. Reads the
 /// [`RequestMeta`] a `VisitorTracking` upstream put in the scope and the
 /// `SecurityContext` an auth middleware set — the identity is the logged-in user if

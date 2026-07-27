@@ -23,7 +23,7 @@ const KEY_SUBNET: &str = "kw:bans:subnet";
 const KEY_UA_EXACT: &str = "kw:bans:ua-exact";
 const KEY_UA_CONTAINS: &str = "kw:bans:ua-contains";
 
-/// The durable copy of the ban list. Mutations mirror what [`Bans`](crate::Bans)
+/// The durable copy of the ban list. Mutations mirror what [`Bans`]
 /// exposes in memory, so an admin handler updates both: the in-memory list for the
 /// live check, and this store so the ban survives a restart.
 pub struct RedisBanStore {

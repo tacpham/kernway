@@ -425,7 +425,7 @@ pub fn inject(args: TokenStream, input: TokenStream) -> TokenStream {
 /// HTTP controller — Spring's `@Controller`.
 ///
 /// On an **`impl` block**, `#[controller("/prefix")]` turns each `#[route(METHOD,
-/// "/path")]` method into a handler and implements [`Controller`], so
+/// "/path")]` method into a handler and implements `Controller`, so
 /// `AppBuilder::controller(Arc::new(c))` mounts them all. A method is
 /// `async fn name(&self, req: Request) -> Response`; `#[require_role("ROLE")]` on it
 /// guards the route (403 when the request's `SecurityContext` lacks the role).
@@ -433,9 +433,9 @@ pub fn inject(args: TokenStream, input: TokenStream) -> TokenStream {
 /// ```rust,ignore
 /// #[controller("/users")]
 /// impl UserController {
-///     #[route(GET, "/{id}")]                 fn get(&self, req: Request) -> Response { … }
+///     #[route(GET, "/{id}")]                 fn get(&self, req: Request) -> Response { todo!() }
 ///     #[route(DELETE, "/{id}")] #[require_role("ADMIN")]
-///                                            fn delete(&self, req: Request) -> Response { … }
+///                                            fn delete(&self, req: Request) -> Response { todo!() }
 /// }
 /// ```
 ///

@@ -289,7 +289,7 @@ fn split_qvalue(part: &str) -> (&str, f32) {
 /// compressed — a second pass gains nothing and often grows the file — so the
 /// server does not even look for a variant of it, saving a `stat` per request.
 ///
-/// Kept as a tiny local predicate rather than importing [`kernway_compress`]: this
+/// Kept as a tiny local predicate rather than importing `kernway_compress`: this
 /// crate is zero-dependency by design (KEP-0000 §1), and pulling in the compression
 /// *codecs* just to share a 15-line pure function is the wrong trade. The server's
 /// compression middleware has the canonical copy; the two agree by construction.

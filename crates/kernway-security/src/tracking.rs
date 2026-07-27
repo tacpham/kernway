@@ -11,7 +11,7 @@
 //! Behind `client → nginx → kernway`, the socket peer is *nginx*, not the client;
 //! the real client is in `X-Forwarded-For`. But that header is **client-settable**,
 //! so trusting it blindly lets anyone spoof any IP (bypassing rate limits, allow-
-//! lists, geo, logs). [`client_ip`] trusts it **only** when the peer is a configured
+//! lists, geo, logs). `client_ip` trusts it **only** when the peer is a configured
 //! trusted proxy, and then takes the first *untrusted* address walking the header
 //! right-to-left — the address a spoofer cannot push past the real proxy hops.
 

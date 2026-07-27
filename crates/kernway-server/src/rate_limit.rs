@@ -37,7 +37,7 @@
 //! ## From config
 //!
 //! [`RateLimit::from_config`] reads the numbers from `kernway.properties`, with the
-//! [`DEFAULT_REQUESTS`]/[`DEFAULT_PERIOD_SECS`] defaults, so ops can tune limits
+//! `DEFAULT_REQUESTS`/`DEFAULT_PERIOD_SECS` defaults, so ops can tune limits
 //! without a rebuild:
 //!
 //! ```properties
@@ -164,7 +164,7 @@ impl RateLimit {
     }
 
     /// Build from `kernway.ratelimit.*` config (see the module docs), falling back to
-    /// [`DEFAULT_REQUESTS`]/[`DEFAULT_PERIOD_SECS`]. Reads `burst` and
+    /// `DEFAULT_REQUESTS`/`DEFAULT_PERIOD_SECS`. Reads `burst` and
     /// `trusted-proxies` if present; auto-ban is only wired by
     /// [`from_config_with_bans`](Self::from_config_with_bans) (it needs a `Bans`).
     #[must_use]

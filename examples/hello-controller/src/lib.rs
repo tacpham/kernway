@@ -127,7 +127,7 @@ pub fn build_app_tracked(addr: &str, bans: Bans) -> KernwayApp {
 }
 
 /// Live activity: `VisitorTracking` + `ActivityTracking` record every request into a
-/// shared [`InMemoryActivity`], so an admin view can list who is on the site and the
+/// shared `InMemoryActivity`, so an admin view can list who is on the site and the
 /// page each is on. The caller keeps the store to query `active(now)`.
 #[cfg(feature = "presence")]
 pub fn build_app_activity(addr: &str, activity: std::sync::Arc<kernway_server::InMemoryActivity>) -> KernwayApp {

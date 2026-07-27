@@ -41,34 +41,32 @@
 //!         └──────────── Response ◄───────────────┘
 //! ```
 //!
-//! A [`Layer`] wraps the rest of the chain rather than sitting in a list: work
+//! A `Layer` wraps the rest of the chain rather than sitting in a list: work
 //! before `next.call(req)` runs on the way in, work after it runs on the way
 //! out, and *not* calling it rejects the request early. That is how auth and
-//! rate limiting short-circuit without a special case in the dispatcher.
-//!
-//! [`Layer`]: layer::Layer
+//! rate limiting short-circuit without a special case in the dispatcher. The
+//! `Layer`/`Next` types themselves live in `kernway-server` now (KEP-0006); this
+//! crate keeps only the shared [`BoxFuture`](layer::BoxFuture) alias.
 //!
 //! ## What lives here
 //!
 //! | Module | Defines | Spring analogue |
 //! |---|---|---|
-//! | [`request`] | [`Request`], [`FromRequest`], [`HttpVersion`] | `HttpServletRequest`, argument resolvers |
+//! | [`request`] | [`Request`], [`HttpVersion`] | `HttpServletRequest`, argument resolvers |
 //! | [`response`] | [`Response`], [`IntoResponse`] | `HttpServletResponse`, `HttpMessageConverter` |
 //! | [`fields`] | [`Headers`], [`QueryParams`] | `HttpHeaders` |
-//! | [`layer`] | [`Layer`], [`Next`] | `OncePerRequestFilter`, `FilterChain` |
+//! | [`layer`] | [`BoxFuture`](layer::BoxFuture) | `OncePerRequestFilter`, `FilterChain` |
 //! | [`error`] | [`KernwayError`], [`StatusCode`] | `HttpStatus` |
 //! | [`db`] | [`DbPool`], [`Connection`] | `javax.sql.DataSource` |
 //! | [`template`] | [`TemplateEngine`], [`Value`], [`ToValue`] | `ViewResolver`, `Model` |
 //! | [`plugin`] | [`KernwayPlugin`] | `ApplicationContextInitializer` |
 //!
 //! [`Request`]: request::Request
-//! [`FromRequest`]: request::FromRequest
 //! [`HttpVersion`]: request::HttpVersion
 //! [`Response`]: response::Response
 //! [`IntoResponse`]: response::IntoResponse
 //! [`Headers`]: fields::Headers
 //! [`QueryParams`]: fields::QueryParams
-//! [`Next`]: layer::Next
 //! [`KernwayError`]: error::KernwayError
 //! [`StatusCode`]: error::StatusCode
 //! [`DbPool`]: db::DbPool
