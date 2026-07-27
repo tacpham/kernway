@@ -65,7 +65,7 @@ impl LoginGuard {
     /// Whether `key` may attempt a login now — `false` while locked out.
     #[must_use]
     pub fn check_at(&self, key: &str, now: u64) -> bool {
-        self.attempts.read().unwrap().get(key).map_or(true, |a| now >= a.locked_until)
+        self.attempts.read().unwrap().get(key).is_none_or(|a| now >= a.locked_until)
     }
 
     /// Record a failed login for `key`. Returns `Some(locked_until)` (unix seconds) if

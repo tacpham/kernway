@@ -104,7 +104,7 @@ impl Filter {
     pub fn with_target(mut self, prefix: impl Into<String>, level: Level) -> Self {
         self.targets.push((prefix.into(), level));
         // Longest prefix first, so `allows` takes the most specific match.
-        self.targets.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        self.targets.sort_by_key(|t| std::cmp::Reverse(t.0.len()));
         self
     }
 

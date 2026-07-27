@@ -1,3 +1,4 @@
+#![allow(missing_docs)] // a benchmark binary, not public API
 //! Bean resolution — the DI hot path.
 //!
 //! `AppContext::get` runs on every `#[inject]` field of every component built,

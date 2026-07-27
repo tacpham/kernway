@@ -1,3 +1,4 @@
+#![allow(missing_docs)] // a benchmark binary, not public API
 //! The recurring problem: a small set of short-keyed HTTP fields, built then
 //! iterated (to encode) or looked up. `Headers` is the one-buffer structure
 //! Kernway wrote for it; `HashMap<String, String>` is what `Response.headers`

@@ -1,3 +1,4 @@
+#![allow(missing_docs, clippy::doc_overindented_list_items)] // a benchmark binary
 //! The two primitives the auth path spends its time on, in one process.
 //!
 //! `authenticate` (KEP-0004) does two things of note per request: verify the

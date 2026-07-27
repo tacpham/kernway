@@ -322,7 +322,7 @@ fn eval_util<'m>(object: &str, method: &str, args: &[EvalVal<'m>]) -> EvalVal<'m
         // #lists
         ("lists", "size") => EvalVal::Num(args.first().and_then(EvalVal::as_seq).map_or(0, <[_]>::len) as f64),
         ("lists", "isEmpty") => {
-            EvalVal::Bool(args.first().and_then(EvalVal::as_seq).map_or(true, <[_]>::is_empty))
+            EvalVal::Bool(args.first().and_then(EvalVal::as_seq).is_none_or(<[_]>::is_empty))
         }
         ("lists", "contains") => {
             let found = args

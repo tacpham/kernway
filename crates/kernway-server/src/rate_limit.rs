@@ -217,7 +217,7 @@ impl RateLimit {
 
         // Occasionally evict idle buckets so the map does not grow without bound.
         state.seen = state.seen.wrapping_add(1);
-        if state.seen % 4096 == 0 {
+        if state.seen.is_multiple_of(4096) {
             state.buckets.retain(|_, b| now_ms.saturating_sub(b.last_ms) < IDLE_EVICT_MS);
         }
 

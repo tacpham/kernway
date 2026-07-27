@@ -1,3 +1,4 @@
+#![allow(missing_docs)] // a benchmark binary, not public API
 //! Routing — runs once per request, before any handler does anything.
 //!
 //! Parsing and encoding are now measured; routing sits between them and was

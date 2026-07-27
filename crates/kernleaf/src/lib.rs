@@ -107,6 +107,10 @@ const MAX_FRAGMENT_DEPTH: u16 = 32;
 
 /// A node in the parsed template. This *is* the cached IR: `add` parses to it
 /// once, `render` walks it.
+// `Element` is the large variant by design — boxing it would add a pointer chase
+// to every element on the render hot path to shrink the rarer text nodes, the
+// wrong trade for an IR that is walked far more often than it is built.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 enum Dom {
     /// Literal text with no inline expressions — emitted verbatim. The common

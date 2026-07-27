@@ -119,10 +119,15 @@ pub struct AppBuilder {
     /// The application config; loaded from disk + env at `build` if not provided.
     config:       Option<Config>,
     /// Deferred typed-config bean registrations, run once the config is resolved.
-    config_beans: Vec<Box<dyn FnOnce(&Config, &mut AppContext)>>,
+    config_beans: Vec<ConfigBean>,
     /// Custom response for a caught handler panic (`on_panic`); default 500 if unset.
-    panic_handler: Option<Box<dyn Fn(&str) -> Response + Send + Sync>>,
+    panic_handler: Option<PanicFn>,
 }
+
+/// A deferred typed-config bean registration, run once the config is resolved.
+type ConfigBean = Box<dyn FnOnce(&Config, &mut AppContext)>;
+/// A caller-supplied response builder for a caught handler panic.
+type PanicFn = Box<dyn Fn(&str) -> Response + Send + Sync>;
 
 impl AppBuilder {
     /// Start a builder with the defaults: `0.0.0.0:8080`, one shard per
@@ -583,6 +588,10 @@ impl KernwayApp {
 ///   goes quiet is dropped instead of pinning a task and an fd forever;
 /// - [`KeepAliveConfig::max_requests`] — an upper bound per connection, so
 ///   buffers and any per-connection state are eventually reclaimed.
+// A connection handler threads the shared per-server state (router, context,
+// middleware, static files, and the four tuning configs) down one call; grouping
+// them into a struct would just move the same fields behind one more indirection.
+#[allow(clippy::too_many_arguments)]
 async fn serve_connection(
     mut stream: AsyncTcpStream,
     router: Arc<Router>,
@@ -750,7 +759,7 @@ async fn spool_body(
     idle_timeout: Duration,
 ) -> io::Result<kernway_core::request::SpooledBody> {
     use std::io::Write; // for `file.flush()` on the blocking pool
-    let blocking_gone = || io::Error::new(io::ErrorKind::Other, "blocking pool unavailable");
+    let blocking_gone = || io::Error::other("blocking pool unavailable");
     let path = upload_temp_path(&upload.temp_dir);
 
     // Create the temp file on the blocking pool.
@@ -813,7 +822,7 @@ async fn write_all_blocking(file: std::fs::File, data: Vec<u8>) -> io::Result<st
     .await
     {
         Some(result) => result,
-        None => Err(io::Error::new(io::ErrorKind::Other, "blocking pool unavailable")),
+        None => Err(io::Error::other("blocking pool unavailable")),
     }
 }
 
@@ -964,9 +973,9 @@ impl StaticOutcome {
             StaticOutcome::NotModified { etag, vary_encoding } => {
                 let mut r = Response::new(StatusCode::NOT_MODIFIED);
                 r.headers.insert("etag", &etag);
-                r.headers.insert("cache-control", &"no-cache".to_string());
+                r.headers.insert("cache-control", "no-cache");
                 if vary_encoding {
-                    r.headers.insert("vary", &"Accept-Encoding".to_string());
+                    r.headers.insert("vary", "Accept-Encoding");
                 }
                 r
             }
@@ -978,19 +987,19 @@ impl StaticOutcome {
                 r.headers.insert("etag", &etag);
                 // `no-cache` means "cache, but revalidate every time" — the browser
                 // re-asks with If-None-Match and gets a 304 when nothing changed.
-                r.headers.insert("cache-control", &"no-cache".to_string());
+                r.headers.insert("cache-control", "no-cache");
                 // The extension-derived type is authoritative; stop the browser sniffing.
-                r.headers.insert("x-content-type-options", &"nosniff".to_string());
+                r.headers.insert("x-content-type-options", "nosniff");
                 // Advertise range support so clients (video players, resumers) ask.
-                r.headers.insert("accept-ranges", &"bytes".to_string());
+                r.headers.insert("accept-ranges", "bytes");
                 // A precompressed variant: the body is `.br`/`.gz` bytes, but the
                 // Content-Type stayed the *original* type — the client decodes,
                 // then interprets. `Content-Encoding` tells it how.
                 if let Some(enc) = encoding {
-                    r.headers.insert("content-encoding", &enc.to_string());
+                    r.headers.insert("content-encoding", enc);
                 }
                 if vary_encoding {
-                    r.headers.insert("vary", &"Accept-Encoding".to_string());
+                    r.headers.insert("vary", "Accept-Encoding");
                 }
                 r
             }
@@ -2166,7 +2175,7 @@ mod static_file_tests {
         response
             .lines()
             .find(|l| l.to_ascii_lowercase().starts_with("etag:"))
-            .and_then(|l| l.splitn(2, ':').nth(1))
+            .and_then(|l| l.split_once(':').map(|(_, v)| v))
             .map(|v| v.trim().to_string())
             .expect("response has an etag")
     }

@@ -1,3 +1,4 @@
+#![allow(missing_docs)] // a benchmark binary, not public API
 //! The per-request authorization cost: how much a `SecurityLayer` policy adds, and
 //! how it scales with the number of rules.
 //!

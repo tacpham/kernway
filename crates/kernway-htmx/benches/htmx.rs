@@ -1,3 +1,4 @@
+#![allow(missing_docs)] // a benchmark binary, not public API
 //! Head-to-head: kernway-htmx vs the Rust incumbents.
 //!
 //! The question this answers is the one that decides whether the crate earns its

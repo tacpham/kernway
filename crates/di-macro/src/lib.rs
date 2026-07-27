@@ -683,7 +683,7 @@ pub fn derive_validate(input: TokenStream) -> TokenStream {
     let fields = match &input.data {
         Data::Struct(DataStruct { fields: Fields::Named(FieldsNamed { named, .. }), .. }) => named,
         _ => {
-            return syn::Error::new_spanned(&name, "#[derive(Validate)] requires a struct with named fields")
+            return syn::Error::new_spanned(name, "#[derive(Validate)] requires a struct with named fields")
                 .to_compile_error()
                 .into();
         }

@@ -1009,11 +1009,14 @@ enum BodyPlan {
     UntilClose,
 }
 
+/// The header `(name-range, value-range)` pairs a parsed head yields.
+type HeaderSpans = Vec<(Range<usize>, Range<usize>)>;
+
 /// Parse the status code and the header `(name, value)` byte ranges — **no allocation
 /// per header** (the earlier version allocated two lowercased `String`s each) and no
 /// whole-block UTF-8 scan (the status code is read from bytes; header bytes are
 /// validated as UTF-8 only when accessed). This is the parser's hot path.
-fn parse_head_spans(block: &[u8]) -> Result<(u16, Vec<(Range<usize>, Range<usize>)>), HttpError> {
+fn parse_head_spans(block: &[u8]) -> Result<(u16, HeaderSpans), HttpError> {
     let line_end = find(block, b"\r\n").ok_or_else(|| HttpError::Protocol("no status line".into()))?;
     let status = parse_status(&block[..line_end])?;
 

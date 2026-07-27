@@ -1,3 +1,4 @@
+#![allow(missing_docs)] // a benchmark binary, not public API
 //! kernleaf vs minijinja — the head-to-head that decides whether the hand-written
 //! engine earns its place (KEP-0000 §2), and shows that syntax is not a speed
 //! question.
