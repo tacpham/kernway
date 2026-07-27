@@ -1,0 +1,17 @@
+version: "3.8"
+services:
+  meilisearch:
+    image: getmeili/meilisearch:v1.7
+    ports:
+      - "7700:7700"
+    environment:
+      MEILI_MASTER_KEY: "testmasterkey"
+      MEILI_NO_ANALYTICS: "true"
+    # Data is ephemeral — each test run starts fresh
+    tmpfs:
+      - /meili_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7700/health"]
+      interval: 2s
+      timeout: 5s
+      retries: 15

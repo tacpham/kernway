@@ -1606,13 +1606,13 @@ dependencies = [
 name = "kernway-orm-meilisearch"
 version = "0.1.0"
 dependencies = [
+ "kernway-http-client",
  "kernway-orm-core",
  "kernway-orm-macro",
  "rt-core",
  "serde",
  "serde_json",
  "thiserror",
- "ureq",
 ]
 
 [[package]]
@@ -1728,6 +1728,21 @@ name = "kernway-static"
 version = "0.1.0"
 dependencies = [
  "criterion",
+]
+
+[[package]]
+name = "kernway-tcp"
+version = "0.1.0"
+dependencies = [
+ "rt-core",
+ "rt-net",
+]
+
+[[package]]
+name = "kernway-udp"
+version = "0.1.0"
+dependencies = [
+ "rt-core",
 ]
 
 [[package]]
@@ -2631,7 +2646,6 @@ version = "0.23.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c54fcab019b409d04215d3a17cb438fd7fbf192ee61461f20f4fe18704bc138"
 dependencies = [
- "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -3327,24 +3341,6 @@ name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
-
-[[package]]
-name = "ureq"
-version = "2.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02d1a66277ed75f640d608235660df48c8e3c19f3b4edb6a263315626cc3c01d"
-dependencies = [
- "base64 0.22.1",
- "flate2",
- "log",
- "once_cell",
- "rustls",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "url",
- "webpki-roots 0.26.11",
-]
 
 [[package]]
 name = "url"
