@@ -9,6 +9,32 @@
 > independence" in `ARCHITECTURE.md`.  
 > **Compatibility note**: see [kernway-orm-jpa-compat.md](kernway-orm-jpa-compat.md) — ~85% of JPA features, 15% redesigned around Rust idioms.
 
+## Status (2025-07-27)
+
+What is actually built vs what this document describes as planned:
+
+| Item | Built | Notes |
+|---|---|---|
+| `Entity` trait | ✅ | `table_name`, `id`, `columns` — sync, as specified |
+| `Repository<T>` trait | ✅ | **All methods are synchronous** — the async API below is planned only |
+| `QueryBuilder<T>` trait | ✅ | Named filter methods (`filter_eq`, `filter_ne`, …) — **not** `filter(predicate)` |
+| `OrmError` | ✅ | All variants — as specified |
+| `Page<T>` | ✅ | As specified |
+| `OrmTransaction` trait | ❌ not started | Planned |
+| `#[entity]` / `#[id]` / `#[column]` | ✅ | See `kernway-orm-macro.md` |
+| `#[id(strategy = "uuid")]` | ❌ not started | Planned |
+| `#[column(default)` / `#[column(auto)]` | ❌ not started | Planned |
+| `#[one_to_many]` / `#[many_to_one]` / `#[many_to_many]` | ❌ not started | Planned |
+| `#[repository]` derive | ❌ not started | Planned |
+| `kernway-orm-sqlite` driver | ✅ | rusqlite, sync — see `kernway-orm-sqlite.md` |
+| `kernway-orm-memory` driver | ✅ | HashMap, sync — see `kernway-orm-memory.md` |
+| `kernway-orm-diesel` | ❌ not started | Charter exists; no code |
+| `kernway-orm-sqlx` | ❌ not started | Planned |
+
+> **Important**: The trait definitions below show the **current synchronous API**.
+> A future async version (when Rust's `async fn` in traits stabilises) is noted
+> inline. Do not write drivers expecting `async fn` — they will not compile.
+
 ## Standards
 
 - JSR-338 (JPA 2.2) — design inspiration (non-binding)
@@ -47,35 +73,22 @@ pub trait Entity: Send + Sync + Sized + 'static {
 ```rust
 /// CRUD operations for a single Entity type.
 /// Equivalent to JpaRepository<T, ID> in Spring Data JPA.
+///
+/// All methods are SYNCHRONOUS (blocking). Async callers use spawn_blocking.
+/// The async API is planned for a future release when async fn in traits stabilises.
 pub trait Repository<T: Entity>: Send + Sync {
     // --- Read ---
-    async fn find_by_id(&self, id: &T::Id)
-        -> Result<Option<T>, OrmError>;
-
-    async fn find_all(&self)
-        -> Result<Vec<T>, OrmError>;
-
-    async fn find_all_by_ids(&self, ids: &[T::Id])
-        -> Result<Vec<T>, OrmError>;
-
-    async fn count(&self)
-        -> Result<u64, OrmError>;
-
-    async fn exists_by_id(&self, id: &T::Id)
-        -> Result<bool, OrmError>;
+    fn find_by_id(&self, id: &T::Id) -> Result<Option<T>, OrmError>;
+    fn find_all(&self) -> Result<Vec<T>, OrmError>;
+    fn find_all_by_ids(&self, ids: &[T::Id]) -> Result<Vec<T>, OrmError>;
+    fn count(&self) -> Result<u64, OrmError>;
+    fn exists_by_id(&self, id: &T::Id) -> Result<bool, OrmError>;
 
     // --- Write ---
-    async fn save(&self, entity: T)
-        -> Result<T, OrmError>;
-
-    async fn save_all(&self, entities: Vec<T>)
-        -> Result<Vec<T>, OrmError>;
-
-    async fn delete_by_id(&self, id: &T::Id)
-        -> Result<(), OrmError>;
-
-    async fn delete_all_by_ids(&self, ids: &[T::Id])
-        -> Result<(), OrmError>;
+    fn save(&self, entity: T) -> Result<T, OrmError>;
+    fn save_all(&self, entities: Vec<T>) -> Result<Vec<T>, OrmError>;
+    fn delete_by_id(&self, id: &T::Id) -> Result<(), OrmError>;
+    fn delete_all_by_ids(&self, ids: &[T::Id]) -> Result<(), OrmError>;
 
     // --- Query builder entry point ---
     fn query(&self) -> Box<dyn QueryBuilder<T>>;
@@ -85,47 +98,40 @@ pub trait Repository<T: Entity>: Send + Sync {
 ### `QueryBuilder<T>`
 
 ```rust
-/// Fluent query API.
+/// Fluent query API. All methods are SYNCHRONOUS.
 /// Equivalent to CriteriaBuilder + TypedQuery in JPA.
+///
+/// Filters combine with AND. There is no OR — use raw queries when needed.
 pub trait QueryBuilder<T: Entity>: Send {
-    /// Filter — WHERE clause.
-    fn filter(self: Box<Self>, predicate: Box<dyn EntityPredicate<T>>)
-        -> Box<dyn QueryBuilder<T>>;
+    // --- Filters ---
+    fn filter_eq(self: Box<Self>, field: &'static str, value: &str) -> Box<dyn QueryBuilder<T>>;
+    fn filter_ne(self: Box<Self>, field: &'static str, value: &str) -> Box<dyn QueryBuilder<T>>;
+    fn filter_gt(self: Box<Self>, field: &'static str, value: &str) -> Box<dyn QueryBuilder<T>>;
+    fn filter_lt(self: Box<Self>, field: &'static str, value: &str) -> Box<dyn QueryBuilder<T>>;
+    /// `%` and `_` carry SQL meaning. Drivers implement this as LIKE.
+    fn filter_like(self: Box<Self>, field: &'static str, pattern: &str) -> Box<dyn QueryBuilder<T>>;
 
-    /// ORDER BY ASC
-    fn order_by_asc(self: Box<Self>, field: &'static str)
-        -> Box<dyn QueryBuilder<T>>;
+    // --- Ordering ---
+    fn order_by_asc(self: Box<Self>, field: &'static str) -> Box<dyn QueryBuilder<T>>;
+    fn order_by_desc(self: Box<Self>, field: &'static str) -> Box<dyn QueryBuilder<T>>;
 
-    /// ORDER BY DESC
-    fn order_by_desc(self: Box<Self>, field: &'static str)
-        -> Box<dyn QueryBuilder<T>>;
+    // --- Pagination ---
+    fn limit(self: Box<Self>, n: u64) -> Box<dyn QueryBuilder<T>>;
+    fn offset(self: Box<Self>, n: u64) -> Box<dyn QueryBuilder<T>>;
 
-    /// LIMIT
-    fn limit(self: Box<Self>, n: u64)
-        -> Box<dyn QueryBuilder<T>>;
+    // --- Eager loading (avoid N+1) ---
+    fn with(self: Box<Self>, relation: &'static str) -> Box<dyn QueryBuilder<T>>;
 
-    /// OFFSET
-    fn offset(self: Box<Self>, n: u64)
-        -> Box<dyn QueryBuilder<T>>;
-
-    /// Eager-load a relationship — avoids N+1.
-    fn with(self: Box<Self>, relation: &'static str)
-        -> Box<dyn QueryBuilder<T>>;
-
-    // --- Terminal operations ---
-    async fn fetch_all(self: Box<Self>)
-        -> Result<Vec<T>, OrmError>;
-
-    async fn fetch_one(self: Box<Self>)
-        -> Result<Option<T>, OrmError>;
-
-    async fn fetch_count(self: Box<Self>)
-        -> Result<u64, OrmError>;
-
-    async fn fetch_page(self: Box<Self>, page: u64, size: u64)
-        -> Result<Page<T>, OrmError>;
+    // --- Terminal operations (synchronous, execute immediately) ---
+    fn fetch_all(self: Box<Self>) -> Result<Vec<T>, OrmError>;
+    fn fetch_one(self: Box<Self>) -> Result<Option<T>, OrmError>;
+    fn fetch_count(self: Box<Self>) -> Result<u64, OrmError>;
+    fn fetch_page(self: Box<Self>, page: u64, size: u64) -> Result<Page<T>, OrmError>;
 }
 ```
+
+> **Planned (not yet built)**: a generic `filter(predicate: Box<dyn EntityPredicate<T>>)` API
+> for complex predicates. Current drivers use the named methods above.
 
 ### `OrmTransaction`
 
@@ -243,13 +249,13 @@ pub struct Page<T> {
 
 ## Implementation Registry
 
-Existing / in-progress implementations:
-
 | Crate | Database | Async | Status |
 |---|---|---|---|
-| `kernway-orm-diesel` | PostgreSQL, MySQL, SQLite | spawn_blocking | Official — v0.4 |
-| `kernway-orm-sqlx` | PostgreSQL, MySQL, SQLite | Native async | Community |
-| `kernway-orm-mongodb` | MongoDB | Native async | Community |
+| `kernway-orm-memory` | in-memory HashMap | sync (no I/O) | ✅ Built — see `kernway-orm-memory.md` |
+| `kernway-orm-sqlite` | SQLite (rusqlite) | sync + spawn_blocking | ✅ Built — see `kernway-orm-sqlite.md` |
+| `kernway-orm-diesel` | PostgreSQL, MySQL, SQLite | spawn_blocking | ❌ Charter only — no code |
+| `kernway-orm-sqlx` | PostgreSQL, MySQL, SQLite | Native async | ❌ Planned — no code |
+| `kernway-orm-mongodb` | MongoDB | Native async | ❌ Planned — no code |
 
 ---
 
