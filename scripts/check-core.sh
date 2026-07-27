@@ -11,6 +11,9 @@
 # Advisory by design: it reports, it never blocks. Exit code is always 0 unless
 # the script itself is misused, so a Stop hook cannot wedge a session.
 #
+# cargo runs in Docker (shared with kw.sh — same image and volumes), so it never
+# rebuilds a host-native target/. Set KW_NATIVE=1 to use a local toolchain.
+#
 # Usage:
 #   scripts/check-core.sh              # only if core changed since HEAD
 #   scripts/check-core.sh --all        # run regardless of what changed
@@ -20,6 +23,30 @@
 
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 0
+
+# --- cargo runs in Docker, everything else on the host -------------------
+# The heavy steps (test/doc/clippy) compile in the same Linux container and
+# named volumes kw.sh uses, so this shares one target/ with the rest of the
+# workflow instead of rebuilding a host-native one. git/grep/awk/python3 stay
+# on the host (they need the working tree and are absent from rust:slim).
+# Override with KW_NATIVE=1 to fall back to a local toolchain.
+KW_IMAGE="${KW_IMAGE:-rust:1-bookworm}"
+if [[ "${KW_NATIVE:-0}" != "1" ]] && command -v docker >/dev/null 2>&1; then
+  cargo() {
+    # clippy/rustfmt are not in the base image's active toolchain (only a shim is),
+    # so add them just for those subcommands — kept off the frequent test/doc path.
+    local ensure=""
+    case "${1:-}" in
+      clippy|fmt) ensure='rustup component add clippy rustfmt >/dev/null 2>&1 || true; ' ;;
+    esac
+    docker run --rm --init \
+      -v "$PWD:/workspace" \
+      -v "kernway-cargo-registry:/usr/local/cargo/registry" \
+      -v "kernway-target:/workspace/target" \
+      -w /workspace \
+      "$KW_IMAGE" bash -c "${ensure}exec cargo \"\$@\"" _ "$@"
+  }
+fi
 
 # Crates whose API and speed are load-bearing for everything else.
 CORE_CRATES=(kernway-core di-core rt-core rt-net kernway-http kernway-orm-core kernway-cache-core)

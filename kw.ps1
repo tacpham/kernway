@@ -17,8 +17,10 @@ param(
     [Parameter(Position=1)] [string] $Arg = ""
 )
 
-# Docker image — use the official one, no custom image needed
-$IMAGE = "rust:1.78-slim-bookworm"
+# Docker image — official, no custom image needed. Must be >= 1.85: the dep tree
+# (zeroize 1.9, via ring/rustls) needs edition2024, which older Cargo rejects.
+# The `1` tag tracks the newest 1.x. Kept in sync with kw.sh.
+$IMAGE = "rust:1-bookworm"
 
 # ============================================================
 # Corporate SSL proxy — export Windows CA certs into the container
@@ -45,8 +47,12 @@ function Export-WindowsCerts {
     Write-Host "  → Exported $($certs.Count) certs to $CERT_FILE" -ForegroundColor DarkGray
 }
 
-# Volume cache — persisted between runs (avoids re-downloading dependencies)
-$CACHE_VOL = "kernway-cargo-cache"
+# Volume caches — persisted between runs. Registry avoids re-downloading deps;
+# target/ lives in its own volume (not the host bind-mount) so the container
+# build is incremental and isolated from any host-native target/. Kept in sync
+# with kw.sh.
+$CACHE_VOL  = "kernway-cargo-cache"
+$TARGET_VOL = "kernway-target"
 
 # Base docker run command
 function Invoke-Docker {
@@ -55,6 +61,7 @@ function Invoke-Docker {
     docker run --rm `
         -v "${PWD}:/workspace" `
         -v "${CACHE_VOL}:/usr/local/cargo/registry" `
+        -v "${TARGET_VOL}:/workspace/target" `
         -v "${CERT_FILE}:/tmp/corp-ca.pem" `
         -e SSL_CERT_FILE=/tmp/corp-ca.pem `
         -e CARGO_HTTP_CAINFO=/tmp/corp-ca.pem `
@@ -62,6 +69,24 @@ function Invoke-Docker {
         -w /workspace `
         $IMAGE `
         cargo @CargoArgs
+}
+
+# Like Invoke-Docker, but adds clippy/rustfmt first (the base image ships only a
+# shim, not the components). Used by the lint/format commands.
+function Invoke-DockerTooled {
+    param([string[]] $CargoArgs)
+    Export-WindowsCerts
+    docker run --rm `
+        -v "${PWD}:/workspace" `
+        -v "${CACHE_VOL}:/usr/local/cargo/registry" `
+        -v "${TARGET_VOL}:/workspace/target" `
+        -v "${CERT_FILE}:/tmp/corp-ca.pem" `
+        -e SSL_CERT_FILE=/tmp/corp-ca.pem `
+        -e CARGO_HTTP_CAINFO=/tmp/corp-ca.pem `
+        -e CURL_CA_BUNDLE=/tmp/corp-ca.pem `
+        -w /workspace `
+        $IMAGE `
+        bash -c 'rustup component add clippy rustfmt >/dev/null 2>&1 || true; exec cargo "$@"' _ @CargoArgs
 }
 
 switch ($Command) {
@@ -87,12 +112,12 @@ switch ($Command) {
 
     "clippy" {
         Write-Host ">> cargo clippy --workspace" -ForegroundColor Cyan
-        Invoke-Docker "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"
+        Invoke-DockerTooled "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"
     }
 
     "fmt" {
         Write-Host ">> cargo fmt --all" -ForegroundColor Cyan
-        Invoke-Docker "fmt", "--all"
+        Invoke-DockerTooled "fmt", "--all"
     }
 
     "run" {
@@ -103,6 +128,7 @@ switch ($Command) {
                 -p 8080:8080 `
                 -v "${PWD}:/workspace" `
                 -v "${CACHE_VOL}:/usr/local/cargo/registry" `
+                -v "${TARGET_VOL}:/workspace/target" `
                 -v "${CERT_FILE}:/tmp/corp-ca.pem" `
                 -e SSL_CERT_FILE=/tmp/corp-ca.pem `
                 -e CARGO_HTTP_CAINFO=/tmp/corp-ca.pem `
@@ -116,6 +142,7 @@ switch ($Command) {
                 -p 8080:8080 `
                 -v "${PWD}:/workspace" `
                 -v "${CACHE_VOL}:/usr/local/cargo/registry" `
+                -v "${TARGET_VOL}:/workspace/target" `
                 -v "${CERT_FILE}:/tmp/corp-ca.pem" `
                 -e SSL_CERT_FILE=/tmp/corp-ca.pem `
                 -e CARGO_HTTP_CAINFO=/tmp/corp-ca.pem `
@@ -245,6 +272,7 @@ curl http://localhost:8080/hello/World
         docker run --rm -it `
             -v "${PWD}:/workspace" `
             -v "${CACHE_VOL}:/usr/local/cargo/registry" `
+            -v "${TARGET_VOL}:/workspace/target" `
             -v "${CERT_FILE}:/tmp/corp-ca.pem" `
             -e SSL_CERT_FILE=/tmp/corp-ca.pem `
             -e CARGO_HTTP_CAINFO=/tmp/corp-ca.pem `
@@ -255,8 +283,8 @@ curl http://localhost:8080/hello/World
     }
 
     "clean-cache" {
-        Write-Host ">> Removing cargo cache volume" -ForegroundColor Yellow
-        docker volume rm $CACHE_VOL
+        Write-Host ">> Removing cached volumes ($CACHE_VOL, $TARGET_VOL)" -ForegroundColor Yellow
+        docker volume rm $CACHE_VOL $TARGET_VOL
     }
 
     default {
