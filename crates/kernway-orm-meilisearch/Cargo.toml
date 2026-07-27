@@ -1,0 +1,23 @@
+[package]
+name = "kernway-orm-meilisearch"
+description = "Meilisearch backend for kernway-orm-core — full-text search engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kernway-orm-core = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+thiserror        = { workspace = true }
+meilisearch-sdk  = { version = "0.26", optional = true }
+
+[features]
+default = []
+meilisearch = ["meilisearch-sdk"]
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true

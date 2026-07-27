@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use serde::{de::DeserializeOwned, Serialize};
 use std::hash::Hash;
 
 /// Column type hint — used by macro-generated metadata.
@@ -51,7 +52,7 @@ pub struct ColumnDef {
 /// Implement this via the `#[entity]` macro — do not implement manually.
 pub trait Entity: Send + Sync + Sized + Clone + Debug + 'static {
     /// The primary key type (e.g. u64, String, Uuid).
-    type Id: Send + Sync + Clone + Eq + Hash + Debug + 'static;
+    type Id: Send + Sync + Clone + Eq + Hash + Debug + Serialize + DeserializeOwned + 'static;
 
     /// Database table name.
     fn table_name() -> &'static str;

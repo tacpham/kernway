@@ -32,9 +32,32 @@ enum Filter {
         field: &'static str,
         value: String,
     },
+    Gte {
+        field: &'static str,
+        value: String,
+    },
+    Lte {
+        field: &'static str,
+        value: String,
+    },
     Like {
         field: &'static str,
         pattern: String,
+    },
+    In {
+        field: &'static str,
+        values: Vec<String>,
+    },
+    Between {
+        field: &'static str,
+        from: String,
+        to: String,
+    },
+    IsNull {
+        field: &'static str,
+    },
+    IsNotNull {
+        field: &'static str,
     },
 }
 
@@ -106,8 +129,40 @@ where
                 .and_then(|v| cmp_field_to_query(&v, value))
                 .map(|o| o == CmpOrdering::Less)
                 .unwrap_or(false),
+            Filter::Gte { field, value } => field_value(entity, field)
+                .and_then(|v| cmp_field_to_query(&v, value))
+                .map(|o| matches!(o, CmpOrdering::Greater | CmpOrdering::Equal))
+                .unwrap_or(false),
+            Filter::Lte { field, value } => field_value(entity, field)
+                .and_then(|v| cmp_field_to_query(&v, value))
+                .map(|o| matches!(o, CmpOrdering::Less | CmpOrdering::Equal))
+                .unwrap_or(false),
             Filter::Like { field, pattern } => get_field_str(entity, field)
                 .map(|candidate| candidate.contains(pattern))
+                .unwrap_or(false),
+            Filter::In { field, values } => field_value(entity, field)
+                .map(|candidate| {
+                    values
+                        .iter()
+                        .any(|value| cmp_field_to_query(&candidate, value) == Some(CmpOrdering::Equal))
+                })
+                .unwrap_or(false),
+            Filter::Between { field, from, to } => field_value(entity, field)
+                .map(|candidate| {
+                    let lower = cmp_field_to_query(&candidate, from)
+                        .map(|o| matches!(o, CmpOrdering::Greater | CmpOrdering::Equal))
+                        .unwrap_or(false);
+                    let upper = cmp_field_to_query(&candidate, to)
+                        .map(|o| matches!(o, CmpOrdering::Less | CmpOrdering::Equal))
+                        .unwrap_or(false);
+                    lower && upper
+                })
+                .unwrap_or(false),
+            Filter::IsNull { field } => raw_field_value(entity, field)
+                .map(|value| value.is_null())
+                .unwrap_or(false),
+            Filter::IsNotNull { field } => raw_field_value(entity, field)
+                .map(|value| !value.is_null())
                 .unwrap_or(false),
         })
     }
@@ -204,6 +259,30 @@ where
         self
     }
 
+    fn filter_gte(
+        mut self: Box<Self>,
+        field: &'static str,
+        value: &str,
+    ) -> Box<dyn QueryBuilder<T>> {
+        self.filters.push(Filter::Gte {
+            field,
+            value: value.to_string(),
+        });
+        self
+    }
+
+    fn filter_lte(
+        mut self: Box<Self>,
+        field: &'static str,
+        value: &str,
+    ) -> Box<dyn QueryBuilder<T>> {
+        self.filters.push(Filter::Lte {
+            field,
+            value: value.to_string(),
+        });
+        self
+    }
+
     fn filter_like(
         mut self: Box<Self>,
         field: &'static str,
@@ -213,6 +292,42 @@ where
             field,
             pattern: pattern.to_string(),
         });
+        self
+    }
+
+    fn filter_in(
+        mut self: Box<Self>,
+        field: &'static str,
+        values: Vec<String>,
+    ) -> Box<dyn QueryBuilder<T>> {
+        self.filters.push(Filter::In { field, values });
+        self
+    }
+
+    fn filter_between(
+        mut self: Box<Self>,
+        field: &'static str,
+        from: &str,
+        to: &str,
+    ) -> Box<dyn QueryBuilder<T>> {
+        self.filters.push(Filter::Between {
+            field,
+            from: from.to_string(),
+            to: to.to_string(),
+        });
+        self
+    }
+
+    fn filter_is_null(mut self: Box<Self>, field: &'static str) -> Box<dyn QueryBuilder<T>> {
+        self.filters.push(Filter::IsNull { field });
+        self
+    }
+
+    fn filter_is_not_null(
+        mut self: Box<Self>,
+        field: &'static str,
+    ) -> Box<dyn QueryBuilder<T>> {
+        self.filters.push(Filter::IsNotNull { field });
         self
     }
 
@@ -484,16 +599,24 @@ where
     }
 }
 
+/// Extract a field as its raw JSON value.
+fn raw_field_value<T>(entity: &T, field: &str) -> Option<serde_json::Value>
+where
+    T: Serialize,
+{
+    let value = serde_json::to_value(entity).ok()?;
+    value.get(field).cloned()
+}
+
 /// Extract a scalar field as its raw JSON value (String/Number/Bool).
 fn field_value<T>(entity: &T, field: &str) -> Option<serde_json::Value>
 where
     T: Serialize,
 {
-    let value = serde_json::to_value(entity).ok()?;
-    match value.get(field)? {
+    match raw_field_value(entity, field)? {
         v @ (serde_json::Value::String(_)
         | serde_json::Value::Number(_)
-        | serde_json::Value::Bool(_)) => Some(v.clone()),
+        | serde_json::Value::Bool(_)) => Some(v),
         _ => None,
     }
 }
@@ -546,7 +669,7 @@ fn cmp_field_to_query(field_val: &serde_json::Value, query: &str) -> Option<CmpO
 #[cfg(test)]
 mod tests {
     use super::InMemoryRepository;
-    use kernway_orm_core::{query::QueryBuilder, repository::Repository, Entity};
+    use kernway_orm_core::{repository::Repository, Entity};
     use kernway_orm_macro::entity;
     use serde::{Deserialize, Serialize};
     use std::future::Future;
