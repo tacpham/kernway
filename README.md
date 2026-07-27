@@ -387,12 +387,12 @@ Progress follows the [walking-skeleton milestones](docs/design/MILESTONES.md) �
 
 | Milestone | Status | What it delivers |
 |---|---|---|
-| **M1** — skeleton in Docker | ✅ 2026-07-24 | Static files, health checks, distroless image (34.9 MB), graceful shutdown |
+| **M1** — skeleton in Docker | ✅ 2026-07-24 | JSON route + static `index.html`, `/health`+`/ready`, 34.9 MB distroless image, graceful shutdown |
 | **M1a** — close the front door | ✅ 2026-07-24 | `kernway` as a single dependency; `use kernway::prelude::*` |
-| **M2a** — conditional GET | ✅ 2026-07-24 | ETag, 304, symlink defence |
-| **M2b** — streaming + HEAD + Range | ✅ 2026-07-24 | `Body::File`, Range (206/416), precompressed `.br`/`.gz` |
-| **M3** — htmx | ✅ | `features = ["htmx"]`; 1.39× faster than axum-htmx |
-| **M4** — templates + security | ✅ | `kernleaf` (Thymeleaf dialect, 1.7× vs minijinja), CSRF, security headers |
+| **M2a** — conditional GET + symlink defence | ✅ 2026-07-24 | ETag, `Cache-Control`, `If-None-Match` → 304, symlink escape rejected |
+| **M2b** — streaming, HEAD, Range, precompressed | ✅ 2026-07-24 | `Body::File`, HEAD, Range (206/416), `.br`/`.gz` negotiation, `Vary: Accept-Encoding` |
+| **M3** — htmx | ✅ | `features = ["htmx"]`; `Vary: HX-Request` automatic; 1.39× faster than axum-htmx |
+| **M4** — templates + security | 🔶 | `kernleaf` (Thymeleaf dialect, 1.7× vs minijinja), CSRF token injection, security headers; CSRF *verify* route-guard pending |
 | **M5** — hot reload | ⏳ | Template/static changes < 10 ms (no restart); Rust changes via socket handover |
 | **M6** — production build | ⏳ | `kernway build` → one static binary, assets embedded, allocator decision |
 
