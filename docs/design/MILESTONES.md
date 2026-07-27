@@ -319,7 +319,7 @@ allocation-free correctness, not a throughput claim. See
 
 ---
 
-## M4 — Templates and security (`features = ["web"]`) ✅
+## M4 — Templates and security (`features = ["web"]`) 🔶 partial
 
 **Goal**: render a page from data; accept a form back safely.
 
@@ -432,21 +432,21 @@ literature rather than measured — see
 
 ## Cross-cutting: correct the public claims
 
-Not a milestone — a debt to clear, and the earlier the better.
+~~Not a milestone — a debt to clear, and the earlier the better.~~
 
-`README.md` currently states:
+**Resolved** — the items below have been addressed.
 
-```
-- **v1.0** ✅ Stable API, full feature set, flagship example
-```
+| Claim | Was | Now |
+|---|---|---|
+| `README.md` roadmap | "**v1.0** ✅ Stable API, full feature set" | Replaced with milestone table (M1–M6) |
+| Single `kernway` dependency | "does not yet work" | Fixed in M1a — `use kernway::prelude::*` |
+| Templates | "planned, not built" | `kernleaf` built in M4 (Thymeleaf dialect, 1.7× vs minijinja) |
+| Async handlers | "planned, not built" | Still pending — honest, no change needed |
 
-The workspace version is `0.1.0`. `ROADMAP.md` places kernleaf at v0.6. Static
-files and htmx now exist; templates and async handlers do not. The most public
-document in the repository claims a stable v1.0 for a project at 0.1.
-
-This is worth fixing before anyone reads it, independently of everything above.
-The Quick Start has the same problem in a smaller way: it implies a single
-`kernway` dependency, which does not yet work.
+The `ROADMAP.md` version-based table and the `FEATURES.md` column headers
+still use v0.3–v1.0 labels that do not correspond to milestones. These are
+cosmetic — they do not make a false claim about what *exists today* — and can
+be aligned with the milestone model whenever ROADMAP.md is next touched.
 
 ## Order, and what blocks what
 
