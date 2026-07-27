@@ -16,6 +16,7 @@ use kernway_core::response::Response;
 use kernway_security::SecurityContext;
 use kernway_web::{Json, Path, ProblemDetail, Query, Validated};
 
+use crate::multipart::Multipart;
 use crate::upload::UploadFile;
 
 /// Extract a typed value from the request (and the request scope). The `param` is
@@ -71,5 +72,11 @@ impl Extract for SecurityContext {
 impl Extract for UploadFile {
     fn extract(req: &Request, _scope: &RequestScope, _param: &str) -> Result<Self, Response> {
         UploadFile::from_request(req).map_err(ProblemDetail::bad_request)
+    }
+}
+
+impl Extract for Multipart {
+    fn extract(req: &Request, _scope: &RequestScope, _param: &str) -> Result<Self, Response> {
+        Multipart::from_request(req).map_err(|e| ProblemDetail::bad_request(e.to_string()))
     }
 }
