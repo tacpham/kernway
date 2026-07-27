@@ -26,6 +26,11 @@ use kernway_core::request::Request;
 pub struct UploadFile {
     path: PathBuf,
     len: u64,
+    /// Whether this handle owns the temp file's cleanup. A body upload does not
+    /// (`false`): the request's [`SpooledBody`](kernway_core::request::SpooledBody)
+    /// deletes it on drop. A `multipart` file part does (`true`): nothing else
+    /// tracks it, so an un-persisted part is removed when this handle drops.
+    owns_file: bool,
 }
 
 impl UploadFile {
@@ -37,9 +42,20 @@ impl UploadFile {
     /// `Json` / `Validated` apply instead.
     pub fn from_request(req: &Request) -> Result<Self, String> {
         match &req.body_spool {
-            Some(spool) => Ok(Self { path: spool.path.clone(), len: spool.len }),
+            // The request's SpooledBody owns cleanup; this is only a handle.
+            Some(spool) => Ok(Self { path: spool.path.clone(), len: spool.len, owns_file: false }),
             None => Err("no streamed upload (body empty or under max_inmemory_body)".into()),
         }
+    }
+
+    /// Build an `UploadFile` from a temp file that some other producer spooled —
+    /// a `multipart/form-data` file part, not the whole request body. Same
+    /// ownership contract as a body upload: the file is moved by [`persist`], and
+    /// otherwise removed when the request ends.
+    ///
+    /// [`persist`]: UploadFile::persist
+    pub(crate) fn from_spooled(path: PathBuf, len: u64) -> Self {
+        Self { path, len, owns_file: true }
     }
 
     /// Path to the temp file holding the uploaded bytes.
@@ -81,7 +97,19 @@ impl UploadFile {
         .await;
         match moved {
             Some(result) => result,
-            None => Err(std::io::Error::new(std::io::ErrorKind::Other, "blocking pool unavailable")),
+            None => Err(std::io::Error::other("blocking pool unavailable")),
+        }
+    }
+}
+
+impl Drop for UploadFile {
+    fn drop(&mut self) {
+        // A multipart file part owns its temp file (nothing else tracks it), so an
+        // un-persisted one is cleaned up here. `persist` already moved the file, so
+        // this is a no-op after a successful persist. A body upload sets `owns_file`
+        // false — its SpooledBody in the request handles cleanup.
+        if self.owns_file {
+            let _ = std::fs::remove_file(&self.path);
         }
     }
 }

@@ -48,6 +48,8 @@ pub mod security;
 pub mod extract;
 /// `UploadFile` — a large request body streamed to a temp file.
 pub mod upload;
+/// `Multipart` — a `multipart/form-data` request body (RFC 7578).
+pub mod multipart;
 /// Visitor tracking + ban middleware (`VisitorTracking`, `BanFilter`).
 pub mod tracking;
 /// CORS — cross-origin resource sharing middleware (Spring's `cors()`).
@@ -91,6 +93,7 @@ pub use compression::Compression;
 // params (`id: Path<u64>`, `body: Validated<T>`) reference only `::kernway_server::`.
 pub use extract::Extract;
 pub use upload::UploadFile;
+pub use multipart::{Multipart, Part};
 pub use app::UploadConfig;
 pub use kernway_web::{Json, Path, ProblemDetail, Query, Validated};
 // Visitor tracking + ban middleware and its types.
