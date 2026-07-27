@@ -1,0 +1,47 @@
+[package]
+name    = "framework-comparison"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Detached from the main workspace on purpose: axum/actix/tokio pull a large
+# dependency tree that must never enter a normal `cargo build --workspace`. The
+# empty `[workspace]` makes this crate its own root; it reaches the framework by
+# relative path.
+[workspace]
+
+[dependencies]
+# Kernway, by path — the crate under test.
+kernway-server = { path = "../../crates/kernway-server" }
+kernway-core   = { path = "../../crates/kernway-core" }
+di-core        = { path = "../../crates/di-core" }
+
+# The incumbents.
+axum       = { version = "0.7", features = ["multipart"] }
+tower-http = { version = "0.6", features = ["fs"] }
+tower      = "0.5"
+actix-web      = "4"
+actix-multipart = "0.7"
+actix-files    = "0.6"
+tokio      = { version = "1", features = ["full"] }
+futures-util = "0.3"
+
+[[bin]]
+name = "serve_kernway"
+path = "src/bin/serve_kernway.rs"
+
+[[bin]]
+name = "serve_axum"
+path = "src/bin/serve_axum.rs"
+
+[[bin]]
+name = "serve_actix"
+path = "src/bin/serve_actix.rs"
+
+[[bin]]
+name = "load"
+path = "src/bin/load.rs"
+
+[profile.release]
+opt-level = 3
+lto       = true

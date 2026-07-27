@@ -434,6 +434,65 @@ current user: all of it is a plain value, not a special container.
 Whether thread-per-core also delivers lower tail latency under load is a separate
 question, and one this file cannot yet answer — see below.
 
+## File I/O vs axum and actix — where Kernway trails today
+
+`benchmarks/framework-comparison/` (a crate detached from the workspace so its
+axum/actix/tokio tree never enters a normal build) runs three equivalent servers
+— Kernway, axum + tower-http, and actix-web — behind one keep-alive load driver,
+each doing the *same work*: serve a file, ingest a POST body to disk, and accept
+a `multipart/form-data` file part to disk. Reproduce:
+
+```
+docker build/run rust:1-bookworm, then:
+  cd benchmarks/framework-comparison && cargo build --release
+  CONC=32 SECS=5 FILE_MIB=32 PAYLOAD_MIB=8 ./run.sh
+```
+
+**Environment**: Docker Linux, 12 cores, loopback, 32 concurrent keep-alive
+connections, 5 s per workload, default framework configs. Throughput is body
+bytes moved per second (best of the run). All three write uploads to a temp file
+and delete it, so the disk work is equal.
+
+| Workload | Kernway | axum + tower-http | actix-web | Kernway vs best |
+|---|---|---|---|---|
+| **Download** (32 MiB file) | 5246 MB/s | 9682 | 12703 | **0.41×** |
+| **Upload** (8 MiB → disk) | 3196 MB/s | 8350 | 8977 | **0.36×** |
+| **Multipart** (8 MiB → disk) | 1348 MB/s | 8121 | 8327 | **0.16×** |
+
+**Kernway is 2–6× slower on file I/O today, and the reasons are architectural,
+not incidental** — each is a known item, already written down as future work:
+
+- **Download (~2×).** The file streams through userspace with a `spawn_blocking`
+  hop *per chunk*. tower-http and actix do not `sendfile` either (both use
+  `tokio::fs`), so the gap here is not zero-copy — it is the per-chunk thread-pool
+  hop plus the conservative 256 KiB default (71% of Kernway's own peak; see *File
+  streaming* above). Integrated async file reads, a bigger default, or `sendfile`
+  ([KEP-0002] future work) each close part of it.
+- **Upload (~2.6×).** Same shape inbound: `spool_body` does a `spawn_blocking`
+  write per chunk, where axum/actix stream straight into an async `tokio::fs`
+  file with no per-chunk hop.
+- **Multipart (~6×).** The worst case, and expected: [KEP-0008]'s first cut spools
+  the whole body to disk, reads it *back* into memory to parse, then writes the
+  file part out again — two writes and a full read where axum/actix stream one
+  field to one file. Socket-direct parsing (the KEP's deferred optimisation) is
+  exactly what removes this.
+
+**Caveats that soften the absolute numbers (not the direction).** The load driver
+shares the 12-core box with the server, and Kernway runs more threads under load
+(one pinned shard per core plus a blocking pool), so it pays more for CPU
+oversubscription than a bounded tokio pool does — a dedicated load box would
+narrow the gap. The figures are loopback and memory-bandwidth-bound (multi-GB/s),
+so they measure per-byte framework overhead, not disk. Re-run on your own setup
+before quoting.
+
+This is the honest state: Kernway's correctness-first file paths are not yet
+competitive on raw throughput, and the benchmark now says so with a number rather
+than a silence. It also gives the optimisation work ([KEP-0002] async/`sendfile`,
+[KEP-0008] socket-direct multipart) a target to beat.
+
+[KEP-0002]: ../kep/0002-response-body.md
+[KEP-0008]: ../kep/0008-request-body.md
+
 ## Not yet measured — do not quote these
 
 Listed so nobody mistakes silence for a good result. Each is a real question with
@@ -441,9 +500,9 @@ no Kernway number behind it today.
 
 | Claim | Status |
 |---|---|
-| Requests/sec end to end | **not measured** — needs a load test against a running server |
-| p50 / p99 / p999 latency | **not measured** |
-| Latency vs an equivalent tokio/axum app | **not measured** — `examples/echo-server` exists but has not been run in a comparison |
+| Requests/sec end to end | **partly measured** — file I/O throughput vs axum/actix is above; a general JSON/echo RPS is still open |
+| p50 / p99 / p999 latency | **not measured** — the comparison above reports throughput, not a latency distribution |
+| Throughput vs an equivalent tokio/axum app | **measured** for file I/O (download/upload/multipart) — see the section above; Kernway trails 2–6× today |
 | Tail-latency benefit of thread-per-core | **not measured** — the mechanism is real; the magnitude on Kernway is unverified |
 | Cold start, idle RSS | **not measured** — belongs to milestone M6 (Docker) |
 | Binary size | **not measured** — M6 |
