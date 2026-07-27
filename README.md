@@ -2,13 +2,14 @@
 
 **A Spring Boot-inspired Rust web framework — its own async runtime, thread-per-core, standards-compliant.**
 
-> **Status: 0.1, pre-release.** The DI container, routing, HTTP/1.1, and the
-> sharded async transport work and are benchmarked
-> ([docs/design/BENCHMARKS.md](docs/design/BENCHMARKS.md)). Async handlers,
-> static-file serving, templates, and htmx are planned, not built — see the
-> [milestones](docs/design/MILESTONES.md). This README describes where the
-> project is going; sections below are marked when they describe a target rather
-> than today.
+> **Status: 0.1, pre-release — M1–M4 complete.**
+> Built and tested: DI container, routing, HTTP/1.1, sharded async transport,
+> static file serving (ETag, Range, precompressed `.br`/`.gz`), htmx support,
+> and the `kernleaf` template engine (Thymeleaf dialect) with CSRF and
+> security headers.
+> Benchmarked ([docs/design/BENCHMARKS.md](docs/design/BENCHMARKS.md)).
+> **Not yet built**: async handlers, hot reload, production CLI.
+> See [milestones](docs/design/MILESTONES.md) for what is next.
 
 [![Rust](https://img.shields.io/badge/rust-1.78%2B-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
@@ -138,10 +139,65 @@ let user = cache.get_or_load(id, Ttl::minutes(5), || {
     Ok(repo.find_by_id(&id)?.unwrap())
 })?;
 
-// Future: #[cacheable(key = "user_{id}", ttl = 300)] via AOP (v0.6+)
+// Future: #[cacheable(key = "user_{id}", ttl = 300)] via AOP (M5+)
+```
+
+### Static Files
+
+```rust
+KernwayApp::builder()
+    .static_files("public/")               // serve from a directory
+    .precompressed()                        // opt-in: probe .br / .gz next to each file
+    .build()
+    .run();
+// ETag + Cache-Control added automatically
+// Conditional GET (If-None-Match → 304) without reading the body
+// Range requests (RFC 7233) for large files
+// Symlink-escape defence: canonical path re-checked under root
+```
+
+### htmx (`features = ["htmx"]`)
+
+```rust
+use kernway_htmx::{Htmx, HtmxResponse, Swap};
+
+.get("/greet", |req, _ctx| {
+    let htmx = Htmx::from_request(&req);
+    let fragment = "<p>Hello!</p>";
+    let full    = "<html>…<p>Hello!</p>…</html>";
+    HtmxResponse::builder()
+        .trigger("greeted")              // HX-Trigger header
+        .respond(fragment, full, htmx)   // fragment for htmx, page for browser
+                                         // sets Vary: HX-Request automatically
+})
+```
+
+### Templates — `kernleaf` (`features = ["web"]`)
+
+```html
+<!-- templates/users/profile.html — natural template, works as plain HTML -->
+<h1 th:text="${user.name}">John Doe</h1>
+<ul>
+    <li th:each="post : ${user.posts}" th:text="${post.title}">Post title</li>
+</ul>
+<!-- CSRF token injected automatically into every POST form -->
+<form method="POST" action="/profile/update">
+    <input type="text" name="name" th:value="${user.name}">
+    <button type="submit">Update</button>
+</form>
+```
+
+```rust
+// th:text auto-escapes HTML — a template cannot introduce XSS.
+// Raw HTML only through th:utext (explicitly unsafe).
+.get("/users/{id}/profile", |req, ctx| {
+    let user = ctx.get::<UserService>().unwrap().find(id);
+    Template::render("users/profile", context! { user })
+})
 ```
 
 ### Middleware
+
 ```rust
 KernwayApp::builder()
     .layer(RequestIdMiddleware)  // adds X-Request-Id
@@ -176,22 +232,29 @@ api.add_route(
 ## Architecture
 
 ```
-kernway (meta-crate)
-├── kernway-core          — Request, Response, StatusCode, Layer traits
+kernway (meta-crate — one dependency, feature-gated)
+├── kernway-core          — Request, Response, StatusCode, Body, Layer traits
 ├── di-core               — AppContext, BeanEntry, Buildable
 ├── di-macro              — #[derive(Component)], #[inject]
 ├── kernway-http          — HTTP/1.1 parser + writer (RFC 9112, pure std)
-├── kernway-web           — Json<T>, Path<T>, Query<T>, ProblemDetail (RFC 7807)
-├── kernway-server        — Router, KernwayApp, Middleware chain
+├── kernway-web           — Json<T>, Path<T>, Query<T>, Html<T>, ProblemDetail (RFC 7807)
+├── kernway-server        — Router, KernwayApp, Middleware chain, static file serving
+├── kernway-static        — ETag, Range, precompressed negotiation (RFC 7233)
+├── kernway-htmx          — Htmx extractor, HtmxResponse builder  [feature: htmx]
+├── kernleaf              — Template engine (Thymeleaf dialect, compile-to-IR) [feature: web]
+├── kernway-security      — CSRF (double-submit), security headers, SecurityContext
 ├── kernway-orm-core      — Entity, Repository<T>, QueryBuilder<T> traits (JPA-inspired)
 ├── kernway-orm-macro     — #[entity], #[id], #[column]
 ├── kernway-orm-memory    — InMemoryRepository<T> for testing
+├── kernway-orm-sqlite    — SQLite driver (rusqlite)
 ├── kernway-cache-core    — Cache<K,V>, Ttl, CacheStats traits
 ├── kernway-cache-macro   — #[cacheable], #[cache_evict], #[cache_update]
 ├── kernway-cache-memory  — InMemoryCache<K,V> for testing
 ├── kernway-openapi       — OpenAPI 3.0 spec generation
 ├── kernway-sse           — SseEvent, SseStream (W3C EventSource)
-└── kernway-multipart     — Multipart/form-data parser (RFC 7578)
+├── kernway-multipart     — Multipart/form-data parser (RFC 7578)
+├── rt-core               — Reactor, Executor, Task, Waker, timers (mio underneath)
+└── rt-net                — AsyncTcpStream, SO_REUSEPORT shards
 ```
 
 **API docs**: `cargo doc --workspace --no-deps --open`. Every crate has a
@@ -218,6 +281,9 @@ steps in [docs/design/BENCHMARKS.md](docs/design/BENCHMARKS.md).
 | Parse a browser GET (8 headers) | 705 ns |
 | Encode a small JSON response | 44 ns |
 | Spawn a task | ~65 ns at 1000 tasks |
+| htmx header read vs axum-htmx 0.8 | 1.39× faster (57.8 ns vs 80.2 ns) |
+| kernleaf render vs minijinja | 1.7× faster |
+| Precompressed static negotiation overhead | ~200 ns; −50–55% payload |
 
 Measured against the incumbent, not just ourselves. The router is a radix trie
 tuned over three rounds against `matchit` (axum's): **static routing is within
@@ -240,16 +306,23 @@ does not exist yet — the table above is in-process micro-benchmarks only, and 
 
 ## Examples
 
-| Example | Milestone | What it shows |
+| Example | Status | What it shows |
 |---|---|---|
-| `hello-di` | v0.1 | Manual DI — register/get beans |
-| `hello-di-v2` | v0.2 | `#[derive(Component)]` auto-wiring |
-| `hello-di-v3` | v0.3 | `refresh()` auto-ordering + cycle detection, `Arc<dyn Trait>` injection, qualifiers |
-| `hello-web` | v0.3 | REST API, JSON, path params, 404 Problem Detail |
-| `todo-orm` | v0.4 | ORM + Middleware (logging, request-id) |
-| `hello-cache` | v0.5 | Cache-aside pattern, TTL, hit/miss stats |
-| `hello-openapi` | v0.6 | OpenAPI docs + SSE + Multipart |
-| **`todo-app`** | **v1.0** | **Full-featured flagship: all features combined** |
+| `hello-di` | ✅ | Manual DI — register/get beans |
+| `hello-di-v2` | ✅ | `#[derive(Component)]` auto-wiring |
+| `hello-di-v3` | ✅ | `refresh()` auto-ordering + cycle detection, `Arc<dyn Trait>` injection, qualifiers |
+| `hello-web` | ✅ | REST API, JSON, path params, 404 Problem Detail |
+| `web-docker` | ✅ | Static files + JSON routes + Docker, 34.9 MB distroless image |
+| `login-htmx` | ✅ | htmx fragments + kernleaf templates + CSRF |
+| `todo-orm` | ✅ | ORM + Middleware (logging, request-id) |
+| `todo-sqlite` | ✅ | ORM with SQLite driver |
+| `hello-cache` | ✅ | Cache-aside pattern, TTL, hit/miss stats |
+| `hello-openapi` | ✅ | OpenAPI docs + SSE + Multipart |
+| `hello-log` | ✅ | Structured logging |
+| `hello-config` | ✅ | Config profiles |
+| `hello-validate` | ✅ | Validation + RFC 7807 error responses |
+| `hello-controller` | ✅ | `#[derive(Component)]` controller pattern |
+| `todo-app` | ⏳ | Flagship: all features combined |
 
 Run any example:
 ```powershell
@@ -310,11 +383,18 @@ Run any example:
 
 ## Roadmap
 
-- **v1.0** ✅ Stable API, full feature set, flagship example
-- **v1.1** Real DB drivers: `kernway-orm-diesel` (PostgreSQL, MySQL, SQLite)
-- **v1.2** `kernway-cache-redis` (Redis via `redis-rs`)
-- **v1.3** TLS (`rustls`), HTTP/2
-- **v2.0** AOP codegen (full `#[cacheable]` / `#[transactional]` implementation)
+Progress follows the [walking-skeleton milestones](docs/design/MILESTONES.md) — each step must run end-to-end before the next begins.
+
+| Milestone | Status | What it delivers |
+|---|---|---|
+| **M1** — skeleton in Docker | ✅ 2026-07-24 | Static files, health checks, distroless image (34.9 MB), graceful shutdown |
+| **M1a** — close the front door | ✅ 2026-07-24 | `kernway` as a single dependency; `use kernway::prelude::*` |
+| **M2a** — conditional GET | ✅ 2026-07-24 | ETag, 304, symlink defence |
+| **M2b** — streaming + HEAD + Range | ✅ 2026-07-24 | `Body::File`, Range (206/416), precompressed `.br`/`.gz` |
+| **M3** — htmx | ✅ | `features = ["htmx"]`; 1.39× faster than axum-htmx |
+| **M4** — templates + security | ✅ | `kernleaf` (Thymeleaf dialect, 1.7× vs minijinja), CSRF, security headers |
+| **M5** — hot reload | ⏳ | Template/static changes < 10 ms (no restart); Rust changes via socket handover |
+| **M6** — production build | ⏳ | `kernway build` → one static binary, assets embedded, allocator decision |
 
 ---
 
