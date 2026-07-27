@@ -319,7 +319,7 @@ allocation-free correctness, not a throughput claim. See
 
 ---
 
-## M4 — Templates and security (`features = ["web"]`) 🔶 partial
+## M4 — Templates and security (`features = ["web"]`) ✅
 
 **Goal**: render a page from data; accept a form back safely.
 
@@ -357,10 +357,12 @@ th:authorize with no context  → element dropped (fail-closed)   (th_authorize_
 POST form                     → hidden _csrf field auto-injected (auto_csrf_injects…)
 ```
 
-The XSS/escaping and CSRF cases — the gate's real bar — pass. What remains for the
-*full* M4 "accept a form back safely" story is the server-side CSRF *verify* on the
-POST (that primitive is done in `kernway-security::csrf::verify_request`; wiring it
-as a route guard is a server-integration step, tracked under kernway-security).
+The XSS/escaping and CSRF cases — the gate's real bar — pass. The server-side
+CSRF verify is called at the top of every state-changing handler
+(`csrf::verify_request` → 403 if missing or forged), tested in
+`examples/login-htmx/tests/login_flow.rs::a_post_without_a_csrf_token_is_forbidden`.
+A `CsrfMiddleware` that applies it automatically is a future DX improvement,
+not a gate requirement.
 
 **Gate**:
 

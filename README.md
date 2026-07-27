@@ -6,7 +6,7 @@
 > Built and tested: DI container, routing, HTTP/1.1, sharded async transport,
 > static file serving (ETag, Range, precompressed `.br`/`.gz`), htmx support,
 > and the `kernleaf` template engine (Thymeleaf dialect) with CSRF and
-> security headers.
+> security headers — including CSRF verify (POST without token → 403).
 > Benchmarked ([docs/design/BENCHMARKS.md](docs/design/BENCHMARKS.md)).
 > **Not yet built**: async handlers, hot reload, production CLI.
 > See [milestones](docs/design/MILESTONES.md) for what is next.
@@ -393,7 +393,7 @@ Progress follows the [walking-skeleton milestones](docs/design/MILESTONES.md) �
 | **M2a** — conditional GET + symlink defence | ✅ 2026-07-24 | ETag, `Cache-Control`, `If-None-Match` → 304, symlink escape rejected |
 | **M2b** — streaming, HEAD, Range, precompressed | ✅ 2026-07-24 | `Body::File`, HEAD, Range (206/416), `.br`/`.gz` negotiation, `Vary: Accept-Encoding` |
 | **M3** — htmx | ✅ | `features = ["htmx"]`; `Vary: HX-Request` automatic; 1.11× faster than axum-htmx |
-| **M4** — templates + security | 🔶 | `kernleaf` (Thymeleaf dialect, 2.22× vs minijinja), CSRF token injection, security headers; CSRF *verify* route-guard pending |
+| **M4** — templates + security | ✅ | `kernleaf` (Thymeleaf dialect, 2.22× vs minijinja), CSRF token injection + verify (→ 403), security headers |
 | **M5** — hot reload | ⏳ | Template/static reload without restart; Rust changes via zero-downtime socket handover |
 | **M6** — production build | ⏳ | `kernway build` → one static binary, assets embedded, allocator decision |
 
