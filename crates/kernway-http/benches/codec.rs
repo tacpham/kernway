@@ -1,3 +1,4 @@
+#![allow(missing_docs)] // a benchmark binary, not public API
 //! HTTP/1.1 codec — runs once per request in each direction.
 //!
 //! With keep-alive, parse and encode are the per-request cost that no longer

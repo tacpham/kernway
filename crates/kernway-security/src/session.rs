@@ -96,6 +96,9 @@ impl std::error::Error for StoreError {}
 ///
 /// [KEP-0004]: https://github.com/tacpham/kernway/blob/main/docs/kep/0004-sessions.md
 /// [KEP-0006]: https://github.com/tacpham/kernway/blob/main/docs/kep/0006-async-handlers.md
+// `len` is the store's session count; an `is_empty` on a live session store would be
+// a racy, rarely-useful async round-trip, so it is deliberately not part of the trait.
+#[allow(clippy::len_without_is_empty)]
 pub trait SessionStore: Send + Sync {
     /// Register a new session.
     fn insert(&self, sid: &str, record: SessionRecord) -> BoxFuture<'_, Result<(), StoreError>>;

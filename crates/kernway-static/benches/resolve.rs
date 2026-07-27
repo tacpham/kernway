@@ -1,3 +1,4 @@
+#![allow(missing_docs)] // a benchmark binary, not public API
 //! Static resolution — runs on every static request, before any I/O.
 //!
 //! `resolve` is the security boundary and the per-request cost that scales with

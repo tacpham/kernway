@@ -164,7 +164,7 @@ impl SecurityLayer {
         self.rules
             .iter()
             .find(|(rule_method, pattern, _)| {
-                rule_method.as_deref().map_or(true, |m| m == method) && path_matches(pattern, path)
+                rule_method.as_deref().is_none_or(|m| m == method) && path_matches(pattern, path)
             })
             .map_or(&self.default, |(_, _, access)| access)
     }

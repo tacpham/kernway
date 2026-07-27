@@ -1,3 +1,4 @@
+#![allow(missing_docs)] // a benchmark binary, not public API
 //! The full per-request CPU path, across every module it touches.
 //!
 //! Routing, parsing, and encoding are each measured alone elsewhere. This is

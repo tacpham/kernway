@@ -1,3 +1,4 @@
+#![allow(missing_docs)] // a benchmark binary, not public API
 //! Our router against the incumbent — `matchit`, the radix-trie router axum uses.
 //!
 //! KEP-0000 §2: writing our own router is only justified if it is at least as

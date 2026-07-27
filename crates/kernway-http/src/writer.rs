@@ -254,7 +254,7 @@ mod connection_tests {
         // claiming keep-alive on a connection the server is about to close
         // would leave the client waiting for a response that never comes.
         let mut response = Response::new(StatusCode::OK);
-        response.headers.insert("connection".into(), "keep-alive".into());
+        response.headers.insert("connection", "keep-alive");
         let out = encoded(&response, Connection::Close);
         assert!(out.contains("connection: close\r\n"), "got {out:?}");
         assert_eq!(out.matches("connection:").count(), 1);
@@ -265,7 +265,7 @@ mod connection_tests {
         // A wrong length desynchronises a persistent connection: the next
         // response would be read as part of this body.
         let mut response = Response::new(StatusCode::OK).body(b"1234".to_vec());
-        response.headers.insert("Content-Length".into(), "999".into());
+        response.headers.insert("Content-Length", "999");
         let out = encoded(&response, Connection::KeepAlive);
         assert!(out.contains("content-length: 4\r\n"), "got {out:?}");
         assert!(!out.contains("999"));

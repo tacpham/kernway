@@ -1,3 +1,4 @@
+#![allow(missing_docs)] // a benchmark binary, not public API
 //! What presence costs the server, by operation and by number of online users.
 //!
 //! The question behind "how many online users can we track": which operation is

@@ -87,7 +87,7 @@ fn make_chunked(n: usize, size: usize) -> Vec<u8> {
     let mut out = Vec::new();
     for _ in 0..n {
         out.extend_from_slice(format!("{size:x}\r\n").as_bytes());
-        out.extend(std::iter::repeat(b'x').take(size));
+        out.extend(std::iter::repeat_n(b'x', size));
         out.extend_from_slice(b"\r\n");
     }
     out.extend_from_slice(b"0\r\n\r\n");

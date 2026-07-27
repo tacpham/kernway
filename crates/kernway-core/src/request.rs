@@ -136,8 +136,9 @@ impl Request {
     }
 }
 
-/// Trait for extracting data from an HTTP request into a Rust type.
-///
+// Data extraction from a request happens through `kernway_server::Extract` (which also
+// sees the request scope) and the extractors' own `from_request`.
+//
 // Argument resolution is `kernway_server::Extract` (which also sees the request
 // scope), and the extractors' own `from_request`. An early `FromRequest` trait
 // lived here (0 impls) and was removed as dead in favour of those.

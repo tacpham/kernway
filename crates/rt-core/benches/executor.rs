@@ -1,3 +1,4 @@
+#![allow(missing_docs)] // a benchmark binary, not public API
 //! Executor hot paths.
 //!
 //! The thread-per-core design pays for itself in two places, and both are

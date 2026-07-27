@@ -1,3 +1,4 @@
+#![allow(clippy::doc_overindented_list_items)] // intentional aligned continuation lines
 //! login-htmx — a walking-skeleton login flow: kernleaf + kernway-security + htmx.
 //!
 //! The whole KEP-0004 loop, over the real server:
