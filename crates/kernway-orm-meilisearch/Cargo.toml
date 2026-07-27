@@ -10,11 +10,25 @@ kernway-orm-core = { workspace = true }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
 thiserror        = { workspace = true }
-meilisearch-sdk  = { version = "0.26", optional = true }
+
+# Blocking HTTP client — pure-Rust, no tokio. Wrapped in rt_core::spawn_blocking,
+# the same pattern kernway-orm-sqlite uses with rusqlite.
+ureq    = { version = "2", features = ["json"], optional = true }
+rt-core = { workspace = true, optional = true }
 
 [features]
 default = []
-meilisearch = ["meilisearch-sdk"]
+# Enable to compile the actual HTTP-based Meilisearch implementation.
+# Without this feature all types are available but every operation returns
+# OrmError::Unsupported — useful for compile-time checks without a running server.
+#
+# In your app's Cargo.toml:
+#   kernway-orm-meilisearch = { ..., features = ["meilisearch"] }
+meilisearch = ["dep:ureq", "dep:rt-core"]
+
+[dev-dependencies]
+kernway-orm-macro = { workspace = true }
+rt-core           = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,6 +1,6 @@
-//! MeilisearchDriver — implements [`kernway_orm_core::Driver`] for Meilisearch.
+//! `MeilisearchDriver` — implements [`Driver`] for Meilisearch.
 
-use crate::MeilisearchRepository;
+use crate::repository::MeilisearchRepository;
 use kernway_orm_core::{
     driver::{Driver, DriverCapabilities},
     entity::Entity,
@@ -10,32 +10,40 @@ use kernway_orm_core::{
 };
 use serde::{de::DeserializeOwned, Serialize};
 
-/// Configuration for connecting to a Meilisearch instance.
-#[derive(Clone)]
+/// Connection settings for a Meilisearch instance.
+#[derive(Clone, Debug)]
 pub struct MeilisearchConfig {
     /// Meilisearch server URL, e.g. `"http://localhost:7700"`.
     pub url: String,
-    /// API key (master key or search/admin key).
+    /// API key (master key or a scoped search/admin key).
     pub api_key: String,
 }
 
 /// A configured handle to a Meilisearch instance.
+///
+/// Holds the connection config and creates [`MeilisearchRepository`] instances
+/// on demand. No persistent connection is kept — each call opens a new
+/// `ureq` request on a blocking pool thread.
+///
+/// # Example
+/// ```rust,ignore
+/// let driver = MeilisearchDriver::connect("http://localhost:7700", "masterKey");
+/// driver.ping().await?;
+/// let products: Box<dyn Repository<Product>> = driver.repository();
+/// ```
 pub struct MeilisearchDriver {
-    config: MeilisearchConfig,
+    pub(crate) config: MeilisearchConfig,
 }
 
 impl MeilisearchDriver {
-    /// Create a new driver with the given config.
+    /// Create a driver with the given [`MeilisearchConfig`].
     pub fn new(config: MeilisearchConfig) -> Self {
         Self { config }
     }
 
-    /// Convenience constructor.
-    pub fn connect(url: &str, api_key: &str) -> Self {
-        Self::new(MeilisearchConfig {
-            url: url.to_string(),
-            api_key: api_key.to_string(),
-        })
+    /// Convenience constructor — takes URL and API key directly.
+    pub fn connect(url: impl Into<String>, api_key: impl Into<String>) -> Self {
+        Self::new(MeilisearchConfig { url: url.into(), api_key: api_key.into() })
     }
 }
 
@@ -48,9 +56,20 @@ impl Driver for MeilisearchDriver {
     }
 
     fn ping(&self) -> BoxFuture<'_, Result<(), OrmError>> {
-        Box::pin(async move {
+        #[cfg(feature = "meilisearch")]
+        {
+            let url = self.config.url.clone();
+            let api_key = self.config.api_key.clone();
+            Box::pin(async move {
+                rt_core::spawn_blocking(move || crate::api::ping(&url, &api_key))
+                    .await
+                    .unwrap_or(Err(OrmError::Connection("blocking pool panicked".into())))
+            })
+        }
+        #[cfg(not(feature = "meilisearch"))]
+        Box::pin(async {
             Err(OrmError::Unsupported(
-                "MeilisearchDriver::ping — not yet implemented".into(),
+                "enable the `meilisearch` feature to use MeilisearchDriver".into(),
             ))
         })
     }
