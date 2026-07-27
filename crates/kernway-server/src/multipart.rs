@@ -54,7 +54,7 @@ pub enum MultipartError {
     Malformed(&'static str),
     /// A part had no `name` in its `Content-Disposition` (required by RFC 7578 §4.2).
     MissingName,
-    /// More than [`MAX_PARTS`] parts, or a part header over [`MAX_PART_HEADER_BYTES`].
+    /// More than `MAX_PARTS` parts, or a part header over `MAX_PART_HEADER_BYTES`.
     TooLarge(&'static str),
     /// `text()` was called on a part whose bytes are not valid UTF-8.
     NotUtf8,
@@ -132,7 +132,7 @@ impl Multipart {
     /// an already-parsed part and never awaits.
     ///
     /// # Errors
-    /// Never, in this cut — the whole body was validated in [`from_request`]. The
+    /// Never, in this cut — the whole body was validated in [`from_request`](Self::from_request). The
     /// `Result` is part of the streaming-ready signature.
     #[allow(clippy::unused_async, clippy::missing_errors_doc)]
     pub async fn next(&mut self) -> Result<Option<Part>, MultipartError> {
