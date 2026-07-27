@@ -36,6 +36,9 @@ pub enum OrmError {
     /// and the entity have drifted apart.
     #[error("type conversion error: {0}")]
     TypeConversion(String),
+    /// A schema migration failed.
+    #[error("migration error: {0}")]
+    Migration(String),
     /// The backend does not implement this operation. Lets a driver decline a
     /// feature honestly instead of failing in some subtler way.
     #[error("driver not supported: {0}")]

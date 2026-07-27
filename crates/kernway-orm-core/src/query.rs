@@ -20,6 +20,23 @@ pub trait QueryBuilder<T: Entity>: Send {
     /// `field LIKE pattern` — `%` and `_` carry their usual SQL meaning.
     fn filter_like(self: Box<Self>, field: &'static str, pattern: &str)
         -> Box<dyn QueryBuilder<T>>;
+    /// `field >= value` (greater than or equal).
+    fn filter_gte(self: Box<Self>, field: &'static str, value: &str) -> Box<dyn QueryBuilder<T>>;
+    /// `field <= value` (less than or equal).
+    fn filter_lte(self: Box<Self>, field: &'static str, value: &str) -> Box<dyn QueryBuilder<T>>;
+    /// `field IN (v1, v2, …)` — match any value in the list.
+    fn filter_in(self: Box<Self>, field: &'static str, values: Vec<String>) -> Box<dyn QueryBuilder<T>>;
+    /// `field BETWEEN from AND to` — inclusive range.
+    fn filter_between(
+        self: Box<Self>,
+        field: &'static str,
+        from: &str,
+        to: &str,
+    ) -> Box<dyn QueryBuilder<T>>;
+    /// `field IS NULL`.
+    fn filter_is_null(self: Box<Self>, field: &'static str) -> Box<dyn QueryBuilder<T>>;
+    /// `field IS NOT NULL`.
+    fn filter_is_not_null(self: Box<Self>, field: &'static str) -> Box<dyn QueryBuilder<T>>;
 
     // --- Ordering ---
 

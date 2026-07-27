@@ -85,6 +85,10 @@ use std::pin::Pin;
 /// `'a` is the lifetime of the borrowed receiver.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// SQL syntax adapters shared by relational backends.
+pub mod dialect;
+/// The entry-point driver abstraction implemented by backends.
+pub mod driver;
 /// Entity mapping metadata: what a struct is called in the database.
 pub mod entity;
 /// The error type shared by every backend.
@@ -96,6 +100,8 @@ pub mod query;
 /// The CRUD contract a backend implements per entity type.
 pub mod repository;
 
+pub use dialect::SqlDialect;
+pub use driver::{Driver, DriverCapabilities};
 pub use entity::{ColumnDef, ColumnType, Entity};
 pub use error::OrmError;
 pub use page::Page;

@@ -1,0 +1,27 @@
+[package]
+name = "kernway-orm-mysql"
+description = "MySQL backend for kernway-orm-core (backed by mysql_async)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kernway-orm-core = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+thiserror        = { workspace = true }
+mysql_async      = { version = "0.33", optional = true }
+
+[features]
+default = []
+mysql = ["mysql_async"]
+
+[dev-dependencies]
+kernway-orm-macro = { workspace = true }
+rt-core           = { workspace = true }
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
