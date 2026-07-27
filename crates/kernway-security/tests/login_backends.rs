@@ -23,7 +23,10 @@ use kernway_security::session::{MemorySessionStore, SessionConfig, SessionManage
 /// Log in, authenticate the issued token, then log out and confirm revocation —
 /// the whole point of the hybrid token + registry, independent of the backend.
 async fn login_flow(mgr: &SessionManager, user: &str) {
-    let token = mgr.login(user, vec!["ADMIN".to_string()], "device").await.unwrap();
+    let token = mgr
+        .login(user, vec!["ADMIN".to_string()], "device")
+        .await
+        .unwrap();
 
     // The signed token authenticates against the stored session.
     let ctx = mgr.authenticate(Some(&token)).await;
@@ -36,7 +39,10 @@ async fn login_flow(mgr: &SessionManager, user: &str) {
 
     // Logout revokes it in the registry: the same token is now anonymous.
     mgr.logout_token(&token).await.unwrap();
-    assert!(!mgr.authenticate(Some(&token)).await.is_authenticated(), "revoked → anonymous");
+    assert!(
+        !mgr.authenticate(Some(&token)).await.is_authenticated(),
+        "revoked → anonymous"
+    );
     assert_eq!(mgr.sessions_of(user).await.unwrap().len(), 0);
 }
 
@@ -47,7 +53,10 @@ fn login_flow_in_memory() {
         "in-memory-test-key",
         SessionConfig::default(),
     );
-    Executor::new().unwrap().block_on(login_flow(&mgr, "mem-alice")).unwrap();
+    Executor::new()
+        .unwrap()
+        .block_on(login_flow(&mgr, "mem-alice"))
+        .unwrap();
 }
 
 #[cfg(feature = "redis")]
@@ -92,7 +101,11 @@ mod redis {
 
                 let phone = mgr.login(user, vec![], "phone").await.unwrap();
                 let laptop = mgr.login(user, vec![], "laptop").await.unwrap();
-                assert_eq!(mgr.sessions_of(user).await.unwrap().len(), 2, "two devices logged in");
+                assert_eq!(
+                    mgr.sessions_of(user).await.unwrap().len(),
+                    2,
+                    "two devices logged in"
+                );
 
                 // One call revokes every session of the user (logout everywhere / ban).
                 mgr.logout_user(user).await.unwrap();

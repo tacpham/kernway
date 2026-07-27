@@ -19,8 +19,14 @@ use std::time::Duration;
 
 use di_core::{AppContext, RequestScope};
 use kernway_config::{Config, FromConfig};
-use kernway_core::{error::StatusCode, request::Request, response::{Body, Response}};
-use kernway_http::{encode_head, encode_response, encode_response_with, parse_head, Connection, ParsedHead};
+use kernway_core::{
+    error::StatusCode,
+    request::Request,
+    response::{Body, Response},
+};
+use kernway_http::{
+    encode_head, encode_response, encode_response_with, parse_head, Connection, ParsedHead,
+};
 use kernway_static::{mime_for, StaticFiles};
 use rt_core::Shutdown;
 use rt_net::{AsyncTcpStream, ShardConfig};
@@ -75,8 +81,8 @@ pub struct UploadConfig {
 impl Default for UploadConfig {
     fn default() -> Self {
         Self {
-            max_inmemory_body: 1024 * 1024,              // 1 MiB — covers virtually all JSON/form posts
-            max_upload_size: 4 * 1024 * 1024 * 1024,     // 4 GiB — generous for media, bounded vs DoS
+            max_inmemory_body: 1024 * 1024, // 1 MiB — covers virtually all JSON/form posts
+            max_upload_size: 4 * 1024 * 1024 * 1024, // 4 GiB — generous for media, bounded vs DoS
             temp_dir: std::env::temp_dir(),
         }
     }
@@ -85,7 +91,11 @@ impl Default for UploadConfig {
 /// Run the matched handler (the terminal of the middleware chain). The handler
 /// owns the request and returns a `'static` future, so nothing here is borrowed
 /// across its `await`.
-fn run_handler(req: Request, router: &Router, scope: &RequestScope) -> BoxFuture<'static, Response> {
+fn run_handler(
+    req: Request,
+    router: &Router,
+    scope: &RequestScope,
+) -> BoxFuture<'static, Response> {
     match router.find(&req.method, &req.path) {
         Some((handler, params)) => {
             let mut req = req;
@@ -95,7 +105,9 @@ fn run_handler(req: Request, router: &Router, scope: &RequestScope) -> BoxFuture
         None => {
             let body = format!(r#"{{"error":"no route for {} {}"}}"#, req.method, req.path);
             Box::pin(async move {
-                Response::new(StatusCode::NOT_FOUND).content_type("application/json").body(body.into_bytes())
+                Response::new(StatusCode::NOT_FOUND)
+                    .content_type("application/json")
+                    .body(body.into_bytes())
             })
         }
     }
@@ -103,21 +115,21 @@ fn run_handler(req: Request, router: &Router, scope: &RequestScope) -> BoxFuture
 
 /// App builder — fluent API similar to Spring Boot.
 pub struct AppBuilder {
-    addr:         String,
+    addr: String,
     /// Whether `bind` was called — if not, the address may come from config.
     addr_explicit: bool,
-    router:       Router,
-    context:      AppContext,
-    middlewares:  Vec<Arc<dyn Middleware>>,
+    router: Router,
+    context: AppContext,
+    middlewares: Vec<Arc<dyn Middleware>>,
     static_files: Option<Arc<StaticFiles>>,
     precompressed: bool,
-    file_chunk:   usize,
-    upload:       UploadConfig,
-    shards:       Option<usize>,
-    keep_alive:   KeepAliveConfig,
-    drain:        Duration,
+    file_chunk: usize,
+    upload: UploadConfig,
+    shards: Option<usize>,
+    keep_alive: KeepAliveConfig,
+    drain: Duration,
     /// The application config; loaded from disk + env at `build` if not provided.
-    config:       Option<Config>,
+    config: Option<Config>,
     /// Deferred typed-config bean registrations, run once the config is resolved.
     config_beans: Vec<ConfigBean>,
     /// Custom response for a caught handler panic (`on_panic`); default 500 if unset.
@@ -363,7 +375,9 @@ impl AppBuilder {
         let _ = self.context.register_instance::<Config>(Arc::new(config));
         // The custom panic response (if any), as a bean the dispatch resolves.
         if let Some(handler) = self.panic_handler.take() {
-            let _ = self.context.register_instance::<PanicHandler>(Arc::new(PanicHandler(handler)));
+            let _ = self
+                .context
+                .register_instance::<PanicHandler>(Arc::new(PanicHandler(handler)));
         }
 
         // Apply the precompression toggle here so it is independent of whether
@@ -400,7 +414,10 @@ fn init_logging_from_config(config: &Config) {
         // Otherwise build the spec from `logging.level` + each `logging.level.*`.
         // (Per-module env overrides still arrive via KW_LOGGING__LEVEL__* → config.)
         _ => {
-            let mut spec = config.get_str("logging.level").unwrap_or("info").to_string();
+            let mut spec = config
+                .get_str("logging.level")
+                .unwrap_or("info")
+                .to_string();
             for (module, level) in config.with_prefix("logging.level.") {
                 spec.push(',');
                 spec.push_str(module);
@@ -472,22 +489,24 @@ pub fn forbidden() -> Response {
 pub fn unauthorized() -> Response {
     Response::new(StatusCode::UNAUTHORIZED)
         .content_type("application/json; charset=utf-8")
-        .body(br#"{"status":401,"title":"Unauthorized","detail":"authentication required"}"#.to_vec())
+        .body(
+            br#"{"status":401,"title":"Unauthorized","detail":"authentication required"}"#.to_vec(),
+        )
 }
 
 /// HTTP application.
 pub struct KernwayApp {
-    addr:        String,
-    shards:      Option<usize>,
-    keep_alive:  KeepAliveConfig,
-    drain:       Duration,
-    shutdown:     Shutdown,
-    router:       Arc<Router>,
-    context:      Arc<AppContext>,
-    middlewares:  Arc<Vec<Arc<dyn Middleware>>>,
+    addr: String,
+    shards: Option<usize>,
+    keep_alive: KeepAliveConfig,
+    drain: Duration,
+    shutdown: Shutdown,
+    router: Arc<Router>,
+    context: Arc<AppContext>,
+    middlewares: Arc<Vec<Arc<dyn Middleware>>>,
     static_files: Option<Arc<StaticFiles>>,
-    file_chunk:   usize,
-    upload:       Arc<UploadConfig>,
+    file_chunk: usize,
+    upload: Arc<UploadConfig>,
 }
 
 impl KernwayApp {
@@ -538,10 +557,12 @@ impl KernwayApp {
     /// what tests want: installing a process-wide handler from a test would
     /// change how the whole test binary responds to Ctrl+C.
     pub fn run_until_shutdown(self) -> io::Result<()> {
-        let addr: SocketAddr = self
-            .addr
-            .parse()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("bad address {}: {e}", self.addr)))?;
+        let addr: SocketAddr = self.addr.parse().map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("bad address {}: {e}", self.addr),
+            )
+        })?;
 
         let mut config = ShardConfig::new(addr).drain_timeout(self.drain);
         if let Some(shards) = self.shards {
@@ -568,7 +589,18 @@ impl KernwayApp {
             let upload = Arc::clone(&upload);
             let shutdown = shutdown.clone();
             async move {
-                serve_connection(stream, router, context, middlewares, static_files, keep_alive, file_chunk, upload, shutdown).await;
+                serve_connection(
+                    stream,
+                    router,
+                    context,
+                    middlewares,
+                    static_files,
+                    keep_alive,
+                    file_chunk,
+                    upload,
+                    shutdown,
+                )
+                .await;
             }
         });
 
@@ -617,9 +649,11 @@ async fn serve_connection(
             // handled separately below, so a multi-GB upload never grows this buffer.
             let (head_req, head_end, content_length) = loop {
                 match parse_head(&buf) {
-                    Ok(ParsedHead::Complete { request, head_end, content_length }) => {
-                        break (request, head_end, content_length)
-                    }
+                    Ok(ParsedHead::Complete {
+                        request,
+                        head_end,
+                        content_length,
+                    }) => break (request, head_end, content_length),
                     Ok(ParsedHead::Incomplete) => {}
                     Err(err) => {
                         let response = Response::new(StatusCode::BAD_REQUEST)
@@ -686,8 +720,16 @@ async fn serve_connection(
             } else {
                 // Large body: stream it to a temp file — memory stays O(chunk). This
                 // drains the head+body from `buf`, leaving any pipelined tail.
-                match spool_body(&mut stream, &mut buf, head_end, content_length, &upload, file_chunk, keep_alive.idle_timeout)
-                    .await
+                match spool_body(
+                    &mut stream,
+                    &mut buf,
+                    head_end,
+                    content_length,
+                    &upload,
+                    file_chunk,
+                    keep_alive.idle_timeout,
+                )
+                .await
                 {
                     Ok(spooled) => {
                         let mut request = head_req;
@@ -722,8 +764,15 @@ async fn serve_connection(
             Some(file_response) => file_response,
             None => handle(request, &router, &context, &middlewares).await,
         };
-        let connection = if persist { Connection::KeepAlive } else { Connection::Close };
-        if write_response(&mut stream, &response, connection, is_head, file_chunk).await.is_err() {
+        let connection = if persist {
+            Connection::KeepAlive
+        } else {
+            Connection::Close
+        };
+        if write_response(&mut stream, &response, connection, is_head, file_chunk)
+            .await
+            .is_err()
+        {
             return; // peer vanished mid-write; nothing to half-close
         }
 
@@ -789,10 +838,18 @@ async fn spool_body(
     while written < content_length {
         let n = match rt_core::timeout(idle_timeout, stream.read(&mut chunk)).await {
             Ok(Ok(n)) => n,
-            _ => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "upload stalled or closed")),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "upload stalled or closed",
+                ))
+            }
         };
         if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed mid-upload"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "connection closed mid-upload",
+            ));
         }
         let take = (content_length - written).min(n);
         file = write_all_blocking(file, chunk[..take].to_vec()).await?;
@@ -809,7 +866,10 @@ async fn spool_body(
         None => return Err(blocking_gone()),
     }
 
-    Ok(kernway_core::request::SpooledBody { path, len: content_length as u64 })
+    Ok(kernway_core::request::SpooledBody {
+        path,
+        len: content_length as u64,
+    })
 }
 
 /// Append `data` to `file` on the blocking pool, handing the file back to keep writing.
@@ -835,7 +895,12 @@ fn upload_temp_path(dir: &std::path::Path) -> std::path::PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    dir.join(format!("kernway-upload-{}-{}-{}.tmp", std::process::id(), nanos, n))
+    dir.join(format!(
+        "kernway-upload-{}-{}-{}.tmp",
+        std::process::id(),
+        nanos,
+        n
+    ))
 }
 
 /// Default chunk size for streaming a file body, overridable with
@@ -873,7 +938,9 @@ async fn write_response(
             stream_file(stream, path.clone(), *range, *len, file_chunk).await
         }
         Body::Empty | Body::Bytes(_) => {
-            stream.write_all(&encode_response_with(response, connection)).await
+            stream
+                .write_all(&encode_response_with(response, connection))
+                .await
         }
     }
 }
@@ -970,7 +1037,10 @@ enum StaticOutcome {
 impl StaticOutcome {
     fn into_response(self) -> Response {
         match self {
-            StaticOutcome::NotModified { etag, vary_encoding } => {
+            StaticOutcome::NotModified {
+                etag,
+                vary_encoding,
+            } => {
                 let mut r = Response::new(StatusCode::NOT_MODIFIED);
                 r.headers.insert("etag", &etag);
                 r.headers.insert("cache-control", "no-cache");
@@ -979,11 +1049,20 @@ impl StaticOutcome {
                 }
                 r
             }
-            StaticOutcome::File { path, len, etag, mime, encoding, vary_encoding } => {
+            StaticOutcome::File {
+                path,
+                len,
+                etag,
+                mime,
+                encoding,
+                vary_encoding,
+            } => {
                 // `Body::File`: the response names the file; the connection task
                 // streams it in bounded chunks off the blocking pool, so a large
                 // download is never read whole into memory.
-                let mut r = Response::new(StatusCode::OK).content_type(mime).file(path, len);
+                let mut r = Response::new(StatusCode::OK)
+                    .content_type(mime)
+                    .file(path, len);
                 r.headers.insert("etag", &etag);
                 // `no-cache` means "cache, but revalidate every time" — the browser
                 // re-asks with If-None-Match and gets a 304 when nothing changed.
@@ -1057,11 +1136,15 @@ fn load_static(
                 let variant = with_suffix(&canon, enc.extension());
                 // The variant gets the same symlink re-check as the original: a
                 // `.br` that links outside the root must not escape it either.
-                let Ok(vc) = std::fs::canonicalize(&variant) else { continue };
+                let Ok(vc) = std::fs::canonicalize(&variant) else {
+                    continue;
+                };
                 if !vc.starts_with(&canon_root) {
                     continue;
                 }
-                let Ok(vm) = std::fs::metadata(&vc) else { continue };
+                let Ok(vm) = std::fs::metadata(&vc) else {
+                    continue;
+                };
                 if vm.is_file() {
                     served = vc;
                     served_meta = vm;
@@ -1086,7 +1169,10 @@ fn load_static(
     // and stream nothing — the whole point of caching.
     if let Some(inm) = if_none_match {
         if kernway_static::etag_matches(inm, &etag) {
-            return Some(StaticOutcome::NotModified { etag, vary_encoding });
+            return Some(StaticOutcome::NotModified {
+                etag,
+                vary_encoding,
+            });
         }
     }
 
@@ -1150,14 +1236,23 @@ async fn try_static(
     // on, pass `Some` even if the request sent no `Accept-Encoding` (as `""`):
     // that still marks the resource negotiated, so its response carries a
     // consistent `Vary: Accept-Encoding` and a shared cache keys on the encoding.
-    let accept_encoding = sf
-        .serves_precompressed()
-        .then(|| request.headers.get("accept-encoding").unwrap_or("").to_string());
+    let accept_encoding = sf.serves_precompressed().then(|| {
+        request
+            .headers
+            .get("accept-encoding")
+            .unwrap_or("")
+            .to_string()
+    });
 
     // `spawn_blocking` yields `None` if the closure panicked; `load_static`
     // yields `None` for any miss. Both fall through to the router.
     let outcome = rt_core::spawn_blocking(move || {
-        load_static(&root, path, if_none_match.as_deref(), accept_encoding.as_deref())
+        load_static(
+            &root,
+            path,
+            if_none_match.as_deref(),
+            accept_encoding.as_deref(),
+        )
     })
     .await??;
 
@@ -1209,7 +1304,9 @@ fn parse_range(header: &str, len: u64) -> RangeSpec {
 
     let (start, end_incl) = if a.is_empty() {
         // Suffix range: the last `n` bytes.
-        let Ok(n) = b.parse::<u64>() else { return RangeSpec::Full };
+        let Ok(n) = b.parse::<u64>() else {
+            return RangeSpec::Full;
+        };
         if n == 0 {
             return RangeSpec::Unsatisfiable;
         }
@@ -1219,11 +1316,15 @@ fn parse_range(header: &str, len: u64) -> RangeSpec {
             (len - n, len - 1)
         }
     } else {
-        let Ok(start) = a.parse::<u64>() else { return RangeSpec::Full };
+        let Ok(start) = a.parse::<u64>() else {
+            return RangeSpec::Full;
+        };
         let end_incl = if b.is_empty() {
             len.saturating_sub(1)
         } else {
-            let Ok(end) = b.parse::<u64>() else { return RangeSpec::Full };
+            let Ok(end) = b.parse::<u64>() else {
+                return RangeSpec::Full;
+            };
             end.min(len.saturating_sub(1))
         };
         (start, end_incl)
@@ -1232,7 +1333,10 @@ fn parse_range(header: &str, len: u64) -> RangeSpec {
     if len == 0 || start >= len || start > end_incl {
         return RangeSpec::Unsatisfiable;
     }
-    RangeSpec::Satisfiable { start, end: end_incl + 1 }
+    RangeSpec::Satisfiable {
+        start,
+        end: end_incl + 1,
+    }
 }
 
 /// Turn a `200` file response into a `206` (or `416`) per the `Range` header.
@@ -1241,9 +1345,10 @@ fn apply_range(response: &mut Response, header: &str, len: u64) {
         RangeSpec::Full => {} // leave the 200 as-is
         RangeSpec::Satisfiable { start, end } => {
             response.status = StatusCode::PARTIAL_CONTENT;
-            response
-                .headers
-                .insert("content-range", &format!("bytes {}-{}/{}", start, end - 1, len));
+            response.headers.insert(
+                "content-range",
+                &format!("bytes {}-{}/{}", start, end - 1, len),
+            );
             if let Body::File { range, .. } = &mut response.body {
                 *range = Some((start, end));
             }
@@ -1275,7 +1380,12 @@ async fn handle(
         // Middleware may set request-scoped beans on it; the handler resolves them.
         let scope = RequestScope::new(context);
         let terminal = move |req: Request, scope: &RequestScope| run_handler(req, router, scope);
-        Next { rest: middlewares, terminal: &terminal }.run(request, &scope).await
+        Next {
+            rest: middlewares,
+            terminal: &terminal,
+        }
+        .run(request, &scope)
+        .await
     });
     // A custom panic response, if the app registered one (`on_panic`).
     let on_panic = context.get::<PanicHandler>().ok();
@@ -1301,8 +1411,8 @@ impl Future for CatchUnwind<'_> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut TaskCx<'_>) -> Poll<Response> {
         let this = self.as_mut().get_mut(); // `inner` is a `Pin<Box<…>>`, so `Unpin`.
-        // `AssertUnwindSafe`: on a caught panic we return a 500 and drop the future,
-        // never re-polling it, so no observer sees a broken half-state.
+                                            // `AssertUnwindSafe`: on a caught panic we return a 500 and drop the future,
+                                            // never re-polling it, so no observer sees a broken half-state.
         match catch_unwind(AssertUnwindSafe(|| this.inner.as_mut().poll(cx))) {
             Ok(poll) => poll,
             Err(payload) => {
@@ -1371,28 +1481,45 @@ mod tests {
         }
         impl FromConfig for DbConfig {
             fn from_config(config: &Config) -> Self {
-                DbConfig { url: config.get_str("db.url").unwrap_or_default().to_string() }
+                DbConfig {
+                    url: config.get_str("db.url").unwrap_or_default().to_string(),
+                }
             }
         }
 
         let config = Config::builder()
             .parse("server.port = 7654\ndb.url = postgres://localhost/app")
             .build();
-        let app = KernwayApp::builder().config(config).configure::<DbConfig>().build();
+        let app = KernwayApp::builder()
+            .config(config)
+            .configure::<DbConfig>()
+            .build();
 
         // No .bind() → the address came from server.port.
         assert_eq!(app.addr, "0.0.0.0:7654");
         // The Config itself is an injectable bean.
-        assert_eq!(app.context.get::<Config>().unwrap().get_str("db.url"), Some("postgres://localhost/app"));
+        assert_eq!(
+            app.context.get::<Config>().unwrap().get_str("db.url"),
+            Some("postgres://localhost/app")
+        );
         // The typed config bean was built from the config and registered.
-        assert_eq!(app.context.get::<DbConfig>().unwrap().url, "postgres://localhost/app");
+        assert_eq!(
+            app.context.get::<DbConfig>().unwrap().url,
+            "postgres://localhost/app"
+        );
     }
 
     #[test]
     fn an_explicit_bind_wins_over_config() {
         let config = Config::builder().parse("server.port = 1111").build();
-        let app = KernwayApp::builder().bind("127.0.0.1:2222").config(config).build();
-        assert_eq!(app.addr, "127.0.0.1:2222", "explicit bind is not overridden by config");
+        let app = KernwayApp::builder()
+            .bind("127.0.0.1:2222")
+            .config(config)
+            .build();
+        assert_eq!(
+            app.addr, "127.0.0.1:2222",
+            "explicit bind is not overridden by config"
+        );
     }
 
     #[test]
@@ -1407,9 +1534,11 @@ mod tests {
     #[test]
     fn a_matched_route_runs_its_handler() {
         let mut router = Router::new();
-        router.add("GET", "/ping", sync_handler(|_req, _ctx| {
-            Response::new(StatusCode::OK).body(b"pong".to_vec())
-        }));
+        router.add(
+            "GET",
+            "/ping",
+            sync_handler(|_req, _ctx| Response::new(StatusCode::OK).body(b"pong".to_vec())),
+        );
         let response = block_on(handle(get("/ping"), &router, &AppContext::new(), &[]));
         assert_eq!(response.body_bytes(), b"pong");
     }
@@ -1417,9 +1546,13 @@ mod tests {
     #[test]
     fn path_params_reach_the_handler() {
         let mut router = Router::new();
-        router.add("GET", "/users/{id}", sync_handler(|req: Request, _ctx: &RequestScope| {
-            Response::new(StatusCode::OK).body(req.path_params["id"].clone().into_bytes())
-        }));
+        router.add(
+            "GET",
+            "/users/{id}",
+            sync_handler(|req: Request, _ctx: &RequestScope| {
+                Response::new(StatusCode::OK).body(req.path_params["id"].clone().into_bytes())
+            }),
+        );
         let response = block_on(handle(get("/users/42"), &router, &AppContext::new(), &[]));
         assert_eq!(response.body_bytes(), b"42");
     }
@@ -1427,9 +1560,11 @@ mod tests {
     #[test]
     fn a_panicking_handler_becomes_a_500() {
         let mut router = Router::new();
-        router.add("GET", "/boom", sync_handler(|_req, _ctx| -> Response {
-            panic!("handler exploded")
-        }));
+        router.add(
+            "GET",
+            "/boom",
+            sync_handler(|_req, _ctx| -> Response { panic!("handler exploded") }),
+        );
         let response = block_on(handle(get("/boom"), &router, &AppContext::new(), &[]));
         assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -1439,10 +1574,16 @@ mod tests {
         // What #[require_role] compiles to. No context (no auth) → not allowed.
         let app = AppContext::new();
         let scope = RequestScope::new(&app);
-        assert!(!role_allowed(&scope, "ADMIN"), "no SecurityContext → denied");
+        assert!(
+            !role_allowed(&scope, "ADMIN"),
+            "no SecurityContext → denied"
+        );
 
         // An authenticated context with the role → allowed; another role → denied.
-        scope.set(kernway_security::SecurityContext::authenticated("u", ["ADMIN"]));
+        scope.set(kernway_security::SecurityContext::authenticated(
+            "u",
+            ["ADMIN"],
+        ));
         assert!(role_allowed(&scope, "ADMIN"));
         assert!(!role_allowed(&scope, "USER"));
     }
@@ -1450,17 +1591,26 @@ mod tests {
     #[test]
     fn on_panic_customises_the_panic_response() {
         let mut router = Router::new();
-        router.add("GET", "/boom", sync_handler(|_req, _ctx| -> Response { panic!("kaboom") }));
+        router.add(
+            "GET",
+            "/boom",
+            sync_handler(|_req, _ctx| -> Response { panic!("kaboom") }),
+        );
         // Register a custom panic handler the way `build()` does from `on_panic`.
         let mut context = AppContext::new();
         context
             .register_instance::<PanicHandler>(Arc::new(PanicHandler(Box::new(|message: &str| {
-                Response::new(StatusCode::SERVICE_UNAVAILABLE).body(format!("caught: {message}").into_bytes())
+                Response::new(StatusCode::SERVICE_UNAVAILABLE)
+                    .body(format!("caught: {message}").into_bytes())
             }))))
             .unwrap();
 
         let response = block_on(handle(get("/boom"), &router, &context, &[]));
-        assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE, "custom status used");
+        assert_eq!(
+            response.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "custom status used"
+        );
         assert!(
             String::from_utf8_lossy(response.body_bytes()).contains("caught: kaboom"),
             "custom body carries the panic message"
@@ -1471,8 +1621,15 @@ mod tests {
     fn middleware_wraps_the_handler() {
         struct Tag;
         impl Middleware for Tag {
-            fn name(&self) -> &'static str { "Tag" }
-            fn handle<'a>(&'a self, req: Request, scope: &'a RequestScope, next: Next<'a>) -> BoxFuture<'a, Response> {
+            fn name(&self) -> &'static str {
+                "Tag"
+            }
+            fn handle<'a>(
+                &'a self,
+                req: Request,
+                scope: &'a RequestScope,
+                next: Next<'a>,
+            ) -> BoxFuture<'a, Response> {
                 Box::pin(async move {
                     let mut resp = next.run(req, scope).await;
                     resp.headers.insert("x-tag", "seen");
@@ -1482,7 +1639,11 @@ mod tests {
         }
 
         let mut router = Router::new();
-        router.add("GET", "/x", sync_handler(|_req, _ctx| Response::new(StatusCode::OK)));
+        router.add(
+            "GET",
+            "/x",
+            sync_handler(|_req, _ctx| Response::new(StatusCode::OK)),
+        );
         let layers: Vec<Arc<dyn Middleware>> = vec![Arc::new(Tag)];
         let response = block_on(handle(get("/x"), &router, &AppContext::new(), &layers));
         assert_eq!(response.headers.get("x-tag").unwrap(), "seen");
@@ -1494,10 +1655,21 @@ mod tests {
     /// Keep-alive off: the client reads to EOF, so a persistent connection
     /// would make every caller wait out the idle timeout.
     fn round_trip(router: Router, raw_request: &'static str) -> String {
-        round_trip_with(router, raw_request, KeepAliveConfig { enabled: false, ..Default::default() })
+        round_trip_with(
+            router,
+            raw_request,
+            KeepAliveConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        )
     }
 
-    fn round_trip_with(router: Router, raw_request: &'static str, keep_alive: KeepAliveConfig) -> String {
+    fn round_trip_with(
+        router: Router,
+        raw_request: &'static str,
+        keep_alive: KeepAliveConfig,
+    ) -> String {
         use std::io::{Read, Write};
 
         let ex = rt_core::Executor::new().unwrap();
@@ -1522,7 +1694,18 @@ mod tests {
         let middlewares: Arc<Vec<Arc<dyn Middleware>>> = Arc::new(Vec::new());
         ex.block_on(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_connection(stream, router, context, middlewares, None, keep_alive, FILE_CHUNK, Arc::new(UploadConfig::default()), Shutdown::new()).await;
+            serve_connection(
+                stream,
+                router,
+                context,
+                middlewares,
+                None,
+                keep_alive,
+                FILE_CHUNK,
+                Arc::new(UploadConfig::default()),
+                Shutdown::new(),
+            )
+            .await;
         })
         .unwrap();
 
@@ -1532,11 +1715,15 @@ mod tests {
     #[test]
     fn serves_a_real_http_request_over_the_async_transport() {
         let mut router = Router::new();
-        router.add("GET", "/hello", sync_handler(|_req, _ctx| {
-            Response::new(StatusCode::OK)
-                .content_type("text/plain")
-                .body(b"hi".to_vec())
-        }));
+        router.add(
+            "GET",
+            "/hello",
+            sync_handler(|_req, _ctx| {
+                Response::new(StatusCode::OK)
+                    .content_type("text/plain")
+                    .body(b"hi".to_vec())
+            }),
+        );
 
         let got = round_trip(router, "GET /hello HTTP/1.1\r\nHost: x\r\n\r\n");
         assert!(got.starts_with("HTTP/1.1 200 OK\r\n"), "got {got:?}");
@@ -1547,9 +1734,13 @@ mod tests {
     #[test]
     fn serves_a_post_body_to_the_handler() {
         let mut router = Router::new();
-        router.add("POST", "/echo", sync_handler(|req: Request, _ctx: &RequestScope| {
-            Response::new(StatusCode::OK).body(req.body.clone())
-        }));
+        router.add(
+            "POST",
+            "/echo",
+            sync_handler(|req: Request, _ctx: &RequestScope| {
+                Response::new(StatusCode::OK).body(req.body.clone())
+            }),
+        );
 
         let got = round_trip(
             router,
@@ -1561,7 +1752,10 @@ mod tests {
     #[test]
     fn a_malformed_request_gets_a_400_rather_than_a_dropped_connection() {
         let got = round_trip(Router::new(), "GARBAGE\r\n\r\n");
-        assert!(got.starts_with("HTTP/1.1 400 Bad Request\r\n"), "got {got:?}");
+        assert!(
+            got.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+            "got {got:?}"
+        );
     }
 
     /// Serve one connection with owned request bytes and a custom upload config.
@@ -1587,7 +1781,18 @@ mod tests {
         let middlewares: Arc<Vec<Arc<dyn Middleware>>> = Arc::new(Vec::new());
         ex.block_on(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_connection(stream, router, context, middlewares, None, KeepAliveConfig::default(), FILE_CHUNK, Arc::new(upload), Shutdown::new()).await;
+            serve_connection(
+                stream,
+                router,
+                context,
+                middlewares,
+                None,
+                KeepAliveConfig::default(),
+                FILE_CHUNK,
+                Arc::new(upload),
+                Shutdown::new(),
+            )
+            .await;
         })
         .unwrap();
         client.join().unwrap()
@@ -1598,19 +1803,38 @@ mod tests {
         // Threshold 1 KiB → a 100 KiB body streams to a temp file. The handler reports
         // what it saw: an empty in-memory body, and a spool file holding every byte.
         let mut router = Router::new();
-        router.add("POST", "/up", sync_handler(|req: Request, _ctx: &RequestScope| {
-            let on_disk = req.body_spool.as_ref().map(|s| (s.len, std::fs::read(&s.path).map(|v| v.len()).unwrap_or(0)));
-            Response::new(StatusCode::OK).body(format!("body={} spool={on_disk:?}", req.body.len()).into_bytes())
-        }));
+        router.add(
+            "POST",
+            "/up",
+            sync_handler(|req: Request, _ctx: &RequestScope| {
+                let on_disk = req
+                    .body_spool
+                    .as_ref()
+                    .map(|s| (s.len, std::fs::read(&s.path).map(|v| v.len()).unwrap_or(0)));
+                Response::new(StatusCode::OK)
+                    .body(format!("body={} spool={on_disk:?}", req.body.len()).into_bytes())
+            }),
+        );
 
         let payload = vec![b'm'; 100 * 1024];
-        let mut request = format!("POST /up HTTP/1.1\r\nHost: x\r\ncontent-length: {}\r\n\r\n", payload.len()).into_bytes();
+        let mut request = format!(
+            "POST /up HTTP/1.1\r\nHost: x\r\ncontent-length: {}\r\n\r\n",
+            payload.len()
+        )
+        .into_bytes();
         request.extend_from_slice(&payload);
 
-        let upload = UploadConfig { max_inmemory_body: 1024, ..UploadConfig::default() };
+        let upload = UploadConfig {
+            max_inmemory_body: 1024,
+            ..UploadConfig::default()
+        };
         let got = serve_upload(router, request, upload);
         assert!(
-            got.ends_with(&format!("body=0 spool=Some(({}, {}))", payload.len(), payload.len())),
+            got.ends_with(&format!(
+                "body=0 spool=Some(({}, {}))",
+                payload.len(),
+                payload.len()
+            )),
             "large body must be spooled whole to disk with an empty in-memory body: {got:?}"
         );
     }
@@ -1619,24 +1843,48 @@ mod tests {
     fn a_small_body_stays_in_memory() {
         // Under the threshold → the existing fast path: in `req.body`, no spool.
         let mut router = Router::new();
-        router.add("POST", "/up", sync_handler(|req: Request, _ctx: &RequestScope| {
-            Response::new(StatusCode::OK).body(format!("body={} spool={}", req.body.len(), req.body_spool.is_some()).into_bytes())
-        }));
+        router.add(
+            "POST",
+            "/up",
+            sync_handler(|req: Request, _ctx: &RequestScope| {
+                Response::new(StatusCode::OK).body(
+                    format!("body={} spool={}", req.body.len(), req.body_spool.is_some())
+                        .into_bytes(),
+                )
+            }),
+        );
         let request = b"POST /up HTTP/1.1\r\nHost: x\r\ncontent-length: 5\r\n\r\nhello".to_vec();
-        let upload = UploadConfig { max_inmemory_body: 1024, ..UploadConfig::default() };
+        let upload = UploadConfig {
+            max_inmemory_body: 1024,
+            ..UploadConfig::default()
+        };
         let got = serve_upload(router, request, upload);
-        assert!(got.ends_with("body=5 spool=false"), "small body stays in memory: {got:?}");
+        assert!(
+            got.ends_with("body=5 spool=false"),
+            "small body stays in memory: {got:?}"
+        );
     }
 
     #[test]
     fn an_upload_over_the_ceiling_is_refused_with_413() {
         let payload = vec![b'x'; 5000];
-        let mut request = format!("POST /up HTTP/1.1\r\nHost: x\r\ncontent-length: {}\r\n\r\n", payload.len()).into_bytes();
+        let mut request = format!(
+            "POST /up HTTP/1.1\r\nHost: x\r\ncontent-length: {}\r\n\r\n",
+            payload.len()
+        )
+        .into_bytes();
         request.extend_from_slice(&payload);
         // Ceiling 1000 < 5000 → 413 before any body is spooled.
-        let upload = UploadConfig { max_inmemory_body: 100, max_upload_size: 1000, ..UploadConfig::default() };
+        let upload = UploadConfig {
+            max_inmemory_body: 100,
+            max_upload_size: 1000,
+            ..UploadConfig::default()
+        };
         let got = serve_upload(Router::new(), request, upload);
-        assert!(got.starts_with("HTTP/1.1 413"), "over-limit upload must be refused: {got:?}");
+        assert!(
+            got.starts_with("HTTP/1.1 413"),
+            "over-limit upload must be refused: {got:?}"
+        );
     }
 
     #[test]
@@ -1647,7 +1895,10 @@ mod tests {
         std::fs::write(&src, b"song bytes").unwrap();
 
         let mut req = Request::new("POST", "/up");
-        req.body_spool = Some(kernway_core::request::SpooledBody { path: src.clone(), len: 10 });
+        req.body_spool = Some(kernway_core::request::SpooledBody {
+            path: src.clone(),
+            len: 10,
+        });
         let upload = crate::upload::UploadFile::from_request(&req).unwrap();
         assert_eq!(upload.len(), 10);
 
@@ -1657,14 +1908,22 @@ mod tests {
             .block_on(async move { upload.persist(dst_move).await.unwrap() })
             .unwrap();
 
-        assert_eq!(std::fs::read(&dst).unwrap(), b"song bytes", "content moved intact");
+        assert_eq!(
+            std::fs::read(&dst).unwrap(),
+            b"song bytes",
+            "content moved intact"
+        );
         assert!(!src.exists(), "source temp file was moved away");
         std::fs::remove_file(&dst).ok();
     }
 
     #[test]
     fn a_bad_address_is_reported_instead_of_panicking() {
-        let err = KernwayApp::builder().bind("not-an-address").build().run().unwrap_err();
+        let err = KernwayApp::builder()
+            .bind("not-an-address")
+            .build()
+            .run()
+            .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 }
@@ -1678,9 +1937,11 @@ mod keep_alive_tests {
 
     fn ping_router() -> Router {
         let mut router = Router::new();
-        router.add("GET", "/n", sync_handler(|_req, _ctx| {
-            Response::new(StatusCode::OK).body(b"ok".to_vec())
-        }));
+        router.add(
+            "GET",
+            "/n",
+            sync_handler(|_req, _ctx| Response::new(StatusCode::OK).body(b"ok".to_vec())),
+        );
         router
     }
 
@@ -1719,7 +1980,18 @@ mod keep_alive_tests {
         let middlewares: Arc<Vec<Arc<dyn Middleware>>> = Arc::new(Vec::new());
         ex.block_on(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_connection(stream, router, context, middlewares, None, keep_alive, FILE_CHUNK, Arc::new(UploadConfig::default()), shutdown).await;
+            serve_connection(
+                stream,
+                router,
+                context,
+                middlewares,
+                None,
+                keep_alive,
+                FILE_CHUNK,
+                Arc::new(UploadConfig::default()),
+                shutdown,
+            )
+            .await;
         })
         .unwrap();
 
@@ -1733,7 +2005,12 @@ mod keep_alive_tests {
         let mut byte = [0u8; 1];
         loop {
             let n = sock.read(&mut byte).unwrap();
-            assert_ne!(n, 0, "connection closed mid-response: {:?}", String::from_utf8_lossy(&got));
+            assert_ne!(
+                n,
+                0,
+                "connection closed mid-response: {:?}",
+                String::from_utf8_lossy(&got)
+            );
             got.push(byte[0]);
             if let Some(head_end) = got.windows(4).position(|w| w == b"\r\n\r\n") {
                 let head = String::from_utf8_lossy(&got[..head_end]).to_lowercase();
@@ -1755,20 +2032,29 @@ mod keep_alive_tests {
         let responses = with_server(KeepAliveConfig::default(), |mut sock| {
             let mut out = Vec::new();
             for _ in 0..3 {
-                sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+                sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\n\r\n")
+                    .unwrap();
                 out.push(read_one(&mut sock));
             }
             // Tell the server we are done so it does not sit out the idle timeout.
-            sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\nconnection: close\r\n\r\n").unwrap();
+            sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\nconnection: close\r\n\r\n")
+                .unwrap();
             out.push(read_one(&mut sock));
             out
         });
 
         for response in &responses[..3] {
-            assert!(response.contains("connection: keep-alive"), "got {response:?}");
+            assert!(
+                response.contains("connection: keep-alive"),
+                "got {response:?}"
+            );
             assert!(response.ends_with("ok"));
         }
-        assert!(responses[3].contains("connection: close"), "got {:?}", responses[3]);
+        assert!(
+            responses[3].contains("connection: close"),
+            "got {:?}",
+            responses[3]
+        );
     }
 
     #[test]
@@ -1790,7 +2076,8 @@ mod keep_alive_tests {
     #[test]
     fn an_http10_client_gets_a_closed_connection_by_default() {
         let response = with_server(KeepAliveConfig::default(), |mut sock| {
-            sock.write_all(b"GET /n HTTP/1.0\r\nHost: x\r\n\r\n").unwrap();
+            sock.write_all(b"GET /n HTTP/1.0\r\nHost: x\r\n\r\n")
+                .unwrap();
             let mut got = String::new();
             sock.read_to_string(&mut got).unwrap(); // returns only on EOF
             got
@@ -1808,24 +2095,35 @@ mod keep_alive_tests {
             ..Default::default()
         };
         let response = with_server(keep_alive, |mut sock| {
-            sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+            sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\n\r\n")
+                .unwrap();
             let mut got = String::new();
             sock.read_to_string(&mut got).unwrap(); // blocks until the server gives up
             got
         });
         assert!(response.contains("connection: keep-alive"));
         let waited = started.elapsed();
-        assert!(waited >= Duration::from_millis(150), "closed too early: {waited:?}");
-        assert!(waited < Duration::from_secs(3), "idle timeout did not fire: {waited:?}");
+        assert!(
+            waited >= Duration::from_millis(150),
+            "closed too early: {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(3),
+            "idle timeout did not fire: {waited:?}"
+        );
     }
 
     #[test]
     fn max_requests_closes_the_connection_even_if_the_client_wants_more() {
-        let keep_alive = KeepAliveConfig { max_requests: 2, ..Default::default() };
+        let keep_alive = KeepAliveConfig {
+            max_requests: 2,
+            ..Default::default()
+        };
         let responses = with_server(keep_alive, |mut sock| {
             let mut out = Vec::new();
             for _ in 0..2 {
-                sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+                sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\n\r\n")
+                    .unwrap();
                 out.push(read_one(&mut sock));
             }
             out
@@ -1840,9 +2138,13 @@ mod keep_alive_tests {
 
     #[test]
     fn keep_alive_can_be_turned_off_entirely() {
-        let config = KeepAliveConfig { enabled: false, ..Default::default() };
+        let config = KeepAliveConfig {
+            enabled: false,
+            ..Default::default()
+        };
         let response = with_server(config, |mut sock| {
-            sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+            sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\n\r\n")
+                .unwrap();
             let mut got = String::new();
             sock.read_to_string(&mut got).unwrap();
             got
@@ -1859,15 +2161,17 @@ mod keep_alive_tests {
             idle_timeout: Duration::from_secs(30),
             ..Default::default()
         };
-        let (response, waited) = with_server_shutdown(keep_alive, Shutdown::new(), |mut sock, shutdown| {
-            sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
-            let first = read_one(&mut sock);
-            let started = Instant::now();
-            shutdown.trigger();
-            let mut rest = String::new();
-            sock.read_to_string(&mut rest).unwrap(); // returns on EOF
-            (first, started.elapsed())
-        });
+        let (response, waited) =
+            with_server_shutdown(keep_alive, Shutdown::new(), |mut sock, shutdown| {
+                sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\n\r\n")
+                    .unwrap();
+                let first = read_one(&mut sock);
+                let started = Instant::now();
+                shutdown.trigger();
+                let mut rest = String::new();
+                sock.read_to_string(&mut rest).unwrap(); // returns on EOF
+                (first, started.elapsed())
+            });
 
         assert!(response.contains("connection: keep-alive"));
         assert!(
@@ -1884,13 +2188,17 @@ mod keep_alive_tests {
         let shutdown = Shutdown::new();
         shutdown.trigger();
         let response = with_server_shutdown(KeepAliveConfig::default(), shutdown, |mut sock, _| {
-            sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+            sock.write_all(b"GET /n HTTP/1.1\r\nHost: x\r\n\r\n")
+                .unwrap();
             let mut got = String::new();
             sock.read_to_string(&mut got).unwrap();
             got
         });
         assert!(response.contains("HTTP/1.1 200 OK"), "got {response:?}");
-        assert!(response.ends_with("ok"), "the request was dropped: {response:?}");
+        assert!(
+            response.ends_with("ok"),
+            "the request was dropped: {response:?}"
+        );
         assert!(response.contains("connection: close"), "got {response:?}");
     }
 
@@ -1899,24 +2207,33 @@ mod keep_alive_tests {
         // Shutdown must not cut a request that is mid-flight on the wire —
         // that is precisely the in-flight work the drain exists to protect.
         let shutdown = Shutdown::new();
-        let response = with_server_shutdown(KeepAliveConfig::default(), shutdown, |mut sock, shutdown| {
-            sock.write_all(b"GET /n HTTP/1.1\r\nHo").unwrap();
-            sock.flush().unwrap();
-            std::thread::sleep(Duration::from_millis(30)); // the server is now mid-request
-            shutdown.trigger();
-            sock.write_all(b"st: x\r\n\r\n").unwrap();
-            let mut got = String::new();
-            sock.read_to_string(&mut got).unwrap();
-            got
-        });
-        assert!(response.ends_with("ok"), "the half-read request was abandoned: {response:?}");
+        let response = with_server_shutdown(
+            KeepAliveConfig::default(),
+            shutdown,
+            |mut sock, shutdown| {
+                sock.write_all(b"GET /n HTTP/1.1\r\nHo").unwrap();
+                sock.flush().unwrap();
+                std::thread::sleep(Duration::from_millis(30)); // the server is now mid-request
+                shutdown.trigger();
+                sock.write_all(b"st: x\r\n\r\n").unwrap();
+                let mut got = String::new();
+                sock.read_to_string(&mut got).unwrap();
+                got
+            },
+        );
+        assert!(
+            response.ends_with("ok"),
+            "the half-read request was abandoned: {response:?}"
+        );
     }
 
     #[test]
     fn the_parser_reports_the_version_the_client_sent() {
         let req = kernway_http::parse_bytes(b"GET / HTTP/1.0\r\n\r\n").unwrap();
         match req {
-            kernway_http::Parsed::Complete { request, .. } => assert_eq!(request.version, HttpVersion::Http10),
+            kernway_http::Parsed::Complete { request, .. } => {
+                assert_eq!(request.version, HttpVersion::Http10)
+            }
             kernway_http::Parsed::Incomplete => panic!("expected a complete request"),
         }
     }
@@ -1929,8 +2246,12 @@ mod static_file_tests {
 
     /// A fresh, empty temp directory unique to this test and process.
     fn tmpdir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("kw-static-{}-{}-{}", tag, std::process::id(), line!()));
+        let dir = std::env::temp_dir().join(format!(
+            "kw-static-{}-{}-{}",
+            tag,
+            std::process::id(),
+            line!()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -1942,11 +2263,21 @@ mod static_file_tests {
         fs::write(root.join("a.txt"), b"hello").unwrap();
 
         match load_static(&root, root.join("a.txt"), None, None).expect("should serve") {
-            StaticOutcome::File { path, len, etag, mime, encoding, .. } => {
+            StaticOutcome::File {
+                path,
+                len,
+                etag,
+                mime,
+                encoding,
+                ..
+            } => {
                 // The file is named, not read — verify by size and by reading it here.
                 assert_eq!(len, 5);
                 assert_eq!(std::fs::read(&path).unwrap(), b"hello");
-                assert!(etag.starts_with('"') && etag.ends_with('"'), "etag quoted: {etag}");
+                assert!(
+                    etag.starts_with('"') && etag.ends_with('"'),
+                    "etag quoted: {etag}"
+                );
                 assert_eq!(mime, "text/plain; charset=utf-8");
                 assert_eq!(encoding, None, "identity file carries no Content-Encoding");
             }
@@ -2021,14 +2352,31 @@ mod static_file_tests {
         fs::write(root.join("app.js.br"), b"BROTLI").unwrap();
 
         match load_static(&root, root.join("app.js"), None, Some("br, gzip")).unwrap() {
-            StaticOutcome::File { path, len, mime, encoding, vary_encoding, etag } => {
-                assert_eq!(std::fs::read(&path).unwrap(), b"BROTLI", "the .br bytes are served");
+            StaticOutcome::File {
+                path,
+                len,
+                mime,
+                encoding,
+                vary_encoding,
+                etag,
+            } => {
+                assert_eq!(
+                    std::fs::read(&path).unwrap(),
+                    b"BROTLI",
+                    "the .br bytes are served"
+                );
                 assert_eq!(len, 6);
-                assert_eq!(mime, "text/javascript; charset=utf-8", "type is the original's");
+                assert_eq!(
+                    mime, "text/javascript; charset=utf-8",
+                    "type is the original's"
+                );
                 assert_eq!(encoding, Some("br"));
                 assert!(vary_encoding);
                 // ETag is the variant's (len 6), not the identity's (len 30).
-                assert!(etag.starts_with("\"6-"), "etag from the served file: {etag}");
+                assert!(
+                    etag.starts_with("\"6-"),
+                    "etag from the served file: {etag}"
+                );
             }
             StaticOutcome::NotModified { .. } => panic!("expected the file"),
         }
@@ -2062,10 +2410,18 @@ mod static_file_tests {
         fs::write(root.join("app.js"), b"source").unwrap();
 
         match load_static(&root, root.join("app.js"), None, Some("br, gzip")).unwrap() {
-            StaticOutcome::File { encoding, vary_encoding, len, .. } => {
+            StaticOutcome::File {
+                encoding,
+                vary_encoding,
+                len,
+                ..
+            } => {
                 assert_eq!(encoding, None, "no variant → identity");
                 assert_eq!(len, 6);
-                assert!(vary_encoding, "a negotiated resource varies even on the fallback");
+                assert!(
+                    vary_encoding,
+                    "a negotiated resource varies even on the fallback"
+                );
             }
             StaticOutcome::NotModified { .. } => panic!("expected the file"),
         }
@@ -2081,7 +2437,12 @@ mod static_file_tests {
         fs::write(root.join("logo.png.gz"), b"NOPE").unwrap();
 
         match load_static(&root, root.join("logo.png"), None, Some("gzip")).unwrap() {
-            StaticOutcome::File { encoding, vary_encoding, path, .. } => {
+            StaticOutcome::File {
+                encoding,
+                vary_encoding,
+                path,
+                ..
+            } => {
                 assert_eq!(encoding, None, "png is already compressed — serve it as-is");
                 assert!(!vary_encoding);
                 assert_eq!(std::fs::read(&path).unwrap(), b"\x89PNG....");
@@ -2101,9 +2462,16 @@ mod static_file_tests {
         fs::write(root.join("app.js.br"), b"BR").unwrap();
 
         match load_static(&root, root.join("app.js"), None, Some("")).unwrap() {
-            StaticOutcome::File { encoding, vary_encoding, .. } => {
+            StaticOutcome::File {
+                encoding,
+                vary_encoding,
+                ..
+            } => {
                 assert_eq!(encoding, None, "no encoding accepted → identity");
-                assert!(vary_encoding, "still Vary, so a cache keys on Accept-Encoding");
+                assert!(
+                    vary_encoding,
+                    "still Vary, so a cache keys on Accept-Encoding"
+                );
             }
             StaticOutcome::NotModified { .. } => panic!("expected the file"),
         }
@@ -2119,10 +2487,19 @@ mod static_file_tests {
         fs::write(root.join("app.js.br"), b"BROTLI").unwrap();
 
         match load_static(&root, root.join("app.js"), None, None).unwrap() {
-            StaticOutcome::File { encoding, vary_encoding, path, .. } => {
+            StaticOutcome::File {
+                encoding,
+                vary_encoding,
+                path,
+                ..
+            } => {
                 assert_eq!(encoding, None);
                 assert!(!vary_encoding);
-                assert_eq!(std::fs::read(&path).unwrap(), b"source", "identity, not the .br");
+                assert_eq!(
+                    std::fs::read(&path).unwrap(),
+                    b"source",
+                    "identity, not the .br"
+                );
             }
             StaticOutcome::NotModified { .. } => panic!("expected the file"),
         }
@@ -2160,10 +2537,24 @@ mod static_file_tests {
         let context = Arc::new(AppContext::new());
         let middlewares: Arc<Vec<Arc<dyn Middleware>>> = Arc::new(Vec::new());
         let static_files = Some(Arc::new(StaticFiles::new(root)));
-        let keep_alive = KeepAliveConfig { enabled: false, ..Default::default() };
+        let keep_alive = KeepAliveConfig {
+            enabled: false,
+            ..Default::default()
+        };
         ex.block_on(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            serve_connection(stream, router, context, middlewares, static_files, keep_alive, FILE_CHUNK, Arc::new(UploadConfig::default()), Shutdown::new()).await;
+            serve_connection(
+                stream,
+                router,
+                context,
+                middlewares,
+                static_files,
+                keep_alive,
+                FILE_CHUNK,
+                Arc::new(UploadConfig::default()),
+                Shutdown::new(),
+            )
+            .await;
         })
         .unwrap();
 
@@ -2185,11 +2576,17 @@ mod static_file_tests {
         let root = tmpdir("http-serve");
         fs::write(root.join("index.html"), b"<h1>hi</h1>").unwrap();
 
-        let got = serve_static(root.clone(), "GET / HTTP/1.1\r\nHost: x\r\n\r\n".to_string());
+        let got = serve_static(
+            root.clone(),
+            "GET / HTTP/1.1\r\nHost: x\r\n\r\n".to_string(),
+        );
         assert!(got.starts_with("HTTP/1.1 200 OK\r\n"), "got {got:?}");
         assert!(got.contains("content-type: text/html"), "got {got:?}");
         assert!(got.to_ascii_lowercase().contains("etag:"), "got {got:?}");
-        assert!(got.contains("x-content-type-options: nosniff"), "got {got:?}");
+        assert!(
+            got.contains("x-content-type-options: nosniff"),
+            "got {got:?}"
+        );
         assert!(got.ends_with("<h1>hi</h1>"), "got {got:?}");
 
         fs::remove_dir_all(&root).ok();
@@ -2204,9 +2601,15 @@ mod static_file_tests {
         let content = "x".repeat(700_000); // ~2.7 chunks at the 256 KiB default
         fs::write(root.join("big.txt"), &content).unwrap();
 
-        let got = serve_static(root.clone(), "GET /big.txt HTTP/1.1\r\nHost: x\r\n\r\n".to_string());
+        let got = serve_static(
+            root.clone(),
+            "GET /big.txt HTTP/1.1\r\nHost: x\r\n\r\n".to_string(),
+        );
         assert!(got.starts_with("HTTP/1.1 200 OK\r\n"), "got head");
-        assert!(got.contains("content-length: 700000"), "content-length must be the file size");
+        assert!(
+            got.contains("content-length: 700000"),
+            "content-length must be the file size"
+        );
         assert!(
             got.ends_with(&content),
             "the whole file must arrive intact across chunk boundaries (got {} body bytes)",
@@ -2221,10 +2624,19 @@ mod static_file_tests {
         let root = tmpdir("head");
         fs::write(root.join("a.txt"), b"hello").unwrap();
 
-        let got = serve_static(root.clone(), "HEAD /a.txt HTTP/1.1\r\nHost: x\r\n\r\n".to_string());
+        let got = serve_static(
+            root.clone(),
+            "HEAD /a.txt HTTP/1.1\r\nHost: x\r\n\r\n".to_string(),
+        );
         assert!(got.starts_with("HTTP/1.1 200 OK\r\n"), "got {got:?}");
-        assert!(got.contains("content-length: 5"), "HEAD must send the length: {got:?}");
-        assert!(got.contains("accept-ranges: bytes"), "and advertise ranges: {got:?}");
+        assert!(
+            got.contains("content-length: 5"),
+            "HEAD must send the length: {got:?}"
+        );
+        assert!(
+            got.contains("accept-ranges: bytes"),
+            "and advertise ranges: {got:?}"
+        );
         // Head only — the response ends at the blank line, no "hello".
         assert!(got.ends_with("\r\n\r\n"), "HEAD must send no body: {got:?}");
 
@@ -2240,10 +2652,16 @@ mod static_file_tests {
             root.clone(),
             "GET /f.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=4-7\r\n\r\n".to_string(),
         );
-        assert!(got.starts_with("HTTP/1.1 206 Partial Content\r\n"), "got {got:?}");
+        assert!(
+            got.starts_with("HTTP/1.1 206 Partial Content\r\n"),
+            "got {got:?}"
+        );
         assert!(got.contains("content-range: bytes 4-7/16"), "got {got:?}");
         assert!(got.contains("content-length: 4"), "got {got:?}");
-        assert!(got.ends_with("4567"), "the 4 bytes [4,8) must be sent: {got:?}");
+        assert!(
+            got.ends_with("4567"),
+            "the 4 bytes [4,8) must be sent: {got:?}"
+        );
 
         fs::remove_dir_all(&root).ok();
     }
@@ -2257,8 +2675,14 @@ mod static_file_tests {
             root.clone(),
             "GET /f.txt HTTP/1.1\r\nHost: x\r\nRange: bytes=100-200\r\n\r\n".to_string(),
         );
-        assert!(got.starts_with("HTTP/1.1 416 Range Not Satisfiable\r\n"), "got {got:?}");
-        assert!(got.contains("content-range: bytes */5"), "must state the real length: {got:?}");
+        assert!(
+            got.starts_with("HTTP/1.1 416 Range Not Satisfiable\r\n"),
+            "got {got:?}"
+        );
+        assert!(
+            got.contains("content-range: bytes */5"),
+            "must state the real length: {got:?}"
+        );
 
         fs::remove_dir_all(&root).ok();
     }
@@ -2267,16 +2691,43 @@ mod static_file_tests {
     fn parse_range_cases() {
         use super::{parse_range, RangeSpec};
         let len = 100;
-        assert!(matches!(parse_range("bytes=0-9", len), RangeSpec::Satisfiable { start: 0, end: 10 }));
-        assert!(matches!(parse_range("bytes=90-", len), RangeSpec::Satisfiable { start: 90, end: 100 }));
-        assert!(matches!(parse_range("bytes=-10", len), RangeSpec::Satisfiable { start: 90, end: 100 }));
+        assert!(matches!(
+            parse_range("bytes=0-9", len),
+            RangeSpec::Satisfiable { start: 0, end: 10 }
+        ));
+        assert!(matches!(
+            parse_range("bytes=90-", len),
+            RangeSpec::Satisfiable {
+                start: 90,
+                end: 100
+            }
+        ));
+        assert!(matches!(
+            parse_range("bytes=-10", len),
+            RangeSpec::Satisfiable {
+                start: 90,
+                end: 100
+            }
+        ));
         // end past the resource is clamped to the last byte.
-        assert!(matches!(parse_range("bytes=50-999", len), RangeSpec::Satisfiable { start: 50, end: 100 }));
+        assert!(matches!(
+            parse_range("bytes=50-999", len),
+            RangeSpec::Satisfiable {
+                start: 50,
+                end: 100
+            }
+        ));
         // start past the end → unsatisfiable.
-        assert!(matches!(parse_range("bytes=100-200", len), RangeSpec::Unsatisfiable));
+        assert!(matches!(
+            parse_range("bytes=100-200", len),
+            RangeSpec::Unsatisfiable
+        ));
         // bad syntax / multi-range / wrong unit → serve full.
         assert!(matches!(parse_range("bytes=abc", len), RangeSpec::Full));
-        assert!(matches!(parse_range("bytes=0-9,20-29", len), RangeSpec::Full));
+        assert!(matches!(
+            parse_range("bytes=0-9,20-29", len),
+            RangeSpec::Full
+        ));
         assert!(matches!(parse_range("items=0-9", len), RangeSpec::Full));
     }
 
@@ -2285,16 +2736,25 @@ mod static_file_tests {
         let root = tmpdir("http-304");
         fs::write(root.join("index.html"), b"the page").unwrap();
 
-        let first = serve_static(root.clone(), "GET / HTTP/1.1\r\nHost: x\r\n\r\n".to_string());
+        let first = serve_static(
+            root.clone(),
+            "GET / HTTP/1.1\r\nHost: x\r\n\r\n".to_string(),
+        );
         let etag = etag_of(&first);
 
         let second = serve_static(
             root.clone(),
             format!("GET / HTTP/1.1\r\nHost: x\r\nIf-None-Match: {etag}\r\n\r\n"),
         );
-        assert!(second.starts_with("HTTP/1.1 304 Not Modified\r\n"), "got {second:?}");
+        assert!(
+            second.starts_with("HTTP/1.1 304 Not Modified\r\n"),
+            "got {second:?}"
+        );
         // 304 carries no body — the client's cached copy is current.
-        assert!(!second.ends_with("the page"), "304 must not send the body: {second:?}");
+        assert!(
+            !second.ends_with("the page"),
+            "304 must not send the body: {second:?}"
+        );
 
         fs::remove_dir_all(&root).ok();
     }

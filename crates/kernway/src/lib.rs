@@ -89,7 +89,10 @@ pub use di_core::{KernwayComponent, KernwayController};
 // --- macros ---
 // `Validate` is both the derive (di-macro, macro namespace) and the trait
 // (kernway-validation, type namespace) — coexisting like serde's `Serialize`.
-pub use di_macro::{Component, Validate, component, configuration, inject, controller, route, require_role, validated, transactional};
+pub use di_macro::{
+    component, configuration, controller, inject, require_role, route, transactional, validated,
+    Component, Validate,
+};
 
 /// `use kernway::prelude::*` — everything a handler usually needs.
 pub mod prelude {
@@ -102,7 +105,7 @@ pub mod prelude {
     // The per-request DI scope and the async handler future type (KEP-0005/0006)
     pub use crate::{BoxFuture, RequestScope};
     // Traits
-    pub use crate::{IntoResponse, DbPool, TemplateEngine, KernwayPlugin};
+    pub use crate::{DbPool, IntoResponse, KernwayPlugin, TemplateEngine};
     // Extractors and response types
     pub use crate::{Html, Json, Path, ProblemDetail, Query, Validated};
     // Validation — the trait + derive share the name `Validate`
@@ -123,7 +126,10 @@ pub mod prelude {
     // DI
     pub use crate::{AppContext, BeanEntry, DiError, KernwayComponent, KernwayController};
     // Macros
-    pub use crate::{component, configuration, inject, controller, route, require_role, validated, transactional, Component};
+    pub use crate::{
+        component, configuration, controller, inject, require_role, route, transactional,
+        validated, Component,
+    };
 
     pub use std::sync::Arc;
 }

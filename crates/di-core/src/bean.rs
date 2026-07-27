@@ -17,11 +17,11 @@ pub enum BeanOrigin {
 #[derive(Debug, Clone)]
 pub struct BeanEntry {
     /// TypeId of the concrete type.
-    pub type_id:   TypeId,
+    pub type_id: TypeId,
     /// Type name displayed in error messages.
     pub type_name: &'static str,
     /// Origin.
-    pub origin:    BeanOrigin,
+    pub origin: BeanOrigin,
     /// Whether this is the primary bean (when multiple implementations share a trait).
     pub is_primary: bool,
     /// Qualifier (if any).

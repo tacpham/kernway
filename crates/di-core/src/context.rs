@@ -63,14 +63,14 @@ type BuildFn = Box<dyn FnOnce(&mut AppContext) -> Result<(), DiError> + Send + S
 struct ComponentDef {
     type_name: &'static str,
     /// TypeIds that must be resolved before this bean can be built.
-    deps:      Vec<TypeId>,
+    deps: Vec<TypeId>,
     /// Soft deps (`Option`/`Vec` fields): order-if-present, never required.
-    opt_deps:  Vec<TypeId>,
+    opt_deps: Vec<TypeId>,
     /// TypeIds this bean satisfies once built (own type + `#[provides]` traits).
-    provides:  Vec<TypeId>,
+    provides: Vec<TypeId>,
     /// Builds the bean, registers the instance, and publishes trait bindings.
     /// The generated closures capture nothing, so they are `Send + Sync`.
-    build:     BuildFn,
+    build: BuildFn,
 }
 
 /// DI container.
@@ -115,7 +115,11 @@ impl AppContext {
         instance: Arc<T>,
     ) -> Result<(), DiError> {
         self.register_with_entry(
-            BeanEntry::new(TypeId::of::<T>(), std::any::type_name::<T>(), BeanOrigin::User),
+            BeanEntry::new(
+                TypeId::of::<T>(),
+                std::any::type_name::<T>(),
+                BeanOrigin::User,
+            ),
             instance as BeanInstance,
         )
     }
@@ -135,7 +139,9 @@ impl AppContext {
         // The stored value is `Arc<dyn Any>`; its inner concrete type must equal
         // the key we file it under, or `get` would downcast to the wrong type.
         if (*instance).type_id() != type_id {
-            return Err(DiError::TypeMismatch { type_name: entry.type_name });
+            return Err(DiError::TypeMismatch {
+                type_name: entry.type_name,
+            });
         }
 
         let list = self.instances.entry(type_id).or_default();
@@ -292,9 +298,9 @@ impl AppContext {
     pub fn register_component<T: RegistersComponent>(&mut self) -> &mut Self {
         self.pending.push(ComponentDef {
             type_name: std::any::type_name::<T>(),
-            deps:      T::dependencies(),
-            opt_deps:  T::optional_dependencies(),
-            provides:  T::provides(),
+            deps: T::dependencies(),
+            opt_deps: T::optional_dependencies(),
+            provides: T::provides(),
             build: Box::new(|ctx: &mut AppContext| {
                 let instance = T::build(ctx)?;
                 // Honour the bean's own metadata (`#[default_impl]`, `#[primary]`,
@@ -366,12 +372,12 @@ impl AppContext {
                 built_any = false;
                 for slot in remaining.iter_mut() {
                     let ready = matches!(slot, Some(def)
-                        // Hard deps: at least one provider built.
-                        if def.deps.iter().all(|d| available.contains(d))
-                        // Soft deps: all batch providers built (0 remaining).
-                        && def.opt_deps.iter().all(|d| {
-                            pending_providers.get(d).copied().unwrap_or(0) == 0
-                        }));
+                    // Hard deps: at least one provider built.
+                    if def.deps.iter().all(|d| available.contains(d))
+                    // Soft deps: all batch providers built (0 remaining).
+                    && def.opt_deps.iter().all(|d| {
+                        pending_providers.get(d).copied().unwrap_or(0) == 0
+                    }));
                     if ready {
                         let def = slot.take().expect("slot checked ready");
                         let provides = def.provides.clone();
@@ -395,7 +401,9 @@ impl AppContext {
                 for def in remaining.iter().flatten() {
                     for dep in &def.deps {
                         if !available.contains(dep) && !provided_by_batch.contains(dep) {
-                            return Err(DiError::MissingDependency { type_name: def.type_name });
+                            return Err(DiError::MissingDependency {
+                                type_name: def.type_name,
+                            });
                         }
                     }
                 }
@@ -478,10 +486,7 @@ impl AppContext {
     {
         let erased: BeanInstance = Arc::new(instance); // Arc<Arc<Tr>>
         self.register_with_entry(
-            Self::component_entry::<T>(
-                TypeId::of::<Arc<Tr>>(),
-                std::any::type_name::<Arc<Tr>>(),
-            ),
+            Self::component_entry::<T>(TypeId::of::<Arc<Tr>>(), std::any::type_name::<Arc<Tr>>()),
             erased,
         )
     }
@@ -570,7 +575,11 @@ mod tests {
 
         // Register the framework default
         ctx.register_with_entry(
-            BeanEntry::new(TypeId::of::<String>(), "String", BeanOrigin::FrameworkDefault),
+            BeanEntry::new(
+                TypeId::of::<String>(),
+                "String",
+                BeanOrigin::FrameworkDefault,
+            ),
             Arc::new("default".to_string()) as BeanInstance,
         )
         .unwrap();
@@ -599,13 +608,17 @@ mod tests {
             Arc::new("b".to_string()) as BeanInstance,
         )
         .unwrap();
-        assert!(matches!(ctx.get::<String>(), Err(DiError::Ambiguous { .. })));
+        assert!(matches!(
+            ctx.get::<String>(),
+            Err(DiError::Ambiguous { .. })
+        ));
     }
 
     #[test]
     fn single_primary_wins_over_the_others() {
         let mut ctx = AppContext::new();
-        ctx.register_instance::<String>(Arc::new("plain".to_string())).unwrap();
+        ctx.register_instance::<String>(Arc::new("plain".to_string()))
+            .unwrap();
         ctx.register_with_entry(
             BeanEntry::new(TypeId::of::<String>(), "String", BeanOrigin::User).primary(),
             Arc::new("chosen".to_string()) as BeanInstance,
@@ -624,14 +637,18 @@ mod tests {
             )
             .unwrap();
         }
-        assert!(matches!(ctx.get::<String>(), Err(DiError::Ambiguous { .. })));
+        assert!(matches!(
+            ctx.get::<String>(),
+            Err(DiError::Ambiguous { .. })
+        ));
     }
 
     #[test]
     fn bean_count_increments() {
         let mut ctx = AppContext::new();
         assert_eq!(ctx.bean_count(), 0);
-        ctx.register_instance::<String>(Arc::new("x".to_string())).unwrap();
+        ctx.register_instance::<String>(Arc::new("x".to_string()))
+            .unwrap();
         assert_eq!(ctx.bean_count(), 1);
         ctx.register_instance::<u64>(Arc::new(42u64)).unwrap();
         assert_eq!(ctx.bean_count(), 2);
@@ -640,8 +657,8 @@ mod tests {
     #[test]
     fn get_qualified_returns_correct_bean() {
         let mut ctx = AppContext::new();
-        let entry = BeanEntry::new(TypeId::of::<String>(), "String", BeanOrigin::User)
-            .qualifier("primary");
+        let entry =
+            BeanEntry::new(TypeId::of::<String>(), "String", BeanOrigin::User).qualifier("primary");
         ctx.register_with_entry(entry, Arc::new("primary-bean".to_string()) as BeanInstance)
             .unwrap();
 
@@ -652,7 +669,8 @@ mod tests {
     #[test]
     fn get_qualified_missing_qualifier_returns_error() {
         let mut ctx = AppContext::new();
-        ctx.register_instance::<String>(Arc::new("noqual".to_string())).unwrap();
+        ctx.register_instance::<String>(Arc::new("noqual".to_string()))
+            .unwrap();
         assert!(ctx.get_qualified::<String>("missing").is_err());
     }
 
@@ -660,8 +678,10 @@ mod tests {
     fn get_qualified_duplicate_qualifier_is_ambiguous() {
         // Two beans sharing a qualifier must error, not silently pick the first.
         let mut ctx = AppContext::new();
-        ctx.register_qualified::<String>("dup", Arc::new("first".to_string())).unwrap();
-        ctx.register_qualified::<String>("dup", Arc::new("second".to_string())).unwrap();
+        ctx.register_qualified::<String>("dup", Arc::new("first".to_string()))
+            .unwrap();
+        ctx.register_qualified::<String>("dup", Arc::new("second".to_string()))
+            .unwrap();
         assert!(matches!(
             ctx.get_qualified::<String>("dup"),
             Err(DiError::Ambiguous { .. })
@@ -690,7 +710,9 @@ mod tests {
 
     impl Buildable for Service {
         fn build<C: Container + ?Sized>(ctx: &C) -> Result<Arc<Self>, DiError> {
-            Ok(Arc::new(Service { repo: ctx.get::<Repo>()? }))
+            Ok(Arc::new(Service {
+                repo: ctx.get::<Repo>()?,
+            }))
         }
     }
     impl RegistersComponent for Service {
@@ -701,7 +723,9 @@ mod tests {
 
     impl Buildable for Controller {
         fn build<C: Container + ?Sized>(ctx: &C) -> Result<Arc<Self>, DiError> {
-            Ok(Arc::new(Controller { service: ctx.get::<Service>()? }))
+            Ok(Arc::new(Controller {
+                service: ctx.get::<Service>()?,
+            }))
         }
     }
     impl RegistersComponent for Controller {
@@ -723,7 +747,10 @@ mod tests {
         // Controller was built => its whole inject chain resolved.
         let controller = ctx.get::<Controller>().unwrap();
         // Same Repo instance flows Repo -> Service -> Controller.
-        assert!(Arc::ptr_eq(&controller.service.repo, &ctx.get::<Repo>().unwrap()));
+        assert!(Arc::ptr_eq(
+            &controller.service.repo,
+            &ctx.get::<Repo>().unwrap()
+        ));
     }
 
     #[test]
@@ -731,7 +758,8 @@ mod tests {
         let mut ctx = AppContext::new();
         ctx.register_instance::<Repo>(Arc::new(Repo)).unwrap(); // pre-registered dep
         ctx.register_component::<Service>();
-        ctx.refresh().expect("Service dep satisfied by pre-registered Repo");
+        ctx.refresh()
+            .expect("Service dep satisfied by pre-registered Repo");
         let _ = ctx.get::<Service>().unwrap();
     }
 
@@ -740,23 +768,34 @@ mod tests {
         let mut ctx = AppContext::new();
         ctx.register_component::<Service>(); // Repo never provided
         let err = ctx.refresh().unwrap_err();
-        assert!(matches!(err, DiError::MissingDependency { .. }), "got {err:?}");
+        assert!(
+            matches!(err, DiError::MissingDependency { .. }),
+            "got {err:?}"
+        );
     }
 
     // Cyclic pair: X depends on Y, Y depends on X.
     struct X;
     struct Y;
     impl Buildable for X {
-        fn build<C: Container + ?Sized>(_c: &C) -> Result<Arc<Self>, DiError> { Ok(Arc::new(X)) }
+        fn build<C: Container + ?Sized>(_c: &C) -> Result<Arc<Self>, DiError> {
+            Ok(Arc::new(X))
+        }
     }
     impl RegistersComponent for X {
-        fn dependencies() -> Vec<TypeId> { vec![TypeId::of::<Y>()] }
+        fn dependencies() -> Vec<TypeId> {
+            vec![TypeId::of::<Y>()]
+        }
     }
     impl Buildable for Y {
-        fn build<C: Container + ?Sized>(_c: &C) -> Result<Arc<Self>, DiError> { Ok(Arc::new(Y)) }
+        fn build<C: Container + ?Sized>(_c: &C) -> Result<Arc<Self>, DiError> {
+            Ok(Arc::new(Y))
+        }
     }
     impl RegistersComponent for Y {
-        fn dependencies() -> Vec<TypeId> { vec![TypeId::of::<X>()] }
+        fn dependencies() -> Vec<TypeId> {
+            vec![TypeId::of::<X>()]
+        }
     }
 
     #[test]
@@ -764,7 +803,10 @@ mod tests {
         let mut ctx = AppContext::new();
         ctx.register_component::<X>().register_component::<Y>();
         let err = ctx.refresh().unwrap_err();
-        assert!(matches!(err, DiError::CircularDependency { .. }), "got {err:?}");
+        assert!(
+            matches!(err, DiError::CircularDependency { .. }),
+            "got {err:?}"
+        );
     }
 
     // --- Interface (trait-object) beans -----------------------------
@@ -774,7 +816,9 @@ mod tests {
     }
     struct English;
     impl Greeter for English {
-        fn greet(&self) -> String { "hello".into() }
+        fn greet(&self) -> String {
+            "hello".into()
+        }
     }
 
     #[test]
@@ -788,14 +832,19 @@ mod tests {
     #[test]
     fn get_as_missing_returns_error() {
         let ctx = AppContext::new();
-        assert!(matches!(ctx.get_as::<dyn Greeter>(), Err(DiError::NotFound { .. })));
+        assert!(matches!(
+            ctx.get_as::<dyn Greeter>(),
+            Err(DiError::NotFound { .. })
+        ));
     }
 
     #[test]
     fn register_qualified_resolves_by_name() {
         let mut ctx = AppContext::new();
-        ctx.register_qualified::<String>("primary", Arc::new("A".to_string())).unwrap();
-        ctx.register_qualified::<String>("backup", Arc::new("B".to_string())).unwrap();
+        ctx.register_qualified::<String>("primary", Arc::new("A".to_string()))
+            .unwrap();
+        ctx.register_qualified::<String>("backup", Arc::new("B".to_string()))
+            .unwrap();
         assert_eq!(*ctx.get_qualified::<String>("primary").unwrap(), "A");
         assert_eq!(*ctx.get_qualified::<String>("backup").unwrap(), "B");
     }
@@ -806,8 +855,10 @@ mod tests {
     fn get_all_returns_every_bean_of_a_type() {
         let mut ctx = AppContext::new();
         assert!(ctx.get_all::<String>().is_empty());
-        ctx.register_qualified::<String>("a", Arc::new("x".into())).unwrap();
-        ctx.register_qualified::<String>("b", Arc::new("y".into())).unwrap();
+        ctx.register_qualified::<String>("a", Arc::new("x".into()))
+            .unwrap();
+        ctx.register_qualified::<String>("b", Arc::new("y".into()))
+            .unwrap();
         let all = ctx.get_all::<String>();
         assert_eq!(all.len(), 2);
     }
@@ -833,7 +884,10 @@ mod tests {
             BeanEntry::new(TypeId::of::<String>(), "String", BeanOrigin::User),
             Arc::new(42u64) as BeanInstance,
         );
-        assert!(matches!(bad, Err(DiError::TypeMismatch { .. })), "got {bad:?}");
+        assert!(
+            matches!(bad, Err(DiError::TypeMismatch { .. })),
+            "got {bad:?}"
+        );
         // And `get::<String>()` does not find a corrupt entry → clean NotFound.
         assert!(matches!(ctx.get::<String>(), Err(DiError::NotFound { .. })));
     }
@@ -856,7 +910,8 @@ mod tests {
         ctx.register_instance::<u8>(Arc::new(1u8)).unwrap();
         ctx.register_instance::<u16>(Arc::new(2u16)).unwrap();
         ctx.register_instance::<u32>(Arc::new(3u32)).unwrap();
-        ctx.register_instance::<String>(Arc::new("s".to_string())).unwrap();
+        ctx.register_instance::<String>(Arc::new("s".to_string()))
+            .unwrap();
         assert_eq!(*ctx.get::<u8>().unwrap(), 1);
         assert_eq!(*ctx.get::<u16>().unwrap(), 2);
         assert_eq!(*ctx.get::<u32>().unwrap(), 3);

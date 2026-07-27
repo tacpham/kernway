@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 #[derive(Serialize, Clone)]
 pub struct User {
-    pub id:   u64,
+    pub id: u64,
     pub name: String,
     pub role: String,
 }
@@ -35,18 +35,42 @@ pub struct UserRepository;
 impl UserRepository {
     pub fn find_by_id(&self, id: u64) -> Option<User> {
         match id {
-            1 => Some(User { id: 1, name: "Alice".into(), role: "ADMIN".into() }),
-            2 => Some(User { id: 2, name: "Bob".into(),   role: "USER".into() }),
-            3 => Some(User { id: 3, name: "Charlie".into(), role: "USER".into() }),
+            1 => Some(User {
+                id: 1,
+                name: "Alice".into(),
+                role: "ADMIN".into(),
+            }),
+            2 => Some(User {
+                id: 2,
+                name: "Bob".into(),
+                role: "USER".into(),
+            }),
+            3 => Some(User {
+                id: 3,
+                name: "Charlie".into(),
+                role: "USER".into(),
+            }),
             _ => None,
         }
     }
 
     pub fn find_all(&self) -> Vec<User> {
         vec![
-            User { id: 1, name: "Alice".into(),   role: "ADMIN".into() },
-            User { id: 2, name: "Bob".into(),     role: "USER".into() },
-            User { id: 3, name: "Charlie".into(), role: "USER".into() },
+            User {
+                id: 1,
+                name: "Alice".into(),
+                role: "ADMIN".into(),
+            },
+            User {
+                id: 2,
+                name: "Bob".into(),
+                role: "USER".into(),
+            },
+            User {
+                id: 3,
+                name: "Charlie".into(),
+                role: "USER".into(),
+            },
         ]
     }
 }
@@ -87,34 +111,30 @@ fn main() {
     KernwayApp::builder()
         .bind("0.0.0.0:8080")
         .context(ctx)
-
         // GET /health
         .get("/health", |_req: Request, _ctx: &RequestScope| async {
             Json(serde_json::json!({ "status": "UP", "version": "0.3.0" })).into_response()
         })
-
         // GET /users — list all
         .get("/users", |_req: Request, ctx: &RequestScope| {
             let svc = ctx.get::<UserService>().unwrap();
             async move { Json(svc.list_users()).into_response() }
         })
-
         // GET /users/{id} — get one
         .get("/users/{id}", |req: Request, ctx: &RequestScope| {
             let svc = ctx.get::<UserService>().unwrap();
             async move {
                 let id = match Path::<u64>::from_request(&req, "id") {
-                    Ok(p)  => *p,
+                    Ok(p) => *p,
                     Err(e) => return ProblemDetail::bad_request(e),
                 };
 
                 match svc.get_user(id) {
                     Some(user) => Json(user).into_response(),
-                    None       => ProblemDetail::not_found(format!("user {} not found", id)),
+                    None => ProblemDetail::not_found(format!("user {} not found", id)),
                 }
             }
         })
-
         .build()
         .run()
         .expect("server failed to start");

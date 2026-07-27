@@ -14,7 +14,10 @@
 //! })
 //! ```
 
-use kernway_core::{error::StatusCode, response::{IntoResponse, Response}};
+use kernway_core::{
+    error::StatusCode,
+    response::{IntoResponse, Response},
+};
 
 /// A single Server-Sent Event.
 ///
@@ -29,11 +32,11 @@ use kernway_core::{error::StatusCode, response::{IntoResponse, Response}};
 #[derive(Debug, Clone, Default)]
 pub struct SseEvent {
     /// Optional event ID (allows client to resume from last seen ID).
-    pub id:    Option<String>,
+    pub id: Option<String>,
     /// Event type (default: "message").
     pub event: Option<String>,
     /// The data payload. Multi-line data is split across multiple `data:` lines.
-    pub data:  String,
+    pub data: String,
     /// Tell the client how long to wait before reconnecting (milliseconds).
     pub retry: Option<u64>,
 }
@@ -41,21 +44,40 @@ pub struct SseEvent {
 impl SseEvent {
     /// Create a simple data-only event.
     pub fn data(data: impl Into<String>) -> Self {
-        Self { data: data.into(), ..Default::default() }
+        Self {
+            data: data.into(),
+            ..Default::default()
+        }
     }
 
     /// Create an event with id, type, and data.
-    pub fn with_id(id: impl Into<String>, event: impl Into<String>, data: impl Into<String>) -> Self {
-        Self { id: Some(id.into()), event: Some(event.into()), data: data.into(), retry: None }
+    pub fn with_id(
+        id: impl Into<String>,
+        event: impl Into<String>,
+        data: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: Some(id.into()),
+            event: Some(event.into()),
+            data: data.into(),
+            retry: None,
+        }
     }
 
     /// Create a named event (no ID).
     pub fn named(event: impl Into<String>, data: impl Into<String>) -> Self {
-        Self { event: Some(event.into()), data: data.into(), ..Default::default() }
+        Self {
+            event: Some(event.into()),
+            data: data.into(),
+            ..Default::default()
+        }
     }
 
     /// Set reconnection retry interval in milliseconds.
-    pub fn retry(mut self, ms: u64) -> Self { self.retry = Some(ms); self }
+    pub fn retry(mut self, ms: u64) -> Self {
+        self.retry = Some(ms);
+        self
+    }
 
     /// Serialize to SSE wire format.
     pub fn to_wire(&self) -> String {
@@ -160,15 +182,17 @@ mod tests {
     fn sse_stream_into_response_content_type() {
         let resp = SseStream::new(vec![SseEvent::data("x")]).into_response();
         assert_eq!(resp.status.0, 200);
-        assert!(resp.headers.get("content-type").unwrap().contains("text/event-stream"));
+        assert!(resp
+            .headers
+            .get("content-type")
+            .unwrap()
+            .contains("text/event-stream"));
     }
 
     #[test]
     fn sse_stream_body_contains_all_events() {
-        let resp = SseStream::new(vec![
-            SseEvent::data("event1"),
-            SseEvent::data("event2"),
-        ]).into_response();
+        let resp = SseStream::new(vec![SseEvent::data("event1"), SseEvent::data("event2")])
+            .into_response();
         let body = String::from_utf8(resp.body_bytes().to_vec()).unwrap();
         assert!(body.contains("data: event1"));
         assert!(body.contains("data: event2"));

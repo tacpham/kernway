@@ -96,7 +96,10 @@ impl Filter {
     /// per-target overrides.
     #[must_use]
     pub fn new(default: Level) -> Self {
-        Self { default, targets: Vec::new() }
+        Self {
+            default,
+            targets: Vec::new(),
+        }
     }
 
     /// Override the level for a target prefix (e.g. `"kernway_redis"`).
@@ -134,7 +137,9 @@ impl Filter {
     /// Read the filter from the `KW_LOG` environment variable, or `Info` if unset.
     #[must_use]
     pub fn from_env() -> Self {
-        std::env::var("KW_LOG").map(|s| Filter::parse(&s)).unwrap_or_else(|_| Filter::new(Level::Info))
+        std::env::var("KW_LOG")
+            .map(|s| Filter::parse(&s))
+            .unwrap_or_else(|_| Filter::new(Level::Info))
     }
 
     /// The threshold that applies to `target` — the longest matching prefix, else
@@ -142,7 +147,11 @@ impl Filter {
     fn threshold(&self, target: &str) -> Level {
         self.targets
             .iter()
-            .find(|(prefix, _)| target == prefix || target.starts_with(&format!("{prefix}::")) || target.starts_with(prefix))
+            .find(|(prefix, _)| {
+                target == prefix
+                    || target.starts_with(&format!("{prefix}::"))
+                    || target.starts_with(prefix)
+            })
             .map_or(self.default, |(_, level)| *level)
     }
 
@@ -213,8 +222,14 @@ thread_local! {
 /// Run `future` with `context` active: every log emitted while it (or anything it
 /// awaits) runs carries the context's fields. Wrap a request's future once, at the
 /// top of the chain, and the whole request's logs correlate.
-pub fn scope<'a, T>(context: Context, future: Pin<Box<dyn Future<Output = T> + Send + 'a>>) -> Scoped<'a, T> {
-    Scoped { context: Arc::new(context), future }
+pub fn scope<'a, T>(
+    context: Context,
+    future: Pin<Box<dyn Future<Output = T> + Send + 'a>>,
+) -> Scoped<'a, T> {
+    Scoped {
+        context: Arc::new(context),
+        future,
+    }
 }
 
 /// The future returned by [`scope`]. Sets the thread-local context around each poll
@@ -230,7 +245,8 @@ impl<T> Future for Scoped<'_, T> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut TaskCx<'_>) -> Poll<T> {
         // `Scoped` is `Unpin` (an `Arc` and a `Pin<Box<…>>`), so no unsafe needed.
         let this = self.as_mut().get_mut();
-        let previous = CURRENT.with(|current| current.borrow_mut().replace(Arc::clone(&this.context)));
+        let previous =
+            CURRENT.with(|current| current.borrow_mut().replace(Arc::clone(&this.context)));
         // Restore on the way out via a guard, so the context is put back even if the
         // inner poll *panics* (unwinds) — otherwise a panicking request would leak its
         // context onto the thread for the next task. Composes with panic isolation.
@@ -268,7 +284,11 @@ impl Logger {
     /// A logger writing to stderr. Pair a [`Filter`] with a [`Format`].
     #[must_use]
     pub fn new(filter: Filter, format: Format) -> Self {
-        Self { filter, format, sink: Mutex::new(Box::new(std::io::stderr())) }
+        Self {
+            filter,
+            format,
+            sink: Mutex::new(Box::new(std::io::stderr())),
+        }
     }
 
     /// Send the output somewhere other than stderr (a file, a buffer for tests).
@@ -325,11 +345,19 @@ pub fn __log(level: Level, target: &str, args: std::fmt::Arguments) {
 // --- formatting ------------------------------------------------------------
 
 fn now_millis() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn format_pretty(millis: u64, level: Level, target: &str, args: std::fmt::Arguments) -> String {
-    format!("{} {} {}{target}: {args}", iso8601(millis), level.padded(), context_pretty())
+    format!(
+        "{} {} {}{target}: {args}",
+        iso8601(millis),
+        level.padded(),
+        context_pretty()
+    )
 }
 
 fn format_json(millis: u64, level: Level, target: &str, args: std::fmt::Arguments) -> String {
@@ -347,7 +375,11 @@ fn format_json(millis: u64, level: Level, target: &str, args: std::fmt::Argument
 fn context_pretty() -> String {
     match current() {
         Some(context) if !context.fields.is_empty() => {
-            let pairs: Vec<String> = context.fields.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            let pairs: Vec<String> = context
+                .fields
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
             format!("[{}] ", pairs.join(" "))
         }
         _ => String::new(),
@@ -360,7 +392,11 @@ fn context_json() -> String {
         Some(context) if !context.fields.is_empty() => {
             let mut out = String::new();
             for (key, value) in &context.fields {
-                out.push_str(&format!("\"{}\":\"{}\",", json_escape(key), json_escape(value)));
+                out.push_str(&format!(
+                    "\"{}\":\"{}\",",
+                    json_escape(key),
+                    json_escape(value)
+                ));
             }
             out
         }
@@ -471,7 +507,10 @@ mod tests {
         let f = Filter::new(Level::Info);
         assert!(f.allows("anything", Level::Error));
         assert!(f.allows("anything", Level::Info));
-        assert!(!f.allows("anything", Level::Debug), "debug is below the Info threshold");
+        assert!(
+            !f.allows("anything", Level::Debug),
+            "debug is below the Info threshold"
+        );
     }
 
     #[test]
@@ -508,13 +547,23 @@ mod tests {
     #[test]
     fn pretty_format_has_the_parts_in_order() {
         // 2021-01-01T00:00:00.000Z
-        let line = format_pretty(1_609_459_200_000, Level::Info, "kernway_web", format_args!("hi {}", 7));
+        let line = format_pretty(
+            1_609_459_200_000,
+            Level::Info,
+            "kernway_web",
+            format_args!("hi {}", 7),
+        );
         assert_eq!(line, "2021-01-01T00:00:00.000Z INFO  kernway_web: hi 7");
     }
 
     #[test]
     fn json_format_is_one_object_and_escapes() {
-        let line = format_json(1_609_459_200_000, Level::Error, "sec", format_args!("bad \"quote\"\n"));
+        let line = format_json(
+            1_609_459_200_000,
+            Level::Error,
+            "sec",
+            format_args!("bad \"quote\"\n"),
+        );
         assert_eq!(
             line,
             r#"{"ts":"2021-01-01T00:00:00.000Z","level":"ERROR","target":"sec","msg":"bad \"quote\"\n"}"#
@@ -574,7 +623,10 @@ mod tests {
         };
 
         assert_eq!(seen, Some(vec![("req".to_string(), "abc123".to_string())]));
-        assert!(current().is_none(), "the context is restored after the scope");
+        assert!(
+            current().is_none(),
+            "the context is restored after the scope"
+        );
     }
 
     #[test]

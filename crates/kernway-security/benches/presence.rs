@@ -49,7 +49,9 @@ fn presence(c: &mut Criterion) {
             b.iter(|| drive(p.heartbeat(black_box("user00005000"), black_box(1010))).unwrap());
         });
         g.bench_function("is_online", |b| {
-            b.iter(|| black_box(drive(p.is_online(black_box("user00005000"), black_box(1010))).unwrap()));
+            b.iter(|| {
+                black_box(drive(p.is_online(black_box("user00005000"), black_box(1010))).unwrap())
+            });
         });
         g.finish();
     }

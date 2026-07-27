@@ -88,12 +88,24 @@ fn pipeline(c: &mut Criterion) {
     // A static route: the common case, and the one with no per-request
     // allocation in the router.
     group.bench_function("static_get", |b| {
-        b.iter(|| black_box(run_once(black_box(&router), black_box(&ctx), black_box(STATIC_GET))));
+        b.iter(|| {
+            black_box(run_once(
+                black_box(&router),
+                black_box(&ctx),
+                black_box(STATIC_GET),
+            ))
+        });
     });
 
     // A parameterised route: pays the param map plus a JSON body build.
     group.bench_function("param_get", |b| {
-        b.iter(|| black_box(run_once(black_box(&router), black_box(&ctx), black_box(PARAM_GET))));
+        b.iter(|| {
+            black_box(run_once(
+                black_box(&router),
+                black_box(&ctx),
+                black_box(PARAM_GET),
+            ))
+        });
     });
 
     group.finish();

@@ -75,7 +75,10 @@ pub struct RenderContext<'a> {
 impl<'a> RenderContext<'a> {
     /// An empty context — anonymous, no CSRF token.
     pub fn new() -> Self {
-        Self { authz: None, csrf: None }
+        Self {
+            authz: None,
+            csrf: None,
+        }
     }
 
     /// Supply the authorization facts `th:authorize` checks.
@@ -233,7 +236,10 @@ pub struct Kernleaf {
 impl Kernleaf {
     /// A new engine with no templates and no messages.
     pub fn new() -> Self {
-        Self { templates: HashMap::new(), messages: HashMap::new() }
+        Self {
+            templates: HashMap::new(),
+            messages: HashMap::new(),
+        }
     }
 
     /// Register an i18n message. `#{key}` resolves to `value`, with `{0}`/`{1}`
@@ -279,7 +285,15 @@ impl Kernleaf {
         };
         let mut out = String::new();
         let mut scope: Vec<(&str, &Value<'_>)> = Vec::new();
-        render_nodes(dom, &env, &mut scope, InlineMode::Html, &self.templates, 0, &mut out)?;
+        render_nodes(
+            dom,
+            &env,
+            &mut scope,
+            InlineMode::Html,
+            &self.templates,
+            0,
+            &mut out,
+        )?;
         Ok(out)
     }
 }
@@ -557,7 +571,11 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn new(src: &'a str) -> Self {
-        Self { s: src.as_bytes(), src, pos: 0 }
+        Self {
+            s: src.as_bytes(),
+            src,
+            pos: 0,
+        }
     }
 
     fn eof(&self) -> bool {
@@ -604,7 +622,9 @@ impl<'a> Parser<'a> {
     fn read_comment(&mut self) -> Result<Dom, TemplateError> {
         self.pos += 4; // <!--
         let start = self.pos;
-        let end = self.src[start..].find("-->").ok_or_else(|| err("unterminated comment"))?;
+        let end = self.src[start..]
+            .find("-->")
+            .ok_or_else(|| err("unterminated comment"))?;
         let body = self.src[start..start + end].to_string();
         self.pos = start + end + 3;
         Ok(Dom::Comment(body))
@@ -612,7 +632,9 @@ impl<'a> Parser<'a> {
 
     fn read_declaration(&mut self) -> Result<Dom, TemplateError> {
         let start = self.pos;
-        let end = self.src[start..].find('>').ok_or_else(|| err("unterminated `<!…>`"))?;
+        let end = self.src[start..]
+            .find('>')
+            .ok_or_else(|| err("unterminated `<!…>`"))?;
         let text = self.src[start..start + end + 1].to_string();
         self.pos = start + end + 1;
         Ok(Dom::Declaration(text))
@@ -629,7 +651,11 @@ impl<'a> Parser<'a> {
         let (raw_attrs, self_closing) = self.read_attrs()?;
         let void = self_closing || VOID.contains(&tag_lower.as_str());
 
-        let children = if void { Vec::new() } else { self.parse_nodes()? };
+        let children = if void {
+            Vec::new()
+        } else {
+            self.parse_nodes()?
+        };
         if !void {
             // Consume the matching close tag if present. Lenient: a missing or
             // mismatched close tag does not abort — templates in the wild have
@@ -767,11 +793,18 @@ fn compile_text(raw: &str) -> Result<Dom, TemplateError> {
         }
         let after = &rest[pos + 2..];
         let close = if is_escaped { "]]" } else { ")]" };
-        let end = after
-            .find(close)
-            .ok_or_else(|| err(format!("unclosed inline `{}`", if is_escaped { "[[" } else { "[(" })))?;
+        let end = after.find(close).ok_or_else(|| {
+            err(format!(
+                "unclosed inline `{}`",
+                if is_escaped { "[[" } else { "[(" }
+            ))
+        })?;
         let expr = parse_expr(after[..end].trim())?;
-        parts.push(if is_escaped { InlinePart::Escaped(expr) } else { InlinePart::Raw(expr) });
+        parts.push(if is_escaped {
+            InlinePart::Escaped(expr)
+        } else {
+            InlinePart::Raw(expr)
+        });
         rest = &after[end + 2..];
     }
     Ok(Dom::Inline(parts))
@@ -831,7 +864,9 @@ fn build_element(
                 }
                 "insert" => el.th_insert = Some(parse_fragment_ref(&value)),
                 "replace" => el.th_replace = Some(parse_fragment_ref(&value)),
-                attr => el.dynamic_attrs.push((attr.to_string(), parse_expr(&value)?)),
+                attr => el
+                    .dynamic_attrs
+                    .push((attr.to_string(), parse_expr(&value)?)),
             },
         }
     }
@@ -844,11 +879,22 @@ fn build_element(
 fn parse_fragment_ref(value: &str) -> FragmentRef {
     let v = value.trim();
     // Strip an optional `~{ … }` wrapper.
-    let v = v.strip_prefix("~{").and_then(|r| r.strip_suffix('}')).unwrap_or(v).trim();
+    let v = v
+        .strip_prefix("~{")
+        .and_then(|r| r.strip_suffix('}'))
+        .unwrap_or(v)
+        .trim();
     let (template, name) = match v.split_once("::") {
         Some((tpl, name)) => {
             let tpl = tpl.trim();
-            (if tpl.is_empty() { None } else { Some(tpl.to_string()) }, name.trim())
+            (
+                if tpl.is_empty() {
+                    None
+                } else {
+                    Some(tpl.to_string())
+                },
+                name.trim(),
+            )
         }
         None => (Some(v.to_string()), ""), // a bare template name = the whole template
     };
@@ -927,7 +973,9 @@ fn parse_authorize(value: &str) -> Result<AuthzExpr, TemplateError> {
             .collect();
         return Ok(AuthzExpr::HasAnyRole(roles));
     }
-    Err(err(format!("unsupported th:authorize expression `{value}`")))
+    Err(err(format!(
+        "unsupported th:authorize expression `{value}`"
+    )))
 }
 
 /// If `s` is `name(args)`, return `args` (without the parens).
@@ -991,7 +1039,10 @@ mod tests {
     #[test]
     fn th_text_replaces_body_with_escaped_value() {
         let m = Value::map([("title", Value::from("Team"))]);
-        assert_eq!(render("<h1 th:text=\"${title}\">Placeholder</h1>", &m).unwrap(), "<h1>Team</h1>");
+        assert_eq!(
+            render("<h1 th:text=\"${title}\">Placeholder</h1>", &m).unwrap(),
+            "<h1>Team</h1>"
+        );
     }
 
     #[test]
@@ -1005,12 +1056,18 @@ mod tests {
     #[test]
     fn th_utext_is_raw_the_explicit_unsafe_path() {
         let m = Value::map([("html", Value::from("<b>bold</b>"))]);
-        assert_eq!(render("<div th:utext=\"${html}\">x</div>", &m).unwrap(), "<div><b>bold</b></div>");
+        assert_eq!(
+            render("<div th:utext=\"${html}\">x</div>", &m).unwrap(),
+            "<div><b>bold</b></div>"
+        );
     }
 
     #[test]
     fn a_string_literal_expression() {
-        assert_eq!(render("<p th:text=\"'hi'\">x</p>", &Value::Null).unwrap(), "<p>hi</p>");
+        assert_eq!(
+            render("<p th:text=\"'hi'\">x</p>", &Value::Null).unwrap(),
+            "<p>hi</p>"
+        );
     }
 
     // --- th:if / th:unless -------------------------------------------------
@@ -1018,15 +1075,27 @@ mod tests {
     #[test]
     fn th_if_includes_or_drops_the_element() {
         let t = "<div th:if=\"${admin}\">panel</div>";
-        assert_eq!(render(t, &Value::map([("admin", Value::from(true))])).unwrap(), "<div>panel</div>");
-        assert_eq!(render(t, &Value::map([("admin", Value::from(false))])).unwrap(), "");
+        assert_eq!(
+            render(t, &Value::map([("admin", Value::from(true))])).unwrap(),
+            "<div>panel</div>"
+        );
+        assert_eq!(
+            render(t, &Value::map([("admin", Value::from(false))])).unwrap(),
+            ""
+        );
     }
 
     #[test]
     fn th_unless_is_the_inverse() {
         let t = "<div th:unless=\"${admin}\">hi</div>";
-        assert_eq!(render(t, &Value::map([("admin", Value::from(false))])).unwrap(), "<div>hi</div>");
-        assert_eq!(render(t, &Value::map([("admin", Value::from(true))])).unwrap(), "");
+        assert_eq!(
+            render(t, &Value::map([("admin", Value::from(false))])).unwrap(),
+            "<div>hi</div>"
+        );
+        assert_eq!(
+            render(t, &Value::map([("admin", Value::from(true))])).unwrap(),
+            ""
+        );
     }
 
     // --- th:each -----------------------------------------------------------
@@ -1040,13 +1109,20 @@ mod tests {
                 Value::map([("title", Value::from("B"))]),
             ]),
         )]);
-        let out = render("<ul><li th:each=\"p : ${posts}\" th:text=\"${p.title}\">t</li></ul>", &m).unwrap();
+        let out = render(
+            "<ul><li th:each=\"p : ${posts}\" th:text=\"${p.title}\">t</li></ul>",
+            &m,
+        )
+        .unwrap();
         assert_eq!(out, "<ul><li>A</li><li>B</li></ul>");
     }
 
     #[test]
     fn th_each_over_a_missing_sequence_is_empty() {
-        assert_eq!(render("<ul><li th:each=\"p : ${posts}\">x</li></ul>", &Value::Null).unwrap(), "<ul></ul>");
+        assert_eq!(
+            render("<ul><li th:each=\"p : ${posts}\">x</li></ul>", &Value::Null).unwrap(),
+            "<ul></ul>"
+        );
     }
 
     #[test]
@@ -1078,7 +1154,10 @@ mod tests {
     #[test]
     fn attribute_values_are_escaped() {
         let m = Value::map([("v", Value::from("a\"b"))]);
-        assert_eq!(render("<input th:value=\"${v}\">", &m).unwrap(), "<input value=\"a&quot;b\">");
+        assert_eq!(
+            render("<input th:value=\"${v}\">", &m).unwrap(),
+            "<input value=\"a&quot;b\">"
+        );
     }
 
     // --- structure ---------------------------------------------------------
@@ -1086,19 +1165,30 @@ mod tests {
     #[test]
     fn void_elements_have_no_closing_tag() {
         let m = Value::map([("src", Value::from("/a.png"))]);
-        assert_eq!(render("<img th:src=\"${src}\">", &m).unwrap(), "<img src=\"/a.png\">");
+        assert_eq!(
+            render("<img th:src=\"${src}\">", &m).unwrap(),
+            "<img src=\"/a.png\">"
+        );
     }
 
     #[test]
     fn nested_elements_and_static_attrs_survive() {
         let m = Value::map([("name", Value::from("Alice"))]);
-        let out = render("<div class=\"u\"><span th:text=\"${name}\">n</span></div>", &m).unwrap();
+        let out = render(
+            "<div class=\"u\"><span th:text=\"${name}\">n</span></div>",
+            &m,
+        )
+        .unwrap();
         assert_eq!(out, "<div class=\"u\"><span>Alice</span></div>");
     }
 
     #[test]
     fn the_th_namespace_declaration_is_stripped() {
-        let out = render("<html xmlns:th=\"http://www.thymeleaf.org\"><body>hi</body></html>", &Value::Null).unwrap();
+        let out = render(
+            "<html xmlns:th=\"http://www.thymeleaf.org\"><body>hi</body></html>",
+            &Value::Null,
+        )
+        .unwrap();
         assert_eq!(out, "<html><body>hi</body></html>");
     }
 
@@ -1107,10 +1197,16 @@ mod tests {
     #[test]
     fn add_compiles_once_and_render_reuses_it() {
         let mut engine = Kernleaf::new();
-        engine.add("page", "<h1 th:text=\"${name}\">n</h1>").unwrap();
+        engine
+            .add("page", "<h1 th:text=\"${name}\">n</h1>")
+            .unwrap();
         assert!(engine.is_compiled("page"));
-        let a = engine.render("page", &Value::map([("name", Value::from("A"))])).unwrap();
-        let b = engine.render("page", &Value::map([("name", Value::from("B"))])).unwrap();
+        let a = engine
+            .render("page", &Value::map([("name", Value::from("A"))]))
+            .unwrap();
+        let b = engine
+            .render("page", &Value::map([("name", Value::from("B"))]))
+            .unwrap();
         assert_eq!((a.as_str(), b.as_str()), ("<h1>A</h1>", "<h1>B</h1>"));
     }
 
@@ -1151,22 +1247,40 @@ mod tests {
     #[test]
     fn th_if_with_a_comparison() {
         let t = "<div th:if=\"${age} >= 18\">adult</div>";
-        assert_eq!(render(t, &Value::map([("age", Value::from(20))])).unwrap(), "<div>adult</div>");
-        assert_eq!(render(t, &Value::map([("age", Value::from(15))])).unwrap(), "");
+        assert_eq!(
+            render(t, &Value::map([("age", Value::from(20))])).unwrap(),
+            "<div>adult</div>"
+        );
+        assert_eq!(
+            render(t, &Value::map([("age", Value::from(15))])).unwrap(),
+            ""
+        );
     }
 
     #[test]
     fn th_text_with_a_ternary() {
         let t = "<span th:text=\"${admin} ? 'Admin' : 'User'\">role</span>";
-        assert_eq!(render(t, &Value::map([("admin", Value::from(true))])).unwrap(), "<span>Admin</span>");
-        assert_eq!(render(t, &Value::map([("admin", Value::from(false))])).unwrap(), "<span>User</span>");
+        assert_eq!(
+            render(t, &Value::map([("admin", Value::from(true))])).unwrap(),
+            "<span>Admin</span>"
+        );
+        assert_eq!(
+            render(t, &Value::map([("admin", Value::from(false))])).unwrap(),
+            "<span>User</span>"
+        );
     }
 
     #[test]
     fn th_text_with_arithmetic_and_concatenation() {
         let m = Value::map([("n", Value::from(3))]);
-        assert_eq!(render("<b th:text=\"${n} * 2\">x</b>", &m).unwrap(), "<b>6</b>");
-        assert_eq!(render("<b th:text=\"'#' + ${n}\">x</b>", &m).unwrap(), "<b>#3</b>");
+        assert_eq!(
+            render("<b th:text=\"${n} * 2\">x</b>", &m).unwrap(),
+            "<b>6</b>"
+        );
+        assert_eq!(
+            render("<b th:text=\"'#' + ${n}\">x</b>", &m).unwrap(),
+            "<b>#3</b>"
+        );
     }
 
     #[test]
@@ -1198,7 +1312,11 @@ mod tests {
     #[test]
     fn th_href_builds_a_url() {
         let m = Value::map([("id", Value::from(42))]);
-        let out = render("<a th:href=\"@{/users/{id}(id=${id}, ref='home')}\">go</a>", &m).unwrap();
+        let out = render(
+            "<a th:href=\"@{/users/{id}(id=${id}, ref='home')}\">go</a>",
+            &m,
+        )
+        .unwrap();
         assert_eq!(out, "<a href=\"/users/42?ref=home\">go</a>");
     }
 
@@ -1206,7 +1324,9 @@ mod tests {
     fn th_text_resolves_a_message() {
         let mut engine = Kernleaf::new();
         engine.message("greeting", "Xin chào, {0}!");
-        engine.add("t", "<h1 th:text=\"#{greeting(${name})}\">hi</h1>").unwrap();
+        engine
+            .add("t", "<h1 th:text=\"#{greeting(${name})}\">hi</h1>")
+            .unwrap();
         let m = Value::map([("name", Value::from("Minh"))]);
         assert_eq!(engine.render("t", &m).unwrap(), "<h1>Xin chào, Minh!</h1>");
     }
@@ -1217,7 +1337,10 @@ mod tests {
         let mut engine = Kernleaf::new();
         engine.message("raw", "<b>{0}</b>");
         engine.add("t", "<p th:text=\"#{raw('x')}\">y</p>").unwrap();
-        assert_eq!(engine.render("t", &Value::Null).unwrap(), "<p>&lt;b&gt;x&lt;/b&gt;</p>");
+        assert_eq!(
+            engine.render("t", &Value::Null).unwrap(),
+            "<p>&lt;b&gt;x&lt;/b&gt;</p>"
+        );
     }
 
     // --- th:inline / [[…]] context-aware escaping (slice E) ---------------
@@ -1225,7 +1348,10 @@ mod tests {
     #[test]
     fn inline_expression_is_html_escaped_by_default() {
         let m = Value::map([("x", Value::from("<b>"))]);
-        assert_eq!(render("<p>Hi [[${x}]]!</p>", &m).unwrap(), "<p>Hi &lt;b&gt;!</p>");
+        assert_eq!(
+            render("<p>Hi [[${x}]]!</p>", &m).unwrap(),
+            "<p>Hi &lt;b&gt;!</p>"
+        );
     }
 
     #[test]
@@ -1237,28 +1363,43 @@ mod tests {
     #[test]
     fn plain_text_stays_a_fast_text_node() {
         // No inline markers → Dom::Text, no per-render scan (the discipline).
-        assert_eq!(render("<p>just plain text &amp; ok</p>", &Value::Null).unwrap(), "<p>just plain text &amp; ok</p>");
+        assert_eq!(
+            render("<p>just plain text &amp; ok</p>", &Value::Null).unwrap(),
+            "<p>just plain text &amp; ok</p>"
+        );
     }
 
     #[test]
     fn javascript_inline_escapes_for_a_script_context() {
         // A value cannot break out of the JS string or close the <script>.
         let m = Value::map([("name", Value::from("a'<b>"))]);
-        let out = render("<script th:inline=\"javascript\">var n='[[${name}]]';</script>", &m).unwrap();
+        let out = render(
+            "<script th:inline=\"javascript\">var n='[[${name}]]';</script>",
+            &m,
+        )
+        .unwrap();
         assert_eq!(out, "<script>var n='a\\'\\u003Cb\\u003E';</script>");
     }
 
     #[test]
     fn css_inline_escapes_for_a_style_context() {
         let m = Value::map([("color", Value::from("red;}"))]);
-        let out = render("<style th:inline=\"css\">.x{color:[[${color}]]}</style>", &m).unwrap();
+        let out = render(
+            "<style th:inline=\"css\">.x{color:[[${color}]]}</style>",
+            &m,
+        )
+        .unwrap();
         assert_eq!(out, "<style>.x{color:red\\3B \\7D }</style>");
     }
 
     #[test]
     fn the_inline_mode_is_inherited_by_descendants() {
         let m = Value::map([("x", Value::from("<"))]);
-        let out = render("<div th:inline=\"javascript\"><span>[[${x}]]</span></div>", &m).unwrap();
+        let out = render(
+            "<div th:inline=\"javascript\"><span>[[${x}]]</span></div>",
+            &m,
+        )
+        .unwrap();
         assert_eq!(out, "<div><span>\\u003C</span></div>");
     }
 
@@ -1280,15 +1421,24 @@ mod tests {
     #[test]
     fn th_authorize_has_role() {
         let mut e = Kernleaf::new();
-        e.add("t", "<div th:authorize=\"hasRole('ADMIN')\">panel</div>").unwrap();
-        let admin = MockAuth { authed: true, roles: &["ADMIN"] };
-        let user = MockAuth { authed: true, roles: &["USER"] };
+        e.add("t", "<div th:authorize=\"hasRole('ADMIN')\">panel</div>")
+            .unwrap();
+        let admin = MockAuth {
+            authed: true,
+            roles: &["ADMIN"],
+        };
+        let user = MockAuth {
+            authed: true,
+            roles: &["USER"],
+        };
         assert_eq!(
-            e.render_with("t", &Value::Null, &RenderContext::new().authorize(&admin)).unwrap(),
+            e.render_with("t", &Value::Null, &RenderContext::new().authorize(&admin))
+                .unwrap(),
             "<div>panel</div>"
         );
         assert_eq!(
-            e.render_with("t", &Value::Null, &RenderContext::new().authorize(&user)).unwrap(),
+            e.render_with("t", &Value::Null, &RenderContext::new().authorize(&user))
+                .unwrap(),
             ""
         );
     }
@@ -1297,35 +1447,63 @@ mod tests {
     fn th_authorize_is_fail_closed_without_a_context() {
         // A plain render() has no security context → anonymous → denied.
         let mut e = Kernleaf::new();
-        e.add("t", "<div th:authorize=\"hasRole('ADMIN')\">secret</div>").unwrap();
+        e.add("t", "<div th:authorize=\"hasRole('ADMIN')\">secret</div>")
+            .unwrap();
         assert_eq!(e.render("t", &Value::Null).unwrap(), "");
     }
 
     #[test]
     fn th_authorize_permit_deny_and_authenticated() {
         let mut e = Kernleaf::new();
-        e.add("permit", "<p th:authorize=\"permitAll\">ok</p>").unwrap();
+        e.add("permit", "<p th:authorize=\"permitAll\">ok</p>")
+            .unwrap();
         e.add("deny", "<p th:authorize=\"denyAll\">no</p>").unwrap();
-        e.add("auth", "<p th:authorize=\"isAuthenticated()\">hi</p>").unwrap();
-        e.add("anyrole", "<p th:authorize=\"hasAnyRole('A','B')\">y</p>").unwrap();
+        e.add("auth", "<p th:authorize=\"isAuthenticated()\">hi</p>")
+            .unwrap();
+        e.add("anyrole", "<p th:authorize=\"hasAnyRole('A','B')\">y</p>")
+            .unwrap();
 
-        let anon = MockAuth { authed: false, roles: &[] };
-        let logged = MockAuth { authed: true, roles: &["B"] };
+        let anon = MockAuth {
+            authed: false,
+            roles: &[],
+        };
+        let logged = MockAuth {
+            authed: true,
+            roles: &["B"],
+        };
         let ctx_anon = RenderContext::new().authorize(&anon);
         let ctx_logged = RenderContext::new().authorize(&logged);
 
-        assert_eq!(e.render_with("permit", &Value::Null, &ctx_anon).unwrap(), "<p>ok</p>");
-        assert_eq!(e.render_with("deny", &Value::Null, &ctx_logged).unwrap(), "");
+        assert_eq!(
+            e.render_with("permit", &Value::Null, &ctx_anon).unwrap(),
+            "<p>ok</p>"
+        );
+        assert_eq!(
+            e.render_with("deny", &Value::Null, &ctx_logged).unwrap(),
+            ""
+        );
         assert_eq!(e.render_with("auth", &Value::Null, &ctx_anon).unwrap(), "");
-        assert_eq!(e.render_with("auth", &Value::Null, &ctx_logged).unwrap(), "<p>hi</p>");
-        assert_eq!(e.render_with("anyrole", &Value::Null, &ctx_logged).unwrap(), "<p>y</p>");
+        assert_eq!(
+            e.render_with("auth", &Value::Null, &ctx_logged).unwrap(),
+            "<p>hi</p>"
+        );
+        assert_eq!(
+            e.render_with("anyrole", &Value::Null, &ctx_logged).unwrap(),
+            "<p>y</p>"
+        );
     }
 
     #[test]
     fn auto_csrf_injects_into_a_post_form() {
         let mut e = Kernleaf::new();
-        e.add("t", "<form method=\"post\" action=\"/save\"><button>Go</button></form>").unwrap();
-        let out = e.render_with("t", &Value::Null, &RenderContext::new().csrf("tok123")).unwrap();
+        e.add(
+            "t",
+            "<form method=\"post\" action=\"/save\"><button>Go</button></form>",
+        )
+        .unwrap();
+        let out = e
+            .render_with("t", &Value::Null, &RenderContext::new().csrf("tok123"))
+            .unwrap();
         assert_eq!(
             out,
             "<form method=\"post\" action=\"/save\">\
@@ -1337,8 +1515,10 @@ mod tests {
     #[test]
     fn no_csrf_on_get_forms_or_without_a_token() {
         let mut e = Kernleaf::new();
-        e.add("get", "<form method=\"get\"><button>Go</button></form>").unwrap();
-        e.add("post", "<form method=\"post\"><button>Go</button></form>").unwrap();
+        e.add("get", "<form method=\"get\"><button>Go</button></form>")
+            .unwrap();
+        e.add("post", "<form method=\"post\"><button>Go</button></form>")
+            .unwrap();
         // A GET form, even with a token → no injection (nothing to protect).
         assert!(!e
             .render_with("get", &Value::Null, &RenderContext::new().csrf("t"))
@@ -1353,24 +1533,42 @@ mod tests {
     #[test]
     fn th_replace_swaps_the_host_for_the_fragment() {
         let mut e = Kernleaf::new();
-        e.add("frags", "<div th:fragment=\"header\"><h1>Site</h1></div>").unwrap();
-        e.add("page", "<body><div th:replace=\"frags :: header\">placeholder</div></body>").unwrap();
-        assert_eq!(e.render("page", &Value::Null).unwrap(), "<body><div><h1>Site</h1></div></body>");
+        e.add("frags", "<div th:fragment=\"header\"><h1>Site</h1></div>")
+            .unwrap();
+        e.add(
+            "page",
+            "<body><div th:replace=\"frags :: header\">placeholder</div></body>",
+        )
+        .unwrap();
+        assert_eq!(
+            e.render("page", &Value::Null).unwrap(),
+            "<body><div><h1>Site</h1></div></body>"
+        );
     }
 
     #[test]
     fn th_insert_puts_the_fragment_inside_the_host() {
         let mut e = Kernleaf::new();
-        e.add("frags", "<span th:fragment=\"label\">Hello</span>").unwrap();
-        e.add("page", "<div th:insert=\"frags :: label\">x</div>").unwrap();
-        assert_eq!(e.render("page", &Value::Null).unwrap(), "<div><span>Hello</span></div>");
+        e.add("frags", "<span th:fragment=\"label\">Hello</span>")
+            .unwrap();
+        e.add("page", "<div th:insert=\"frags :: label\">x</div>")
+            .unwrap();
+        assert_eq!(
+            e.render("page", &Value::Null).unwrap(),
+            "<div><span>Hello</span></div>"
+        );
     }
 
     #[test]
     fn a_fragment_sees_the_model() {
         let mut e = Kernleaf::new();
-        e.add("frags", "<h1 th:fragment=\"title\" th:text=\"${name}\">x</h1>").unwrap();
-        e.add("page", "<div th:replace=\"frags :: title\">x</div>").unwrap();
+        e.add(
+            "frags",
+            "<h1 th:fragment=\"title\" th:text=\"${name}\">x</h1>",
+        )
+        .unwrap();
+        e.add("page", "<div th:replace=\"frags :: title\">x</div>")
+            .unwrap();
         let m = Value::map([("name", Value::from("Home"))]);
         assert_eq!(e.render("page", &m).unwrap(), "<h1>Home</h1>");
     }
@@ -1380,7 +1578,11 @@ mod tests {
         // The fragment definition also renders in place — as Thymeleaf does when a
         // template both defines and uses a fragment.
         let mut e = Kernleaf::new();
-        e.add("t", "<i th:fragment=\"x\">hi</i><b th:replace=\":: x\">z</b>").unwrap();
+        e.add(
+            "t",
+            "<i th:fragment=\"x\">hi</i><b th:replace=\":: x\">z</b>",
+        )
+        .unwrap();
         assert_eq!(e.render("t", &Value::Null).unwrap(), "<i>hi</i><i>hi</i>");
     }
 
@@ -1389,14 +1591,18 @@ mod tests {
         let mut e = Kernleaf::new();
         e.add("part", "<p>partial</p>").unwrap();
         e.add("page", "<main th:insert=\"part\">x</main>").unwrap();
-        assert_eq!(e.render("page", &Value::Null).unwrap(), "<main><p>partial</p></main>");
+        assert_eq!(
+            e.render("page", &Value::Null).unwrap(),
+            "<main><p>partial</p></main>"
+        );
     }
 
     #[test]
     fn the_tilde_brace_wrapper_is_accepted() {
         let mut e = Kernleaf::new();
         e.add("frags", "<p th:fragment=\"f\">ok</p>").unwrap();
-        e.add("page", "<div th:replace=\"~{frags :: f}\">x</div>").unwrap();
+        e.add("page", "<div th:replace=\"~{frags :: f}\">x</div>")
+            .unwrap();
         assert_eq!(e.render("page", &Value::Null).unwrap(), "<p>ok</p>");
     }
 
@@ -1405,7 +1611,11 @@ mod tests {
         // Fragment "a" inserts itself; rendering hits the depth cap and errors
         // rather than looping forever.
         let mut e = Kernleaf::new();
-        e.add("t", "<div th:fragment=\"a\"><div th:insert=\":: a\">x</div></div>").unwrap();
+        e.add(
+            "t",
+            "<div th:fragment=\"a\"><div th:insert=\":: a\">x</div></div>",
+        )
+        .unwrap();
         assert!(e.render("t", &Value::Null).is_err());
     }
 
@@ -1417,7 +1627,11 @@ mod tests {
             ("items", Value::seq([Value::from(1), Value::from(2)])),
         ]);
         assert_eq!(
-            render("<span th:text=\"#strings.capitalize(${name})\">x</span>", &m).unwrap(),
+            render(
+                "<span th:text=\"#strings.capitalize(${name})\">x</span>",
+                &m
+            )
+            .unwrap(),
             "<span>Alice</span>"
         );
         assert_eq!(

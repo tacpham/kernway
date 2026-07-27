@@ -37,8 +37,16 @@ impl UserRepository {
     pub fn find_by_id(&self, id: u64) -> Option<User> {
         println!("  [DB] Loading user {} from database...", id);
         match id {
-            1 => Some(User { id: 1, name: "Alice".into(), email: "alice@example.com".into() }),
-            2 => Some(User { id: 2, name: "Bob".into(), email: "bob@example.com".into() }),
+            1 => Some(User {
+                id: 1,
+                name: "Alice".into(),
+                email: "alice@example.com".into(),
+            }),
+            2 => Some(User {
+                id: 2,
+                name: "Bob".into(),
+                email: "bob@example.com".into(),
+            }),
             _ => None,
         }
     }
@@ -53,7 +61,10 @@ pub struct UserService {
 
 impl UserService {
     pub fn new_with_cache(repo: Arc<UserRepository>) -> Self {
-        Self { repo, cache: Arc::new(InMemoryCache::new()) }
+        Self {
+            repo,
+            cache: Arc::new(InMemoryCache::new()),
+        }
     }
 
     /// Cache-aside: check cache first, fall back to DB.
@@ -97,7 +108,8 @@ fn main() {
 
     let repo = ctx.get::<UserRepository>().unwrap();
     let service = UserService::new_with_cache(repo);
-    ctx.register_instance::<UserService>(Arc::new(service)).unwrap();
+    ctx.register_instance::<UserService>(Arc::new(service))
+        .unwrap();
 
     println!("✅ {} beans registered", ctx.bean_count());
     println!("🚀 Kernway v0.5 Cache Demo");
@@ -140,7 +152,8 @@ fn main() {
                     "misses": s.misses,
                     "entries": s.entries,
                     "hit_ratio": s.hit_ratio(),
-                })).into_response()
+                }))
+                .into_response()
             }
         })
         .build()

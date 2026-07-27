@@ -30,13 +30,19 @@ impl BearerAuth {
     /// (checks signature, algorithm, `exp`, and `nbf` with 60s leeway).
     #[must_use]
     pub fn new(secret: impl Into<Vec<u8>>) -> Self {
-        Self { jwt: Jwt::new(secret), validation: Validation::default() }
+        Self {
+            jwt: Jwt::new(secret),
+            validation: Validation::default(),
+        }
     }
 
     /// Authenticate with an explicit [`Validation`] (e.g. an expected issuer/audience).
     #[must_use]
     pub fn with_validation(secret: impl Into<Vec<u8>>, validation: Validation) -> Self {
-        Self { jwt: Jwt::new(secret), validation }
+        Self {
+            jwt: Jwt::new(secret),
+            validation,
+        }
     }
 }
 
@@ -45,9 +51,18 @@ impl Middleware for BearerAuth {
         "BearerAuth"
     }
 
-    fn handle<'a>(&'a self, req: Request, scope: &'a RequestScope, next: Next<'a>) -> BoxFuture<'a, Response> {
+    fn handle<'a>(
+        &'a self,
+        req: Request,
+        scope: &'a RequestScope,
+        next: Next<'a>,
+    ) -> BoxFuture<'a, Response> {
         let context = bearer_token(&req)
-            .and_then(|token| self.jwt.decode_with(token, unix_now(), &self.validation).ok())
+            .and_then(|token| {
+                self.jwt
+                    .decode_with(token, unix_now(), &self.validation)
+                    .ok()
+            })
             .map(|claims| {
                 let roles = claims.role_list(); // borrow before moving sub out
                 SecurityContext::authenticated(claims.sub.unwrap_or_default(), roles)

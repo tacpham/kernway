@@ -74,13 +74,13 @@
 //! - [`registry`] — [`OpenApiRegistry`]: collects routes, renders JSON
 //! - [`spec`] — [`OpenApiSpec`]: the serializable document itself
 
-/// The serializable OpenAPI 3.0 document.
-pub mod spec;
-/// Per-route documentation types.
-pub mod route_doc;
 /// Collects route docs and renders the final JSON.
 pub mod registry;
+/// Per-route documentation types.
+pub mod route_doc;
+/// The serializable OpenAPI 3.0 document.
+pub mod spec;
 
-pub use route_doc::{RouteDoc, ParamDoc, ParamIn, ResponseDoc, RequestBodyDoc};
 pub use registry::OpenApiRegistry;
+pub use route_doc::{ParamDoc, ParamIn, RequestBodyDoc, ResponseDoc, RouteDoc};
 pub use spec::OpenApiSpec;

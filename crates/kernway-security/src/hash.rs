@@ -192,7 +192,10 @@ mod tests {
     fn hmac_long_key_is_hashed_first() {
         // A > 64-byte key exercises the key-shortening branch (RFC 4231 case 6).
         let key = [0xaau8; 131];
-        let out = hmac_sha256(&key, b"Test Using Larger Than Block-Size Key - Hash Key First");
+        let out = hmac_sha256(
+            &key,
+            b"Test Using Larger Than Block-Size Key - Hash Key First",
+        );
         assert_eq!(
             hex(&out),
             "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"

@@ -92,7 +92,11 @@ impl ShardConfig {
 /// **single** listener — the caller must not assume `len() == config.shards`.
 pub fn bootstrap_shards(config: &ShardConfig) -> io::Result<Vec<TcpListener>> {
     if !sys::supports_reuseport() {
-        return Ok(vec![sys::bind_listener(config.addr, config.backlog, false)?]);
+        return Ok(vec![sys::bind_listener(
+            config.addr,
+            config.backlog,
+            false,
+        )?]);
     }
 
     let mut listeners = Vec::with_capacity(config.shards);
@@ -367,7 +371,8 @@ mod tests {
     #[test]
     fn a_triggered_shutdown_stops_every_shard() {
         let shutdown = Shutdown::new();
-        let (_addr, server) = spawn_server(shutdown.clone(), Duration::from_secs(5), |_stream| async {});
+        let (_addr, server) =
+            spawn_server(shutdown.clone(), Duration::from_secs(5), |_stream| async {});
 
         shutdown.trigger();
         // `run_shards_with_shutdown` joins its threads, so returning at all
@@ -383,7 +388,8 @@ mod tests {
     #[test]
     fn the_port_is_released_once_the_server_stops() {
         let shutdown = Shutdown::new();
-        let (addr, server) = spawn_server(shutdown.clone(), Duration::from_secs(5), |_stream| async {});
+        let (addr, server) =
+            spawn_server(shutdown.clone(), Duration::from_secs(5), |_stream| async {});
 
         shutdown.trigger();
         server.join().unwrap().unwrap();
@@ -400,10 +406,14 @@ mod tests {
         let shutdown = Shutdown::new();
         // The handler is still working when the signal arrives; a shutdown that
         // dropped it here would cut a half-written response.
-        let (addr, server) = spawn_server(shutdown.clone(), Duration::from_secs(5), |mut stream| async move {
-            rt_core::sleep(Duration::from_millis(150)).await;
-            let _ = stream.write_all(b"done").await;
-        });
+        let (addr, server) = spawn_server(
+            shutdown.clone(),
+            Duration::from_secs(5),
+            |mut stream| async move {
+                rt_core::sleep(Duration::from_millis(150)).await;
+                let _ = stream.write_all(b"done").await;
+            },
+        );
 
         let mut client = std::net::TcpStream::connect(addr).unwrap();
         // Give the shard a moment to accept, so the connection is genuinely
@@ -420,11 +430,15 @@ mod tests {
     #[test]
     fn the_drain_timeout_bounds_a_connection_that_never_ends() {
         let shutdown = Shutdown::new();
-        let (addr, server) = spawn_server(shutdown.clone(), Duration::from_millis(100), |_stream| async {
-            // A client holding a connection open forever must not be able to
-            // hold the shutdown open forever with it.
-            std::future::pending::<()>().await;
-        });
+        let (addr, server) = spawn_server(
+            shutdown.clone(),
+            Duration::from_millis(100),
+            |_stream| async {
+                // A client holding a connection open forever must not be able to
+                // hold the shutdown open forever with it.
+                std::future::pending::<()>().await;
+            },
+        );
 
         let _client = std::net::TcpStream::connect(addr).unwrap();
         std::thread::sleep(Duration::from_millis(30));

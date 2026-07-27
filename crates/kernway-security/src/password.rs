@@ -40,7 +40,11 @@ pub fn hash_with(password: &str, iterations: u32) -> String {
     let mut salt = [0u8; SALT_LEN];
     getrandom::getrandom(&mut salt).expect("OS randomness unavailable");
     let dk = pbkdf2_sha256(password.as_bytes(), &salt, iterations);
-    format!("pbkdf2-sha256${iterations}${}${}", b64url_encode(&salt), b64url_encode(&dk))
+    format!(
+        "pbkdf2-sha256${iterations}${}${}",
+        b64url_encode(&salt),
+        b64url_encode(&dk)
+    )
 }
 
 /// Whether `password` matches a `stored` hash from [`hash_password`]. Recomputes the
@@ -120,7 +124,10 @@ mod tests {
         let parts: Vec<&str> = stored.split('$').collect();
         assert_eq!(parts.len(), 4);
         assert_eq!(parts[0], "pbkdf2-sha256");
-        assert_eq!(parts[1], "4096", "iterations are recoverable, so the factor can be raised later");
+        assert_eq!(
+            parts[1], "4096",
+            "iterations are recoverable, so the factor can be raised later"
+        );
     }
 
     #[test]
@@ -133,7 +140,13 @@ mod tests {
 
     #[test]
     fn malformed_stored_strings_are_rejected_not_panicked() {
-        for bad in ["", "plain", "md5$1$x$y", "pbkdf2-sha256$notanumber$s$h", "pbkdf2-sha256$1000$s$h$extra"] {
+        for bad in [
+            "",
+            "plain",
+            "md5$1$x$y",
+            "pbkdf2-sha256$notanumber$s$h",
+            "pbkdf2-sha256$1000$s$h$extra",
+        ] {
             assert!(!verify_password("pw", bad), "must reject {bad:?}");
         }
     }

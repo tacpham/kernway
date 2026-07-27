@@ -135,18 +135,38 @@ fn bind_addr(fd: i32, addr: SocketAddr) -> io::Result<()> {
 // BSD-derived kernels (macOS included) carry a length byte in the sockaddr.
 // Linux has no such field, so these are no-ops there.
 
-#[cfg(any(target_vendor = "apple", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
+#[cfg(any(
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
 fn set_sin_len(raw: &mut libc::sockaddr_in) {
     raw.sin_len = mem::size_of::<libc::sockaddr_in>() as u8;
 }
 
-#[cfg(not(any(target_vendor = "apple", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd")))]
+#[cfg(not(any(
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+)))]
 fn set_sin_len(_raw: &mut libc::sockaddr_in) {}
 
-#[cfg(any(target_vendor = "apple", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))]
+#[cfg(any(
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
 fn set_sin6_len(raw: &mut libc::sockaddr_in6) {
     raw.sin6_len = mem::size_of::<libc::sockaddr_in6>() as u8;
 }
 
-#[cfg(not(any(target_vendor = "apple", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd")))]
+#[cfg(not(any(
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+)))]
 fn set_sin6_len(_raw: &mut libc::sockaddr_in6) {}

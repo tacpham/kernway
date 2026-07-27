@@ -20,7 +20,9 @@ fn main() -> io::Result<()> {
         .next()
         .map(|p| p.parse().expect("port must be a number"))
         .unwrap_or(9000);
-    let shards = args.next().map(|s| s.parse().expect("shard count must be a number"));
+    let shards = args
+        .next()
+        .map(|s| s.parse().expect("shard count must be a number"));
 
     let mut config = ShardConfig::new(format!("0.0.0.0:{port}").parse().unwrap());
     if let Some(shards) = shards {

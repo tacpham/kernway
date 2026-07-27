@@ -314,7 +314,9 @@ mod tests {
     fn until_shutdown_returns_the_output_when_the_future_wins() {
         let ex = Executor::new().unwrap();
         let shutdown = Shutdown::new();
-        let out = ex.block_on(until_shutdown(&shutdown, async { 42 })).unwrap();
+        let out = ex
+            .block_on(until_shutdown(&shutdown, async { 42 }))
+            .unwrap();
         assert_eq!(out, Some(42));
     }
 

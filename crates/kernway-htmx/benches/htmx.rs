@@ -112,10 +112,26 @@ fn bench_extract(c: &mut Criterion) {
     let mut parts = http_parts();
     g.bench_function("axum_htmx", |b| {
         b.iter(|| {
-            black_box(now(HxRequest::from_request_parts(&mut parts, &())).unwrap().0);
-            black_box(now(HxBoosted::from_request_parts(&mut parts, &())).unwrap().0);
-            black_box(now(HxTarget::from_request_parts(&mut parts, &())).unwrap().0);
-            black_box(now(HxTrigger::from_request_parts(&mut parts, &())).unwrap().0);
+            black_box(
+                now(HxRequest::from_request_parts(&mut parts, &()))
+                    .unwrap()
+                    .0,
+            );
+            black_box(
+                now(HxBoosted::from_request_parts(&mut parts, &()))
+                    .unwrap()
+                    .0,
+            );
+            black_box(
+                now(HxTarget::from_request_parts(&mut parts, &()))
+                    .unwrap()
+                    .0,
+            );
+            black_box(
+                now(HxTrigger::from_request_parts(&mut parts, &()))
+                    .unwrap()
+                    .0,
+            );
         })
     });
 
@@ -146,7 +162,10 @@ fn bench_respond(c: &mut Criterion) {
     g.bench_function("http_substrate", |b| {
         b.iter(|| {
             let resp = HttpResponse::builder()
-                .header(CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"))
+                .header(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static("text/html; charset=utf-8"),
+                )
                 .header("hx-trigger", HeaderValue::from_static("saved"))
                 .header("hx-retarget", HeaderValue::from_static("#status"))
                 .header("hx-reswap", HeaderValue::from_static("innerHTML"))
@@ -186,10 +205,19 @@ fn bench_turn(c: &mut Criterion) {
     let mut parts = http_parts();
     g.bench_function("axum_htmx_plus_substrate", |b| {
         b.iter(|| {
-            let is_htmx = now(HxRequest::from_request_parts(&mut parts, &())).unwrap().0;
-            let body = if is_htmx { "<tr><td>row</td></tr>" } else { "<html>page</html>" };
+            let is_htmx = now(HxRequest::from_request_parts(&mut parts, &()))
+                .unwrap()
+                .0;
+            let body = if is_htmx {
+                "<tr><td>row</td></tr>"
+            } else {
+                "<html>page</html>"
+            };
             let resp = HttpResponse::builder()
-                .header(CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"))
+                .header(
+                    CONTENT_TYPE,
+                    HeaderValue::from_static("text/html; charset=utf-8"),
+                )
                 .header("hx-trigger", HeaderValue::from_static("saved"))
                 .header(VARY, HeaderValue::from_static("HX-Request"))
                 .body(Vec::from(body.as_bytes()))

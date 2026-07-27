@@ -16,8 +16,8 @@ use std::sync::Arc;
 use di_macro::{controller, Validate};
 use kernway_security::SecurityContext;
 use kernway_server::{
-    BanFilter, Bans, BoxFuture, KernwayApp, Middleware, Next, Path, Request, RequestScope, Response,
-    StatusCode, Validated, VisitorTracking,
+    BanFilter, Bans, BoxFuture, KernwayApp, Middleware, Next, Path, Request, RequestScope,
+    Response, StatusCode, Validated, VisitorTracking,
 };
 
 /// Demo auth: turn an `X-Role` header into a `SecurityContext`. No header →
@@ -28,7 +28,12 @@ impl Middleware for HeaderAuth {
     fn name(&self) -> &'static str {
         "HeaderAuth"
     }
-    fn handle<'a>(&'a self, req: Request, scope: &'a RequestScope, next: Next<'a>) -> BoxFuture<'a, Response> {
+    fn handle<'a>(
+        &'a self,
+        req: Request,
+        scope: &'a RequestScope,
+        next: Next<'a>,
+    ) -> BoxFuture<'a, Response> {
         let ctx = match req.header("x-role") {
             Some(role) => SecurityContext::authenticated("demo-user", [role.to_string()]),
             None => SecurityContext::anonymous(),
@@ -122,7 +127,9 @@ pub fn build_app_tracked(addr: &str, bans: Bans) -> KernwayApp {
         .bind(addr)
         .layer(VisitorTracking::new()) // sets kw_visitor + RequestMeta
         .layer(BanFilter::new(bans)) // rejects banned requests early
-        .get("/hello", |_req: Request, _scope: &RequestScope| async { json_ok(r#"{"ok":true}"#) })
+        .get("/hello", |_req: Request, _scope: &RequestScope| async {
+            json_ok(r#"{"ok":true}"#)
+        })
         .build()
 }
 
@@ -130,15 +137,22 @@ pub fn build_app_tracked(addr: &str, bans: Bans) -> KernwayApp {
 /// shared `InMemoryActivity`, so an admin view can list who is on the site and the
 /// page each is on. The caller keeps the store to query `active(now)`.
 #[cfg(feature = "presence")]
-pub fn build_app_activity(addr: &str, activity: std::sync::Arc<kernway_server::InMemoryActivity>) -> KernwayApp {
+pub fn build_app_activity(
+    addr: &str,
+    activity: std::sync::Arc<kernway_server::InMemoryActivity>,
+) -> KernwayApp {
     use kernway_server::ActivityTracking;
 
     KernwayApp::builder()
         .bind(addr)
         .layer(VisitorTracking::new()) // sets kw_visitor + RequestMeta
         .layer(ActivityTracking::new(activity)) // records the request into the store
-        .get("/hello", |_req: Request, _scope: &RequestScope| async { json_ok(r#"{"ok":true}"#) })
-        .get("/reports", |_req: Request, _scope: &RequestScope| async { json_ok(r#"{"page":"reports"}"#) })
+        .get("/hello", |_req: Request, _scope: &RequestScope| async {
+            json_ok(r#"{"ok":true}"#)
+        })
+        .get("/reports", |_req: Request, _scope: &RequestScope| async {
+            json_ok(r#"{"page":"reports"}"#)
+        })
         .build()
 }
 
@@ -158,8 +172,13 @@ pub fn build_app_bearer(addr: &str, secret: &str) -> KernwayApp {
         .bind(addr)
         .layer(BearerAuth::new(secret)) // Bearer JWT → identity
         .layer(security) // path rules → authorization
-        .get("/me", |_req: Request, _scope: &RequestScope| async { json_ok(r#"{"me":true}"#) })
-        .get("/admin/panel", |_req: Request, _scope: &RequestScope| async { json_ok(r#"{"admin":true}"#) })
+        .get("/me", |_req: Request, _scope: &RequestScope| async {
+            json_ok(r#"{"me":true}"#)
+        })
+        .get(
+            "/admin/panel",
+            |_req: Request, _scope: &RequestScope| async { json_ok(r#"{"admin":true}"#) },
+        )
         .build()
 }
 
@@ -180,8 +199,17 @@ pub fn build_app_secured(addr: &str) -> KernwayApp {
         .bind(addr)
         .layer(HeaderAuth) // sets the SecurityContext (identity)
         .layer(security) // enforces the path rules (authorization)
-        .get("/public/info", |_req: Request, _scope: &RequestScope| async { json_ok(r#"{"public":true}"#) })
-        .get("/secret/data", |_req: Request, _scope: &RequestScope| async { json_ok(r#"{"secret":true}"#) })
-        .get("/admin/panel", |_req: Request, _scope: &RequestScope| async { json_ok(r#"{"admin":true}"#) })
+        .get(
+            "/public/info",
+            |_req: Request, _scope: &RequestScope| async { json_ok(r#"{"public":true}"#) },
+        )
+        .get(
+            "/secret/data",
+            |_req: Request, _scope: &RequestScope| async { json_ok(r#"{"secret":true}"#) },
+        )
+        .get(
+            "/admin/panel",
+            |_req: Request, _scope: &RequestScope| async { json_ok(r#"{"admin":true}"#) },
+        )
         .build()
 }

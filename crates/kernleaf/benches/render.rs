@@ -36,7 +36,9 @@ fn kernleaf_model() -> Value<'static> {
 }
 
 fn minijinja_model() -> MjValue {
-    let users: Vec<MjValue> = (0..N).map(|i| context! { name => format!("User {i}") }).collect();
+    let users: Vec<MjValue> = (0..N)
+        .map(|i| context! { name => format!("User {i}") })
+        .collect();
     context! { title => "Team", users => users }
 }
 
@@ -54,7 +56,10 @@ fn render(c: &mut Criterion) {
     let tmpl = env.get_template("users.html").unwrap();
     let mm = minijinja_model();
     let mj_out = tmpl.render(&mm).unwrap();
-    assert_eq!(kl_out, mj_out, "engines must render identical output to compare fairly");
+    assert_eq!(
+        kl_out, mj_out,
+        "engines must render identical output to compare fairly"
+    );
 
     g.bench_function("kernleaf", |b| {
         b.iter(|| black_box(kl.render("users", black_box(&km)).unwrap()))
@@ -70,7 +75,9 @@ fn parse(c: &mut Criterion) {
     let mut g = c.benchmark_group("parse/user_list");
 
     let mut kl = Kernleaf::new();
-    g.bench_function("kernleaf", |b| b.iter(|| kl.add("t", black_box(KL_TMPL)).unwrap()));
+    g.bench_function("kernleaf", |b| {
+        b.iter(|| kl.add("t", black_box(KL_TMPL)).unwrap())
+    });
 
     let mut env = Environment::new();
     g.bench_function("minijinja", |b| {

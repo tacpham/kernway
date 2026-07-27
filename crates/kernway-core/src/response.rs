@@ -54,13 +54,13 @@ impl Body {
 #[derive(Debug)]
 pub struct Response {
     /// Status line code.
-    pub status:  StatusCode,
+    pub status: StatusCode,
     /// Response headers. A [`Headers`] (one-buffer), not a `HashMap` — a response
     /// sets a few short-keyed headers and the encoder iterates them once and
     /// sizes its buffer from [`Headers::byte_len`] in O(1). See KEP-0000 §2.
     pub headers: Headers,
     /// Response body — bytes, a file, or empty.
-    pub body:    Body,
+    pub body: Body,
 }
 
 impl Response {
@@ -82,7 +82,11 @@ impl Response {
     /// Set the body to a file the connection task will stream. `len` is the full
     /// file size; the read happens later, off the request path.
     pub fn file(mut self, path: impl Into<PathBuf>, len: u64) -> Self {
-        self.body = Body::File { path: path.into(), len, range: None };
+        self.body = Body::File {
+            path: path.into(),
+            len,
+            range: None,
+        };
         self
     }
 
@@ -148,7 +152,7 @@ impl IntoResponse for String {
 impl<T: IntoResponse, E: IntoResponse> IntoResponse for Result<T, E> {
     fn into_response(self) -> Response {
         match self {
-            Ok(v)  => v.into_response(),
+            Ok(v) => v.into_response(),
             Err(e) => e.into_response(),
         }
     }
@@ -192,7 +196,11 @@ mod tests {
         let r = "hello".into_response();
         assert_eq!(r.status, StatusCode::OK);
         assert_eq!(r.body_bytes(), b"hello");
-        assert!(r.headers.get("content-type").unwrap().contains("text/plain"));
+        assert!(r
+            .headers
+            .get("content-type")
+            .unwrap()
+            .contains("text/plain"));
     }
 
     #[test]

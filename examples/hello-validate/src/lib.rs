@@ -37,7 +37,11 @@ pub fn build_app(addr: &str) -> KernwayApp {
             // `user` is now known-valid. Do whatever with it — an ORM, a raw
             // kernway-redis command, or nothing. Validation is decoupled from the
             // data layer; the handler never sees invalid input.
-            (StatusCode::CREATED, Json(serde_json::json!({ "created": user.name }))).into_response()
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({ "created": user.name })),
+            )
+                .into_response()
         })
         .build()
 }

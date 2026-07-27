@@ -43,7 +43,11 @@ impl UploadFile {
     pub fn from_request(req: &Request) -> Result<Self, String> {
         match &req.body_spool {
             // The request's SpooledBody owns cleanup; this is only a handle.
-            Some(spool) => Ok(Self { path: spool.path.clone(), len: spool.len, owns_file: false }),
+            Some(spool) => Ok(Self {
+                path: spool.path.clone(),
+                len: spool.len,
+                owns_file: false,
+            }),
             None => Err("no streamed upload (body empty or under max_inmemory_body)".into()),
         }
     }
@@ -55,7 +59,11 @@ impl UploadFile {
     ///
     /// [`persist`]: UploadFile::persist
     pub(crate) fn from_spooled(path: PathBuf, len: u64) -> Self {
-        Self { path, len, owns_file: true }
+        Self {
+            path,
+            len,
+            owns_file: true,
+        }
     }
 
     /// Path to the temp file holding the uploaded bytes.

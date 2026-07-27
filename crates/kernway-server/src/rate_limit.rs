@@ -111,7 +111,10 @@ impl RateLimit {
             capacity,
             refill_per_sec,
             trusted: Vec::new(),
-            state: RwLock::new(State { buckets: HashMap::new(), seen: 0 }),
+            state: RwLock::new(State {
+                buckets: HashMap::new(),
+                seen: 0,
+            }),
             ban: None,
         }
     }
@@ -175,7 +178,11 @@ impl RateLimit {
         if let Some(burst) = config.get::<u32>("kernway.ratelimit.burst") {
             limiter = limiter.burst(burst);
         }
-        for proxy in config.get_str("kernway.ratelimit.trusted-proxies").unwrap_or("").split(',') {
+        for proxy in config
+            .get_str("kernway.ratelimit.trusted-proxies")
+            .unwrap_or("")
+            .split(',')
+        {
             if let Ok(ip) = proxy.trim().parse::<IpAddr>() {
                 limiter.trusted.push(ip);
             }
@@ -218,12 +225,18 @@ impl RateLimit {
         // Occasionally evict idle buckets so the map does not grow without bound.
         state.seen = state.seen.wrapping_add(1);
         if state.seen.is_multiple_of(4096) {
-            state.buckets.retain(|_, b| now_ms.saturating_sub(b.last_ms) < IDLE_EVICT_MS);
+            state
+                .buckets
+                .retain(|_, b| now_ms.saturating_sub(b.last_ms) < IDLE_EVICT_MS);
         }
 
         let capacity = self.capacity;
         let refill = self.refill_per_sec;
-        let bucket = state.buckets.entry(ip).or_insert(Bucket { tokens: capacity, last_ms: now_ms, violations: 0 });
+        let bucket = state.buckets.entry(ip).or_insert(Bucket {
+            tokens: capacity,
+            last_ms: now_ms,
+            violations: 0,
+        });
 
         // Refill for the elapsed time, capped at capacity.
         let elapsed_secs = now_ms.saturating_sub(bucket.last_ms) as f64 / 1000.0;
@@ -250,8 +263,13 @@ impl RateLimit {
 fn too_many(retry_after_secs: u64) -> Response {
     let mut response = Response::new(StatusCode::TOO_MANY_REQUESTS)
         .content_type("application/json; charset=utf-8")
-        .body(br#"{"status":429,"title":"Too Many Requests","detail":"rate limit exceeded"}"#.to_vec());
-    response.headers.insert("retry-after", &retry_after_secs.to_string());
+        .body(
+            br#"{"status":429,"title":"Too Many Requests","detail":"rate limit exceeded"}"#
+                .to_vec(),
+        );
+    response
+        .headers
+        .insert("retry-after", &retry_after_secs.to_string());
     response
 }
 
@@ -267,7 +285,12 @@ impl Middleware for RateLimit {
         "RateLimit"
     }
 
-    fn handle<'a>(&'a self, req: Request, scope: &'a RequestScope, next: Next<'a>) -> BoxFuture<'a, Response> {
+    fn handle<'a>(
+        &'a self,
+        req: Request,
+        scope: &'a RequestScope,
+        next: Next<'a>,
+    ) -> BoxFuture<'a, Response> {
         // A request we cannot attribute to an IP is allowed (fail open) rather than
         // penalising every unidentifiable client.
         if let Some(ip) = client_ip(req.remote_addr, req.header(FORWARDED_FOR), &self.trusted) {
@@ -297,7 +320,10 @@ mod tests {
         for n in 1..=5 {
             assert!(rl.allow_at(client, 1000), "request {n} within burst");
         }
-        assert!(!rl.allow_at(client, 1000), "the 6th in the same instant is throttled");
+        assert!(
+            !rl.allow_at(client, 1000),
+            "the 6th in the same instant is throttled"
+        );
     }
 
     #[test]
@@ -318,7 +344,10 @@ mod tests {
         let rl = RateLimit::new(1, Duration::from_secs(60));
         assert!(rl.allow_at(ip("10.0.0.1"), 0));
         assert!(!rl.allow_at(ip("10.0.0.1"), 0), "first client throttled");
-        assert!(rl.allow_at(ip("10.0.0.2"), 0), "a different client is unaffected");
+        assert!(
+            rl.allow_at(ip("10.0.0.2"), 0),
+            "a different client is unaffected"
+        );
     }
 
     #[test]
@@ -329,11 +358,16 @@ mod tests {
         for _ in 0..3 {
             assert!(rl.allow_at(client, 0));
         }
-        assert!(!rl.allow_at(client, 0), "burst capped at 3 despite the higher rate");
+        assert!(
+            !rl.allow_at(client, 0),
+            "burst capped at 3 despite the higher rate"
+        );
     }
 
     fn config(props: &str) -> Config {
-        kernway_config::ConfigBuilder::default().parse(props).build()
+        kernway_config::ConfigBuilder::default()
+            .parse(props)
+            .build()
     }
 
     #[test]
@@ -361,7 +395,10 @@ mod tests {
         assert!(rl.allow_at(client, 0));
         rl.allow_at(client, 0); // violation 1
         rl.allow_at(client, 0); // violation 2 → ban
-        assert!(bans.is_banned(Some(client), None), "ban-after from config took effect");
+        assert!(
+            bans.is_banned(Some(client), None),
+            "ban-after from config took effect"
+        );
     }
 
     #[test]
@@ -381,14 +418,20 @@ mod tests {
         let rl = RateLimit::new(1, Duration::from_secs(3600)).ban_after(3, bans.clone());
         let client = ip("203.0.113.9");
 
-        assert!(rl.allow_at(client, 0), "first request uses the single token");
+        assert!(
+            rl.allow_at(client, 0),
+            "first request uses the single token"
+        );
         assert!(!bans.is_banned(Some(client), None), "not banned yet");
 
         // Three throttled requests reach the ban threshold.
         for _ in 0..3 {
             assert!(!rl.allow_at(client, 0), "throttled");
         }
-        assert!(bans.is_banned(Some(client), None), "the flooding IP is now banned");
+        assert!(
+            bans.is_banned(Some(client), None),
+            "the flooding IP is now banned"
+        );
         // A well-behaved client never trips it.
         assert!(!bans.is_banned(Some(ip("203.0.113.10")), None));
     }

@@ -310,15 +310,22 @@ mod tests {
 
     impl ToyEngine {
         fn escape(s: &str) -> String {
-            s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+            s.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
         }
     }
 
     impl TemplateEngine for ToyEngine {
         fn render(&self, template: &str, model: &Value<'_>) -> Result<String, TemplateError> {
             // {{#each key}}BODY{{/each}} — repeat BODY for each item, `{{.}}` = item.
-            if let (Some(open), Some(close)) = (template.find("{{#each "), template.find("{{/each}}")) {
-                let key_end = template[open..].find("}}").ok_or_else(|| TemplateError("bad each".into()))? + open;
+            if let (Some(open), Some(close)) =
+                (template.find("{{#each "), template.find("{{/each}}"))
+            {
+                let key_end = template[open..]
+                    .find("}}")
+                    .ok_or_else(|| TemplateError("bad each".into()))?
+                    + open;
                 let key = template[open + 8..key_end].trim();
                 let body = &template[key_end + 2..close];
                 let items = match model.get(key) {
@@ -346,7 +353,10 @@ mod tests {
     #[test]
     fn a_reference_engine_interpolates_against_the_model() {
         let model = Value::map([("name", Value::from("Alice"))]);
-        assert_eq!(ToyEngine.render("Hi {{ name }}!", &model).unwrap(), "Hi Alice!");
+        assert_eq!(
+            ToyEngine.render("Hi {{ name }}!", &model).unwrap(),
+            "Hi Alice!"
+        );
     }
 
     #[test]
@@ -364,7 +374,9 @@ mod tests {
             "items",
             Value::seq(["a", "b", "c"].iter().map(|s| Value::from(*s))),
         )]);
-        let out = ToyEngine.render("{{#each items}}[{{.}}]{{/each}}", &model).unwrap();
+        let out = ToyEngine
+            .render("{{#each items}}[{{.}}]{{/each}}", &model)
+            .unwrap();
         assert_eq!(out, "[a][b][c]");
     }
 }

@@ -90,7 +90,10 @@ struct ConnPool {
 
 impl ConnPool {
     fn new(max_per_origin: usize) -> Self {
-        Self { idle: Mutex::new(HashMap::new()), max_per_origin }
+        Self {
+            idle: Mutex::new(HashMap::new()),
+            max_per_origin,
+        }
     }
 
     /// Take a fresh-enough idle connection for `origin`, discarding any that have sat
@@ -115,14 +118,20 @@ impl ConnPool {
         let mut map = self.idle.lock().unwrap();
         let bucket = map.entry(origin).or_default();
         if bucket.len() < self.max_per_origin {
-            bucket.push(Idle { conn, since_ms: now_ms });
+            bucket.push(Idle {
+                conn,
+                since_ms: now_ms,
+            });
         }
     }
 }
 
 /// Unix milliseconds now (for pool idle timestamps).
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// An HTTP method. `as_str` is the wire token.
@@ -173,7 +182,9 @@ pub struct Url {
 impl Url {
     /// Parse an absolute `http`/`https` URL. Rejects anything without a scheme + host.
     pub fn parse(url: &str) -> Result<Url, HttpError> {
-        let (scheme, rest) = url.split_once("://").ok_or_else(|| HttpError::Url(format!("no scheme in {url:?}")))?;
+        let (scheme, rest) = url
+            .split_once("://")
+            .ok_or_else(|| HttpError::Url(format!("no scheme in {url:?}")))?;
         let scheme = scheme.to_ascii_lowercase();
         if scheme != "http" && scheme != "https" {
             return Err(HttpError::Url(format!("unsupported scheme {scheme:?}")));
@@ -188,12 +199,26 @@ impl Url {
         }
         let (host, port) = match authority.rsplit_once(':') {
             Some((h, p)) => {
-                let port = p.parse::<u16>().map_err(|_| HttpError::Url(format!("bad port in {url:?}")))?;
+                let port = p
+                    .parse::<u16>()
+                    .map_err(|_| HttpError::Url(format!("bad port in {url:?}")))?;
                 (h.to_string(), port)
             }
-            None => (authority.to_string(), if scheme == "https" { 443 } else { 80 }),
+            None => (
+                authority.to_string(),
+                if scheme == "https" { 443 } else { 80 },
+            ),
         };
-        Ok(Url { scheme, host, port, path_and_query: if path.is_empty() { "/".into() } else { path.to_string() } })
+        Ok(Url {
+            scheme,
+            host,
+            port,
+            path_and_query: if path.is_empty() {
+                "/".into()
+            } else {
+                path.to_string()
+            },
+        })
     }
 
     /// Whether this URL uses TLS.
@@ -218,7 +243,12 @@ pub struct Request {
 impl Request {
     /// A request with no extra headers or body.
     pub fn new(method: Method, url: Url) -> Self {
-        Self { method, url, headers: Vec::new(), body: Vec::new() }
+        Self {
+            method,
+            url,
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
     }
 
     /// Add a header.
@@ -267,7 +297,8 @@ impl Response {
     /// Every header as `(name, value)`, in received order.
     pub fn headers(&self) -> impl Iterator<Item = (&str, &str)> + '_ {
         self.spans.iter().map(move |(n, v)| {
-            let str_of = |r: &Range<usize>| std::str::from_utf8(&self.head[r.clone()]).unwrap_or("");
+            let str_of =
+                |r: &Range<usize>| std::str::from_utf8(&self.head[r.clone()]).unwrap_or("");
             (str_of(n), str_of(v))
         })
     }
@@ -453,7 +484,8 @@ impl HttpClient {
 
     /// `GET url`, streaming the response body — see [`send_streaming`](Self::send_streaming).
     pub async fn get_streaming(&self, url: &str) -> Result<ResponseStream, HttpError> {
-        self.send_streaming(Request::new(Method::Get, Url::parse(url)?)).await
+        self.send_streaming(Request::new(Method::Get, Url::parse(url)?))
+            .await
     }
 
     /// Send a request and return a [`ResponseStream`]: the head is ready immediately and
@@ -466,7 +498,11 @@ impl HttpClient {
     pub async fn send_streaming(&self, req: Request) -> Result<ResponseStream, HttpError> {
         let mut req = req;
         // No transparent decompression mid-stream: ask the server not to encode.
-        if !req.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("accept-encoding")) {
+        if !req
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("accept-encoding"))
+        {
             req = req.header("accept-encoding", "identity");
         }
 
@@ -550,7 +586,9 @@ impl HttpClient {
     ) -> Result<(Conn, HeadRead), HttpError> {
         let addr = resolve(&req.url.host, req.url.port)?;
         let mut conn = self.connect(addr, &req.url).await?;
-        let head = self.head_exchange(&mut conn, req, keep_alive, cookie).await?;
+        let head = self
+            .head_exchange(&mut conn, req, keep_alive, cookie)
+            .await?;
         Ok((conn, head))
     }
 
@@ -564,7 +602,8 @@ impl HttpClient {
         cookie: Option<&str>,
     ) -> Result<HeadRead, HttpError> {
         let exchange = async {
-            conn.write_all(&encode_request(req, keep_alive, cookie)).await?;
+            conn.write_all(&encode_request(req, keep_alive, cookie))
+                .await?;
             read_stream_head(conn).await
         };
         match self.timeout {
@@ -634,7 +673,9 @@ impl HttpClient {
     /// Return the connection to the pool if pooling is on and the exchange left it in a
     /// reusable state (framed body, no `Connection: close`).
     fn maybe_return(&self, origin: Origin, conn: Conn, keepable: bool, response: &Response) {
-        let close = response.header("connection").is_some_and(|c| c.eq_ignore_ascii_case("close"));
+        let close = response
+            .header("connection")
+            .is_some_and(|c| c.eq_ignore_ascii_case("close"));
         if self.max_idle_per_host > 0 && keepable && !close {
             self.pool.put(origin, conn, now_ms());
         }
@@ -683,8 +724,14 @@ fn resolve(host: &str, port: u16) -> Result<std::net::SocketAddr, HttpError> {
 
 /// Write a request and read its full response. Returns the response and whether the
 /// connection is at a clean boundary for reuse (a framed body, not read-to-close).
-async fn send_on(conn: &mut Conn, req: &Request, keep_alive: bool, cookie: Option<&str>) -> Result<(Response, bool), HttpError> {
-    conn.write_all(&encode_request(req, keep_alive, cookie)).await?;
+async fn send_on(
+    conn: &mut Conn,
+    req: &Request,
+    keep_alive: bool,
+    cookie: Option<&str>,
+) -> Result<(Response, bool), HttpError> {
+    conn.write_all(&encode_request(req, keep_alive, cookie))
+        .await?;
     read_response(conn).await
 }
 
@@ -719,8 +766,16 @@ async fn read_stream_head(stream: &mut Conn) -> Result<HeadRead, HttpError> {
         BodyPlan::Chunked => StreamPlan::Chunked(ChunkDecoder::new()),
         BodyPlan::UntilClose => StreamPlan::UntilClose,
     };
-    let close = header_bytes(&head, &spans, b"connection").is_some_and(|v| v.eq_ignore_ascii_case(b"close"));
-    Ok(HeadRead { status, head, spans, buf, plan, close })
+    let close = header_bytes(&head, &spans, b"connection")
+        .is_some_and(|v| v.eq_ignore_ascii_case(b"close"));
+    Ok(HeadRead {
+        status,
+        head,
+        spans,
+        buf,
+        plan,
+        close,
+    })
 }
 
 /// The `Set-Cookie` header values in a head block, in received order.
@@ -786,7 +841,8 @@ impl ResponseStream {
     /// Every header as `(name, value)`, in received order.
     pub fn headers(&self) -> impl Iterator<Item = (&str, &str)> + '_ {
         self.spans.iter().map(move |(n, v)| {
-            let str_of = |r: &Range<usize>| std::str::from_utf8(&self.head[r.clone()]).unwrap_or("");
+            let str_of =
+                |r: &Range<usize>| std::str::from_utf8(&self.head[r.clone()]).unwrap_or("");
             (str_of(n), str_of(v))
         })
     }
@@ -878,8 +934,15 @@ impl ResponseStream {
     /// Read more bytes from the socket into `self.buf`, bounded by the idle timeout.
     /// `false` at EOF. Splits the field borrows so `conn` and `buf` can be used together.
     async fn fill(&mut self) -> Result<bool, HttpError> {
-        let Self { conn, buf, idle_timeout, .. } = self;
-        let conn = conn.as_mut().ok_or_else(|| HttpError::Protocol("stream already finished".into()))?;
+        let Self {
+            conn,
+            buf,
+            idle_timeout,
+            ..
+        } = self;
+        let conn = conn
+            .as_mut()
+            .ok_or_else(|| HttpError::Protocol("stream already finished".into()))?;
         let read = read_more_into(conn, buf);
         match idle_timeout {
             Some(limit) => match rt_core::timeout(*limit, read).await {
@@ -895,7 +958,8 @@ impl ResponseStream {
     fn finish(&mut self, keepable: bool) {
         if let Some(conn) = self.conn.take() {
             if self.max_idle_per_host > 0 && keepable && !self.close {
-                self.pool.put(std::mem::take(&mut self.origin), conn, now_ms());
+                self.pool
+                    .put(std::mem::take(&mut self.origin), conn, now_ms());
             }
             // Otherwise `conn` drops here (closed). A partially-read connection is never
             // pooled — the leftover bytes would corrupt the next response on it.
@@ -918,7 +982,9 @@ async fn read_head(
             break pos + 4;
         }
         if !read_more(stream, &mut buf).await? {
-            return Err(HttpError::Protocol("connection closed before headers completed".into()));
+            return Err(HttpError::Protocol(
+                "connection closed before headers completed".into(),
+            ));
         }
     };
 
@@ -964,7 +1030,12 @@ async fn read_response(stream: &mut Conn) -> Result<(Response, bool), HttpError>
         }
     };
 
-    let mut response = Response { status, body, head: head_block, spans };
+    let mut response = Response {
+        status,
+        body,
+        head: head_block,
+        spans,
+    };
     compress::decompress(&mut response)?; // inflate gzip/deflate/br transparently
     Ok((response, keepable))
 }
@@ -975,7 +1046,10 @@ fn is_stale(error: &HttpError) -> bool {
     match error {
         HttpError::Io(e) => matches!(
             e.kind(),
-            ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted | ErrorKind::BrokenPipe | ErrorKind::UnexpectedEof
+            ErrorKind::ConnectionReset
+                | ErrorKind::ConnectionAborted
+                | ErrorKind::BrokenPipe
+                | ErrorKind::UnexpectedEof
         ),
         HttpError::Protocol(m) => m.contains("closed before headers"),
         _ => false,
@@ -1017,7 +1091,8 @@ type HeaderSpans = Vec<(Range<usize>, Range<usize>)>;
 /// whole-block UTF-8 scan (the status code is read from bytes; header bytes are
 /// validated as UTF-8 only when accessed). This is the parser's hot path.
 fn parse_head_spans(block: &[u8]) -> Result<(u16, HeaderSpans), HttpError> {
-    let line_end = find(block, b"\r\n").ok_or_else(|| HttpError::Protocol("no status line".into()))?;
+    let line_end =
+        find(block, b"\r\n").ok_or_else(|| HttpError::Protocol("no status line".into()))?;
     let status = parse_status(&block[..line_end])?;
 
     let mut spans = Vec::new();
@@ -1046,7 +1121,10 @@ fn parse_status(line: &[u8]) -> Result<u16, HttpError> {
     let space = line.iter().position(|&b| b == b' ').ok_or_else(bad)?;
     let rest = &line[space + 1..];
     let end = rest.iter().position(|&b| b == b' ').unwrap_or(rest.len());
-    std::str::from_utf8(&rest[..end]).ok().and_then(|s| s.parse::<u16>().ok()).ok_or_else(bad)
+    std::str::from_utf8(&rest[..end])
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .ok_or_else(bad)
 }
 
 /// `start..end` with surrounding spaces/tabs trimmed — no allocation, just narrowed.
@@ -1061,7 +1139,11 @@ fn trim_range(block: &[u8], mut start: usize, mut end: usize) -> Range<usize> {
 }
 
 /// Look up a header value (bytes) by lowercase name, over the ranges.
-fn header_bytes<'a>(block: &'a [u8], spans: &[(Range<usize>, Range<usize>)], name: &[u8]) -> Option<&'a [u8]> {
+fn header_bytes<'a>(
+    block: &'a [u8],
+    spans: &[(Range<usize>, Range<usize>)],
+    name: &[u8],
+) -> Option<&'a [u8]> {
     spans
         .iter()
         .find(|(n, _)| block[n.clone()].eq_ignore_ascii_case(name))
@@ -1070,7 +1152,9 @@ fn header_bytes<'a>(block: &'a [u8], spans: &[(Range<usize>, Range<usize>)], nam
 
 /// Decide how to read the body from the parsed header ranges.
 fn body_plan(block: &[u8], spans: &[(Range<usize>, Range<usize>)]) -> BodyPlan {
-    if header_bytes(block, spans, b"transfer-encoding").is_some_and(|v| v.eq_ignore_ascii_case(b"chunked")) {
+    if header_bytes(block, spans, b"transfer-encoding")
+        .is_some_and(|v| v.eq_ignore_ascii_case(b"chunked"))
+    {
         return BodyPlan::Chunked;
     }
     if let Some(len) = header_bytes(block, spans, b"content-length")
@@ -1131,7 +1215,9 @@ struct ChunkDecoder {
 
 impl ChunkDecoder {
     fn new() -> Self {
-        Self { state: ChunkState::Size }
+        Self {
+            state: ChunkState::Size,
+        }
     }
 
     /// Whether the terminating zero-length chunk has been fully consumed.
@@ -1156,7 +1242,11 @@ impl ChunkDecoder {
                             .ok_or_else(bad)?;
                         let size = usize::from_str_radix(hex, 16).map_err(|_| bad())?;
                         pos += i + 2;
-                        self.state = if size == 0 { ChunkState::Trailer } else { ChunkState::Data(size) };
+                        self.state = if size == 0 {
+                            ChunkState::Trailer
+                        } else {
+                            ChunkState::Data(size)
+                        };
                     }
                     None => break, // size line not fully arrived
                 },
@@ -1168,7 +1258,11 @@ impl ChunkDecoder {
                     let take = rem.min(avail);
                     out.extend_from_slice(&buf[pos..pos + take]);
                     pos += take;
-                    self.state = if take == rem { ChunkState::DataCrlf } else { ChunkState::Data(rem - take) };
+                    self.state = if take == rem {
+                        ChunkState::DataCrlf
+                    } else {
+                        ChunkState::Data(rem - take)
+                    };
                 }
                 ChunkState::DataCrlf => {
                     if buf.len() - pos < 2 {
@@ -1195,9 +1289,17 @@ impl ChunkDecoder {
 /// (and `Cookie` when the jar supplied one). `keep_alive` picks `Connection:
 /// keep-alive` (pooled) vs `close`.
 fn encode_request(req: &Request, keep_alive: bool, cookie: Option<&str>) -> Vec<u8> {
-    let mut out = format!("{} {} HTTP/1.1\r\n", req.method.as_str(), req.url.path_and_query);
+    let mut out = format!(
+        "{} {} HTTP/1.1\r\n",
+        req.method.as_str(),
+        req.url.path_and_query
+    );
 
-    let has = |name: &str| req.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(name));
+    let has = |name: &str| {
+        req.headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case(name))
+    };
     if !has("host") {
         // Include the port unless it is the scheme default.
         let default_port = if req.url.is_tls() { 443 } else { 80 };
@@ -1221,7 +1323,11 @@ fn encode_request(req: &Request, keep_alive: bool, cookie: Option<&str>) -> Vec<
         out.push_str(&format!("Content-Length: {}\r\n", req.body.len()));
     }
     if !has("connection") {
-        out.push_str(if keep_alive { "Connection: keep-alive\r\n" } else { "Connection: close\r\n" });
+        out.push_str(if keep_alive {
+            "Connection: keep-alive\r\n"
+        } else {
+            "Connection: close\r\n"
+        });
     }
     if let Some(cookie) = cookie {
         if !cookie.is_empty() && !has("cookie") {
@@ -1256,8 +1362,9 @@ fn redirect_target(req: &Request, response: &Response) -> Result<Option<Request>
         _ => (Method::Get, Vec::new()),
     };
 
-    let same_origin =
-        url.scheme == req.url.scheme && url.host.eq_ignore_ascii_case(&req.url.host) && url.port == req.url.port;
+    let same_origin = url.scheme == req.url.scheme
+        && url.host.eq_ignore_ascii_case(&req.url.host)
+        && url.port == req.url.port;
     let dropped_body = body.is_empty() && !req.body.is_empty();
 
     let headers = req
@@ -1278,7 +1385,12 @@ fn redirect_target(req: &Request, response: &Response) -> Result<Option<Request>
         .cloned()
         .collect();
 
-    Ok(Some(Request { method, url, headers, body }))
+    Ok(Some(Request {
+        method,
+        url,
+        headers,
+        body,
+    }))
 }
 
 /// Resolve a `Location` value against the request URL — absolute, absolute-path, or a
@@ -1288,14 +1400,20 @@ fn resolve_location(base: &Url, location: &str) -> Result<Url, HttpError> {
     if loc.contains("://") {
         Url::parse(loc)
     } else if loc.starts_with('/') {
-        Ok(Url { path_and_query: loc.to_string(), ..base.clone() })
+        Ok(Url {
+            path_and_query: loc.to_string(),
+            ..base.clone()
+        })
     } else {
         // Relative to the current path's directory.
         let dir = match base.path_and_query.rfind('/') {
             Some(i) => &base.path_and_query[..=i],
             None => "/",
         };
-        Ok(Url { path_and_query: format!("{dir}{loc}"), ..base.clone() })
+        Ok(Url {
+            path_and_query: format!("{dir}{loc}"),
+            ..base.clone()
+        })
     }
 }
 
@@ -1318,7 +1436,9 @@ pub fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -1337,7 +1457,9 @@ pub fn bench_encode_request(req: &Request) -> Vec<u8> {
 /// Benchmark hook — parse a response head, returning the header count.
 #[doc(hidden)]
 pub fn bench_parse_head(head_bytes: &[u8]) -> usize {
-    parse_head_spans(head_bytes).map(|(_, spans)| spans.len()).unwrap_or(0)
+    parse_head_spans(head_bytes)
+        .map(|(_, spans)| spans.len())
+        .unwrap_or(0)
 }
 
 /// Benchmark hook — decode a chunked body, returning its length.
@@ -1383,15 +1505,22 @@ mod tests {
         assert_eq!(plain.path_and_query, "/status");
         assert!(!plain.is_tls());
 
-        assert_eq!(Url::parse("http://example.com").unwrap().path_and_query, "/", "no path → /");
+        assert_eq!(
+            Url::parse("http://example.com").unwrap().path_and_query,
+            "/",
+            "no path → /"
+        );
         assert!(Url::parse("ftp://x.com").is_err(), "unsupported scheme");
         assert!(Url::parse("not-a-url").is_err(), "no scheme");
     }
 
     #[test]
     fn encodes_a_request_with_default_headers() {
-        let req = Request::new(Method::Post, Url::parse("http://api.example.com/v1/things").unwrap())
-            .body("application/json", b"{}".to_vec());
+        let req = Request::new(
+            Method::Post,
+            Url::parse("http://api.example.com/v1/things").unwrap(),
+        )
+        .body("application/json", b"{}".to_vec());
         let wire = String::from_utf8(encode_request(&req, false, None)).unwrap();
         assert!(wire.starts_with("POST /v1/things HTTP/1.1\r\n"));
         assert!(wire.contains("Host: api.example.com\r\n"));
@@ -1411,7 +1540,8 @@ mod tests {
 
     #[test]
     fn parses_a_response_head_into_ranges() {
-        let block = b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\n";
+        let block =
+            b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 3\r\n\r\n";
         let (status, spans) = parse_head_spans(block).unwrap();
         assert_eq!(status, 404);
         assert_eq!(spans.len(), 2);
@@ -1420,7 +1550,10 @@ mod tests {
         let (name, value) = &spans[0];
         assert!(block[name.clone()].eq_ignore_ascii_case(b"content-type"));
         assert_eq!(&block[value.clone()], b"text/plain");
-        assert_eq!(header_bytes(block, &spans, b"content-length"), Some(b"3".as_slice()));
+        assert_eq!(
+            header_bytes(block, &spans, b"content-length"),
+            Some(b"3".as_slice())
+        );
     }
 
     #[test]
@@ -1434,7 +1567,11 @@ mod tests {
 
     #[test]
     fn form_is_percent_encoded() {
-        let body = String::from_utf8(encode_form(&[("code", "a b/c"), ("grant_type", "authorization_code")])).unwrap();
+        let body = String::from_utf8(encode_form(&[
+            ("code", "a b/c"),
+            ("grant_type", "authorization_code"),
+        ]))
+        .unwrap();
         assert_eq!(body, "code=a%20b%2Fc&grant_type=authorization_code");
     }
 
@@ -1453,7 +1590,8 @@ mod tests {
             // Read the request head.
             let mut buf = [0u8; 1024];
             let _ = sock.read(&mut buf).unwrap();
-            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello").unwrap();
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+                .unwrap();
         });
 
         let client = HttpClient::new();
@@ -1488,20 +1626,30 @@ mod tests {
     fn streams_a_content_length_body_in_chunks() {
         // A 2 MiB framed body — far larger than the 4 KiB socket read.
         let payload = vec![b'z'; 2 * 1024 * 1024];
-        let mut response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", payload.len()).into_bytes();
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            payload.len()
+        )
+        .into_bytes();
         response.extend_from_slice(&payload);
         let (port, server) = one_shot(response);
 
         let received = rt_core::Executor::new()
             .unwrap()
             .block_on(async {
-                let mut stream = HttpClient::new().get_streaming(&format!("http://127.0.0.1:{port}/big")).await?;
+                let mut stream = HttpClient::new()
+                    .get_streaming(&format!("http://127.0.0.1:{port}/big"))
+                    .await?;
                 assert_eq!(stream.status(), 200);
                 let mut body = Vec::new();
                 while let Some(part) = stream.chunk().await? {
                     // Each delivered slice is bounded by the socket read size, NOT the
                     // 2 MiB total — this is the O(chunk) memory guarantee.
-                    assert!(part.len() <= 4096, "slice {} exceeds the read size", part.len());
+                    assert!(
+                        part.len() <= 4096,
+                        "slice {} exceeds the read size",
+                        part.len()
+                    );
                     body.extend_from_slice(&part);
                 }
                 Ok::<_, HttpError>(body)
@@ -1519,13 +1667,16 @@ mod tests {
         // Three chunks + terminator, delivered as one write; the incremental decoder must
         // reassemble "HelloWorld!!".
         let body = "5\r\nHello\r\n5\r\nWorld\r\n2\r\n!!\r\n0\r\n\r\n";
-        let response = format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{body}").into_bytes();
+        let response =
+            format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{body}").into_bytes();
         let (port, server) = one_shot(response);
 
         let text = rt_core::Executor::new()
             .unwrap()
             .block_on(async {
-                let mut stream = HttpClient::new().get_streaming(&format!("http://127.0.0.1:{port}/c")).await?;
+                let mut stream = HttpClient::new()
+                    .get_streaming(&format!("http://127.0.0.1:{port}/c"))
+                    .await?;
                 let mut out = Vec::new();
                 while let Some(part) = stream.chunk().await? {
                     out.extend_from_slice(&part);
@@ -1544,14 +1695,20 @@ mod tests {
         // Stream 8 MiB and assert the internal buffer never grows toward the body size —
         // it stays within a couple of socket reads, independent of the total.
         let payload = vec![b'x'; 8 * 1024 * 1024];
-        let mut response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", payload.len()).into_bytes();
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            payload.len()
+        )
+        .into_bytes();
         response.extend_from_slice(&payload);
         let (port, server) = one_shot(response);
 
         let (total, peak_buf) = rt_core::Executor::new()
             .unwrap()
             .block_on(async {
-                let mut stream = HttpClient::new().get_streaming(&format!("http://127.0.0.1:{port}/huge")).await?;
+                let mut stream = HttpClient::new()
+                    .get_streaming(&format!("http://127.0.0.1:{port}/huge"))
+                    .await?;
                 let mut total = 0usize;
                 let mut peak = stream.buf.len();
                 while let Some(part) = stream.chunk().await? {
@@ -1564,7 +1721,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(total, payload.len(), "streamed the whole body");
-        assert!(peak_buf <= 8192, "internal buffer stayed O(chunk): peak was {peak_buf} bytes for an 8 MiB body");
+        assert!(
+            peak_buf <= 8192,
+            "internal buffer stayed O(chunk): peak was {peak_buf} bytes for an 8 MiB body"
+        );
         server.join().unwrap();
     }
 
@@ -1580,9 +1740,11 @@ mod tests {
             let (mut sock, _) = listener.accept().unwrap(); // exactly ONE connection
             let mut buf = [0u8; 512];
             let _ = sock.read(&mut buf).unwrap();
-            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc").unwrap();
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc")
+                .unwrap();
             let _ = sock.read(&mut buf).unwrap(); // second request on the same connection
-            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\ndef").unwrap();
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\ndef")
+                .unwrap();
         });
 
         let second = rt_core::Executor::new()
@@ -1611,7 +1773,11 @@ mod tests {
     fn dropping_stream_early_does_not_pool() {
         // A half-read stream must NOT return its connection to the pool.
         let payload = vec![b'q'; 64 * 1024];
-        let mut response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", payload.len()).into_bytes();
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            payload.len()
+        )
+        .into_bytes();
         response.extend_from_slice(&payload);
         let (port, server) = one_shot(response);
 
@@ -1619,7 +1785,9 @@ mod tests {
         rt_core::Executor::new()
             .unwrap()
             .block_on(async {
-                let mut stream = client.get_streaming(&format!("http://127.0.0.1:{port}/p")).await?;
+                let mut stream = client
+                    .get_streaming(&format!("http://127.0.0.1:{port}/p"))
+                    .await?;
                 let _first = stream.chunk().await?.unwrap(); // read one slice, then drop
                 drop(stream);
                 Ok::<_, HttpError>(())
@@ -1627,7 +1795,14 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let pooled: usize = client.pool.idle.lock().unwrap().values().map(Vec::len).sum();
+        let pooled: usize = client
+            .pool
+            .idle
+            .lock()
+            .unwrap()
+            .values()
+            .map(Vec::len)
+            .sum();
         assert_eq!(pooled, 0, "a partially-read connection must not be pooled");
         server.join().unwrap();
     }
@@ -1641,7 +1816,12 @@ mod tests {
         head.push_str("\r\n");
         let head = head.into_bytes();
         let (status, spans) = parse_head_spans(&head).unwrap();
-        Response { status, body: Vec::new(), head, spans }
+        Response {
+            status,
+            body: Vec::new(),
+            head,
+            spans,
+        }
     }
 
     #[test]
@@ -1651,25 +1831,42 @@ mod tests {
             .body("application/json", b"{}".to_vec());
 
         // 302 to a DIFFERENT origin → GET, body + credentials dropped.
-        let cross = redirect_target(&req, &mk_response(302, &[("location", "https://b.evil/cb")])).unwrap().unwrap();
+        let cross = redirect_target(
+            &req,
+            &mk_response(302, &[("location", "https://b.evil/cb")]),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(cross.url.host, "b.evil");
         assert_eq!(cross.method, Method::Get, "302 on POST becomes GET");
         assert!(cross.body.is_empty(), "body dropped");
         assert!(
-            !cross.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization")),
+            !cross
+                .headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("authorization")),
             "Authorization must not leak to another origin"
         );
 
         // 307 to the SAME origin → method + body + credentials preserved.
-        let same = redirect_target(&req, &mk_response(307, &[("location", "/next")])).unwrap().unwrap();
+        let same = redirect_target(&req, &mk_response(307, &[("location", "/next")]))
+            .unwrap()
+            .unwrap();
         assert_eq!(same.url.host, "a.example");
         assert_eq!(same.url.path_and_query, "/next");
         assert_eq!(same.method, Method::Post, "307 preserves the method");
         assert_eq!(same.body, b"{}", "307 preserves the body");
-        assert!(same.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization")), "auth kept same-origin");
+        assert!(
+            same.headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("authorization")),
+            "auth kept same-origin"
+        );
 
         // A non-redirect status → no follow.
-        assert!(redirect_target(&req, &mk_response(200, &[])).unwrap().is_none());
+        assert!(redirect_target(&req, &mk_response(200, &[]))
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1685,9 +1882,11 @@ mod tests {
             let (mut sock, _) = listener.accept().unwrap();
             let mut buf = [0u8; 512];
             let _ = sock.read(&mut buf).unwrap(); // /start
-            sock.write_all(b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n").unwrap();
+            sock.write_all(b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
             let n = sock.read(&mut buf).unwrap(); // /final, same connection
-            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndone").unwrap();
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndone")
+                .unwrap();
             String::from_utf8_lossy(&buf[..n]).into_owned()
         });
 
@@ -1699,7 +1898,10 @@ mod tests {
         assert_eq!(resp.status, 200);
         assert_eq!(resp.text(), "done");
         let followed = server.join().unwrap();
-        assert!(followed.starts_with("GET /final "), "followed to /final: {followed}");
+        assert!(
+            followed.starts_with("GET /final "),
+            "followed to /final: {followed}"
+        );
     }
 
     #[test]
@@ -1715,9 +1917,13 @@ mod tests {
             let (mut sock, _) = listener.accept().unwrap();
             let mut buf = [0u8; 512];
             let _ = sock.read(&mut buf).unwrap();
-            sock.write_all(b"HTTP/1.1 200 OK\r\nSet-Cookie: sid=abc123; Path=/\r\nContent-Length: 0\r\n\r\n").unwrap();
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\nSet-Cookie: sid=abc123; Path=/\r\nContent-Length: 0\r\n\r\n",
+            )
+            .unwrap();
             let n = sock.read(&mut buf).unwrap();
-            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").unwrap();
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
             String::from_utf8_lossy(&buf[..n]).into_owned()
         });
 
@@ -1752,7 +1958,10 @@ mod tests {
             let (mut sock, _) = listener.accept().unwrap();
             let mut buf = [0u8; 512];
             let n = sock.read(&mut buf).unwrap();
-            let head = format!("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n", gz.len());
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+                gz.len()
+            );
             sock.write_all(head.as_bytes()).unwrap();
             sock.write_all(&gz).unwrap();
             String::from_utf8_lossy(&buf[..n]).into_owned()
@@ -1764,9 +1973,16 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(resp.body, payload, "the body arrives decompressed");
-        assert_eq!(resp.header("content-encoding"), None, "the stale encoding header is stripped");
+        assert_eq!(
+            resp.header("content-encoding"),
+            None,
+            "the stale encoding header is stripped"
+        );
         let request = server.join().unwrap();
-        assert!(request.to_lowercase().contains("accept-encoding: gzip"), "we advertised gzip: {request}");
+        assert!(
+            request.to_lowercase().contains("accept-encoding: gzip"),
+            "we advertised gzip: {request}"
+        );
     }
 
     #[test]
@@ -1784,7 +2000,8 @@ mod tests {
             let mut buf = [0u8; 512];
             for _ in 0..2 {
                 let _ = sock.read(&mut buf).unwrap();
-                sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").unwrap();
+                sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .unwrap();
             }
         });
 
@@ -1799,7 +2016,11 @@ mod tests {
             })
             .unwrap();
         assert_eq!(r1.unwrap().status, 200, "first request");
-        assert_eq!(r2.unwrap().status, 200, "second request reused the pooled connection");
+        assert_eq!(
+            r2.unwrap().status,
+            200,
+            "second request reused the pooled connection"
+        );
         server.join().unwrap();
     }
 
@@ -1824,7 +2045,10 @@ mod tests {
             .block_on(client.get(&format!("http://127.0.0.1:{port}/hang")))
             .unwrap()
             .unwrap_err();
-        assert!(matches!(err, HttpError::Timeout), "a hung server must time out, got {err:?}");
+        assert!(
+            matches!(err, HttpError::Timeout),
+            "a hung server must time out, got {err:?}"
+        );
         server.join().unwrap();
     }
 
@@ -1840,7 +2064,13 @@ mod tests {
             .block_on(client.get("https://example.com/"))
             .unwrap()
             .unwrap();
-        assert_eq!(resp.status, 200, "TLS handshake + verified cert + 200 from example.com");
-        assert!(resp.text().contains("Example Domain"), "got the page body over TLS");
+        assert_eq!(
+            resp.status, 200,
+            "TLS handshake + verified cert + 200 from example.com"
+        );
+        assert!(
+            resp.text().contains("Example Domain"),
+            "got the page body over TLS"
+        );
     }
 }

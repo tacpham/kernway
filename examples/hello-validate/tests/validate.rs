@@ -8,7 +8,11 @@ use std::net::{TcpListener, TcpStream};
 use hello_validate::build_app;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn connect(port: u16) -> TcpStream {
@@ -49,10 +53,20 @@ fn with_server<T>(f: impl FnOnce(u16) -> T) -> T {
 #[test]
 fn a_valid_body_is_created() {
     let resp = with_server(|port| {
-        post_json(port, "/users", r#"{"name":"Alice","email":"alice@example.com","age":30}"#)
+        post_json(
+            port,
+            "/users",
+            r#"{"name":"Alice","email":"alice@example.com","age":30}"#,
+        )
     });
-    assert!(resp.starts_with("HTTP/1.1 201"), "valid → 201 Created: {resp}");
-    assert!(resp.contains(r#""created":"Alice""#), "echoes the name: {resp}");
+    assert!(
+        resp.starts_with("HTTP/1.1 201"),
+        "valid → 201 Created: {resp}"
+    );
+    assert!(
+        resp.contains(r#""created":"Alice""#),
+        "echoes the name: {resp}"
+    );
 }
 
 #[test]
@@ -63,9 +77,18 @@ fn an_invalid_body_is_400_listing_every_field_error() {
     });
     assert!(resp.starts_with("HTTP/1.1 400"), "invalid → 400: {resp}");
     assert!(resp.contains("Validation Failed"), "RFC 7807 title: {resp}");
-    assert!(resp.contains(r#""field":"name""#), "name error present: {resp}");
-    assert!(resp.contains(r#""field":"email""#), "email error present: {resp}");
-    assert!(resp.contains(r#""field":"age""#), "age error present: {resp}");
+    assert!(
+        resp.contains(r#""field":"name""#),
+        "name error present: {resp}"
+    );
+    assert!(
+        resp.contains(r#""field":"email""#),
+        "email error present: {resp}"
+    );
+    assert!(
+        resp.contains(r#""field":"age""#),
+        "age error present: {resp}"
+    );
 }
 
 #[test]

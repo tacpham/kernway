@@ -51,7 +51,11 @@ impl FileBackedSessionStore {
         let (persist, loaded) = Persister::open(dir, fsync)?;
         let inner = MemorySessionStore::new();
         replay(&inner, &loaded);
-        Ok(Self { inner, persist: Arc::new(persist), since_checkpoint: Arc::new(AtomicUsize::new(0)) })
+        Ok(Self {
+            inner,
+            persist: Arc::new(persist),
+            since_checkpoint: Arc::new(AtomicUsize::new(0)),
+        })
     }
 
     /// The full registry, framed as length-prefixed INSERT records for a snapshot.
@@ -70,7 +74,10 @@ impl FileBackedSessionStore {
         self.persist.append(record).await.map_err(backend)?;
         if self.since_checkpoint.fetch_add(1, Ordering::Relaxed) + 1 >= CHECKPOINT_EVERY {
             self.since_checkpoint.store(0, Ordering::Relaxed);
-            self.persist.checkpoint(self.snapshot_bytes()).await.map_err(backend)?;
+            self.persist
+                .checkpoint(self.snapshot_bytes())
+                .await
+                .map_err(backend)?;
         }
         Ok(())
     }
@@ -120,7 +127,10 @@ impl SessionStore for FileBackedSessionStore {
         })
     }
 
-    fn sessions_of(&self, user: &str) -> BoxFuture<'_, Result<Vec<(String, SessionRecord)>, StoreError>> {
+    fn sessions_of(
+        &self,
+        user: &str,
+    ) -> BoxFuture<'_, Result<Vec<(String, SessionRecord)>, StoreError>> {
         self.inner.sessions_of(user) // a pure read
     }
 
@@ -143,7 +153,9 @@ fn replay(inner: &MemorySessionStore, loaded: &Loaded) {
 }
 
 fn apply(inner: &MemorySessionStore, rec: &[u8]) {
-    let Some((&tag, mut payload)) = rec.split_first() else { return };
+    let Some((&tag, mut payload)) = rec.split_first() else {
+        return;
+    };
     // The in-memory store is infallible, so the replayed op's Ok is discarded.
     match tag {
         TAG_INSERT => {
@@ -210,7 +222,15 @@ fn decode_insert(b: &mut &[u8]) -> Option<(String, SessionRecord)> {
     let created = take_u64(b)?;
     let last_seen = take_u64(b)?;
     let meta = take_str(b)?;
-    Some((sid, SessionRecord { user, created, last_seen, meta }))
+    Some((
+        sid,
+        SessionRecord {
+            user,
+            created,
+            last_seen,
+            meta,
+        },
+    ))
 }
 
 fn record(tag: u8, fill: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
@@ -293,7 +313,12 @@ mod tests {
     }
 
     fn rec(user: &str, meta: &str) -> SessionRecord {
-        SessionRecord { user: user.to_string(), created: 1000, last_seen: 1000, meta: meta.to_string() }
+        SessionRecord {
+            user: user.to_string(),
+            created: 1000,
+            last_seen: 1000,
+            meta: meta.to_string(),
+        }
     }
 
     #[test]
@@ -307,10 +332,15 @@ mod tests {
             block_on(s.remove("sid-b")).unwrap(); // bob logs out
         }
         let s = FileBackedSessionStore::open(&dir, Fsync::EveryWrite).unwrap();
-        let a = block_on(s.get("sid-a")).unwrap().expect("alice's session recovered");
+        let a = block_on(s.get("sid-a"))
+            .unwrap()
+            .expect("alice's session recovered");
         assert_eq!(a.user, "alice");
         assert_eq!(a.last_seen, 1234, "the touch was replayed");
-        assert!(block_on(s.get("sid-b")).unwrap().is_none(), "bob's logout was replayed");
+        assert!(
+            block_on(s.get("sid-b")).unwrap().is_none(),
+            "bob's logout was replayed"
+        );
         assert_eq!(block_on(s.len()).unwrap(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -325,7 +355,11 @@ mod tests {
             block_on(s.remove_user("carol")).unwrap();
         }
         let s = FileBackedSessionStore::open(&dir, Fsync::EveryWrite).unwrap();
-        assert_eq!(block_on(s.sessions_of("carol")).unwrap().len(), 0, "both sessions revoked");
+        assert_eq!(
+            block_on(s.sessions_of("carol")).unwrap().len(),
+            0,
+            "both sessions revoked"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -333,7 +367,11 @@ mod tests {
     fn checkpoint_folds_the_log_and_still_recovers() {
         let dir = temp_dir("checkpoint");
         {
-            let s = FileBackedSessionStore::open(&dir, Fsync::Batched(std::time::Duration::from_secs(3600))).unwrap();
+            let s = FileBackedSessionStore::open(
+                &dir,
+                Fsync::Batched(std::time::Duration::from_secs(3600)),
+            )
+            .unwrap();
             // Many touches to one session drives past CHECKPOINT_EVERY (a snapshot),
             // leaving a few post-checkpoint records.
             block_on(s.insert("sid", rec("dave", "tablet"))).unwrap();
@@ -342,8 +380,14 @@ mod tests {
             }
         }
         let s = FileBackedSessionStore::open(&dir, Fsync::EveryWrite).unwrap();
-        let d = block_on(s.get("sid")).unwrap().expect("session recovered across a checkpoint");
-        assert_eq!(d.last_seen, 2000 + (CHECKPOINT_EVERY + 4) as u64, "the latest touch stands");
+        let d = block_on(s.get("sid"))
+            .unwrap()
+            .expect("session recovered across a checkpoint");
+        assert_eq!(
+            d.last_seen,
+            2000 + (CHECKPOINT_EVERY + 4) as u64,
+            "the latest touch stands"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

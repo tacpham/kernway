@@ -146,18 +146,18 @@
 
 #![forbid(unsafe_code)]
 
-pub mod context;
-pub mod container;
-pub mod scope;
 pub mod bean;
+pub mod buildable;
+pub mod container;
+pub mod context;
 pub mod error;
 pub mod marker;
-pub mod buildable;
+pub mod scope;
 
-pub use context::AppContext;
-pub use container::Container;
-pub use scope::RequestScope;
 pub use bean::{BeanEntry, BeanOrigin};
+pub use buildable::{Buildable, RegistersComponent};
+pub use container::Container;
+pub use context::AppContext;
 pub use error::DiError;
 pub use marker::{KernwayComponent, KernwayController};
-pub use buildable::{Buildable, RegistersComponent};
+pub use scope::RequestScope;

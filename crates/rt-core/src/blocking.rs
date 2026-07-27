@@ -147,7 +147,9 @@ mod tests {
     #[test]
     fn returns_the_closure_result() {
         let ex = Executor::new().unwrap();
-        let out = ex.block_on(async { spawn_blocking(|| 21 * 2).await }).unwrap();
+        let out = ex
+            .block_on(async { spawn_blocking(|| 21 * 2).await })
+            .unwrap();
         assert_eq!(out, Some(42));
     }
 
@@ -183,10 +185,12 @@ mod tests {
         let started = std::time::Instant::now();
         ex.block_on(async {
             let jobs: Vec<_> = (0..4)
-                .map(|i| spawn_blocking(move || {
-                    std::thread::sleep(Duration::from_millis(40));
-                    i
-                }))
+                .map(|i| {
+                    spawn_blocking(move || {
+                        std::thread::sleep(Duration::from_millis(40));
+                        i
+                    })
+                })
                 .collect();
             for job in jobs {
                 assert!(job.await.is_some());

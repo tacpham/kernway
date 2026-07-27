@@ -60,7 +60,11 @@ pub struct StaticFiles {
 impl StaticFiles {
     /// Serve files from `root`, using `index.html` for directory requests.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into(), index: "index.html".to_string(), precompressed: false }
+        Self {
+            root: root.into(),
+            index: "index.html".to_string(),
+            precompressed: false,
+        }
     }
 
     /// Use a different index file name than `index.html`.
@@ -114,7 +118,10 @@ impl StaticFiles {
     pub fn resolve(&self, url_path: &str) -> Result<PathBuf, Rejected> {
         let decoded = percent_decode(url_path)?;
 
-        if decoded.bytes().any(|b| b == 0 || b == b'\\' || b.is_ascii_control()) {
+        if decoded
+            .bytes()
+            .any(|b| b == 0 || b == b'\\' || b.is_ascii_control())
+        {
             return Err(Rejected::IllegalByte);
         }
 
@@ -410,7 +417,10 @@ mod tests {
 
     #[test]
     fn a_plain_file_resolves_under_the_root() {
-        assert_eq!(sf().resolve("/style.css"), Ok(PathBuf::from("public/style.css")));
+        assert_eq!(
+            sf().resolve("/style.css"),
+            Ok(PathBuf::from("public/style.css"))
+        );
     }
 
     #[test]
@@ -428,7 +438,10 @@ mod tests {
 
     #[test]
     fn a_trailing_slash_serves_the_index_of_that_directory() {
-        assert_eq!(sf().resolve("/docs/"), Ok(PathBuf::from("public/docs/index.html")));
+        assert_eq!(
+            sf().resolve("/docs/"),
+            Ok(PathBuf::from("public/docs/index.html"))
+        );
     }
 
     #[test]
@@ -439,12 +452,18 @@ mod tests {
 
     #[test]
     fn a_dot_segment_is_skipped_not_rejected() {
-        assert_eq!(sf().resolve("/./style.css"), Ok(PathBuf::from("public/style.css")));
+        assert_eq!(
+            sf().resolve("/./style.css"),
+            Ok(PathBuf::from("public/style.css"))
+        );
     }
 
     #[test]
     fn double_slashes_collapse() {
-        assert_eq!(sf().resolve("//a///b.css"), Ok(PathBuf::from("public/a/b.css")));
+        assert_eq!(
+            sf().resolve("//a///b.css"),
+            Ok(PathBuf::from("public/a/b.css"))
+        );
     }
 
     // --- traversal, in every spelling -------------------------------------
@@ -456,14 +475,20 @@ mod tests {
 
     #[test]
     fn a_parent_segment_in_the_middle_is_rejected() {
-        assert_eq!(sf().resolve("/a/../../etc/passwd"), Err(Rejected::Traversal));
+        assert_eq!(
+            sf().resolve("/a/../../etc/passwd"),
+            Err(Rejected::Traversal)
+        );
     }
 
     #[test]
     fn percent_encoded_traversal_is_rejected() {
         // %2e is '.', so %2e%2e%2f is "../" — this must not slip past.
         assert_eq!(sf().resolve("/%2e%2e/etc/passwd"), Err(Rejected::Traversal));
-        assert_eq!(sf().resolve("/%2e%2e%2fetc/passwd"), Err(Rejected::Traversal));
+        assert_eq!(
+            sf().resolve("/%2e%2e%2fetc/passwd"),
+            Err(Rejected::Traversal)
+        );
     }
 
     #[test]
@@ -512,13 +537,19 @@ mod tests {
 
     #[test]
     fn html_is_utf8_typed() {
-        assert_eq!(mime_for(Path::new("public/index.html")), "text/html; charset=utf-8");
+        assert_eq!(
+            mime_for(Path::new("public/index.html")),
+            "text/html; charset=utf-8"
+        );
     }
 
     #[test]
     fn css_and_js_are_typed() {
         assert_eq!(mime_for(Path::new("a.css")), "text/css; charset=utf-8");
-        assert_eq!(mime_for(Path::new("a.js")), "text/javascript; charset=utf-8");
+        assert_eq!(
+            mime_for(Path::new("a.js")),
+            "text/javascript; charset=utf-8"
+        );
     }
 
     #[test]
@@ -574,8 +605,14 @@ mod tests {
     #[test]
     fn brotli_is_preferred_over_gzip_regardless_of_client_order() {
         // The server's preference wins, not the client's listing order.
-        assert_eq!(accepted_encodings("gzip, br"), vec![Encoding::Brotli, Encoding::Gzip]);
-        assert_eq!(accepted_encodings("br, gzip"), vec![Encoding::Brotli, Encoding::Gzip]);
+        assert_eq!(
+            accepted_encodings("gzip, br"),
+            vec![Encoding::Brotli, Encoding::Gzip]
+        );
+        assert_eq!(
+            accepted_encodings("br, gzip"),
+            vec![Encoding::Brotli, Encoding::Gzip]
+        );
     }
 
     #[test]
@@ -595,7 +632,10 @@ mod tests {
 
     #[test]
     fn a_wildcard_enables_unlisted_encodings() {
-        assert_eq!(accepted_encodings("*"), vec![Encoding::Brotli, Encoding::Gzip]);
+        assert_eq!(
+            accepted_encodings("*"),
+            vec![Encoding::Brotli, Encoding::Gzip]
+        );
         // …but an explicit token overrides the wildcard.
         assert_eq!(accepted_encodings("*, br;q=0"), vec![Encoding::Gzip]);
         assert_eq!(accepted_encodings("*;q=0, gzip"), vec![Encoding::Gzip]);

@@ -8,7 +8,11 @@ use std::net::{TcpListener, TcpStream};
 use hello_controller::build_app;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn connect(port: u16) -> TcpStream {
@@ -26,7 +30,12 @@ fn send(port: u16, method: &str, path: &str, role: Option<&str>, body: Option<&s
     let mut stream = connect(port);
     let role_h = role.map(|r| format!("X-Role: {r}\r\n")).unwrap_or_default();
     let body_h = body
-        .map(|b| format!("Content-Type: application/json\r\nContent-Length: {}\r\n", b.len()))
+        .map(|b| {
+            format!(
+                "Content-Type: application/json\r\nContent-Length: {}\r\n",
+                b.len()
+            )
+        })
         .unwrap_or_default();
     let raw = format!(
         "{method} {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n{role_h}{body_h}\r\n{}",
@@ -69,12 +78,21 @@ fn validated_body_argument_gates_the_method() {
         // A valid body reaches the method.
         let ok = send(port, "POST", "/items", None, Some(r#"{"name":"Widget"}"#));
         assert!(ok.starts_with("HTTP/1.1 200"), "valid body → 200: {ok}");
-        assert!(ok.contains(r#""created":"Widget""#), "echoes the name: {ok}");
+        assert!(
+            ok.contains(r#""created":"Widget""#),
+            "echoes the name: {ok}"
+        );
 
         // Too short → 400 with the field error, before the method body.
         let short = send(port, "POST", "/items", None, Some(r#"{"name":"W"}"#));
-        assert!(short.starts_with("HTTP/1.1 400"), "too short → 400: {short}");
-        assert!(short.contains(r#""field":"name""#), "field error present: {short}");
+        assert!(
+            short.starts_with("HTTP/1.1 400"),
+            "too short → 400: {short}"
+        );
+        assert!(
+            short.contains(r#""field":"name""#),
+            "field error present: {short}"
+        );
 
         // Blank → 400.
         let blank = send(port, "POST", "/items", None, Some(r#"{"name":""}"#));
@@ -82,7 +100,10 @@ fn validated_body_argument_gates_the_method() {
 
         // Malformed JSON → 400.
         let malformed = send(port, "POST", "/items", None, Some("not json"));
-        assert!(malformed.starts_with("HTTP/1.1 400"), "malformed → 400: {malformed}");
+        assert!(
+            malformed.starts_with("HTTP/1.1 400"),
+            "malformed → 400: {malformed}"
+        );
     });
 }
 
@@ -92,12 +113,21 @@ fn security_context_argument_reflects_the_identity() {
         // Authenticated as ADMIN (the static /items/whoami wins over /items/{id}).
         let admin = send(port, "GET", "/items/whoami", Some("ADMIN"), None);
         assert!(admin.starts_with("HTTP/1.1 200"), "whoami → 200: {admin}");
-        assert!(admin.contains(r#""user":"demo-user""#), "principal: {admin}");
-        assert!(admin.contains(r#""admin":true"#), "ADMIN role seen: {admin}");
+        assert!(
+            admin.contains(r#""user":"demo-user""#),
+            "principal: {admin}"
+        );
+        assert!(
+            admin.contains(r#""admin":true"#),
+            "ADMIN role seen: {admin}"
+        );
 
         // Anonymous.
         let anon = send(port, "GET", "/items/whoami", None, None);
-        assert!(anon.contains(r#""user":"anonymous""#), "anonymous principal: {anon}");
+        assert!(
+            anon.contains(r#""user":"anonymous""#),
+            "anonymous principal: {anon}"
+        );
         assert!(anon.contains(r#""admin":false"#), "no ADMIN role: {anon}");
     });
 }

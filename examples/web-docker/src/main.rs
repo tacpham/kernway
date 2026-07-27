@@ -45,17 +45,23 @@ fn main() -> std::io::Result<()> {
         // and a full page for a plain browser hit — the same URL, two shapes,
         // and `respond` sets `Vary: HX-Request` so a cache never mixes them up.
         // It also fires a client-side `greeted` event via `HX-Trigger`.
-        .get("/htmx/greet", |req: Request, _ctx: &RequestScope| async move {
-            Htmx::from(&req)
-                .respond(
-                    || "<div id=\"greeting\">Hello from an htmx fragment 👋</div>".to_string(),
-                    || "<!doctype html><title>Greet</title>\
+        .get(
+            "/htmx/greet",
+            |req: Request, _ctx: &RequestScope| async move {
+                Htmx::from(&req)
+                    .respond(
+                        || "<div id=\"greeting\">Hello from an htmx fragment 👋</div>".to_string(),
+                        || {
+                            "<!doctype html><title>Greet</title>\
                         <button hx-get=\"/htmx/greet\" hx-target=\"#greeting\">Greet</button>\
-                        <div id=\"greeting\"></div>".to_string(),
-                )
-                .trigger("greeted")
-                .into_response()
-        })
+                        <div id=\"greeting\"></div>"
+                                .to_string()
+                        },
+                    )
+                    .trigger("greeted")
+                    .into_response()
+            },
+        )
         // Liveness: "the process is up". Kubernetes restarts the pod if this
         // fails. It must stay trivially true and touch nothing external.
         .get("/health", |_req: Request, _ctx: &RequestScope| async {

@@ -38,32 +38,32 @@
 
 #![forbid(unsafe_code)]
 
-pub mod router;
 pub mod app;
-/// Synchronous middleware chain and the built-in layers.
-pub mod middleware;
-/// Web security — central, path-based access rules (Spring's `HttpSecurity`).
-pub mod security;
-/// Typed argument extraction for `#[controller]` methods.
-pub mod extract;
-/// `UploadFile` — a large request body streamed to a temp file.
-pub mod upload;
-/// `Multipart` — a `multipart/form-data` request body (RFC 7578).
-pub mod multipart;
-/// Visitor tracking + ban middleware (`VisitorTracking`, `BanFilter`).
-pub mod tracking;
-/// CORS — cross-origin resource sharing middleware (Spring's `cors()`).
-pub mod cors;
-/// Dynamic response compression middleware (feature = `compression`).
-#[cfg(feature = "compression")]
-pub mod compression;
-/// Rate limiting — a per-client token bucket returning `429`.
-pub mod rate_limit;
-/// Config-driven backend selection (memory / file / redis) for the security stores.
-pub mod backends;
 /// JWT bearer authentication middleware (`BearerAuth`, feature = `jwt`).
 #[cfg(feature = "jwt")]
 pub mod auth;
+/// Config-driven backend selection (memory / file / redis) for the security stores.
+pub mod backends;
+/// Dynamic response compression middleware (feature = `compression`).
+#[cfg(feature = "compression")]
+pub mod compression;
+/// CORS — cross-origin resource sharing middleware (Spring's `cors()`).
+pub mod cors;
+/// Typed argument extraction for `#[controller]` methods.
+pub mod extract;
+/// Synchronous middleware chain and the built-in layers.
+pub mod middleware;
+/// `Multipart` — a `multipart/form-data` request body (RFC 7578).
+pub mod multipart;
+/// Rate limiting — a per-client token bucket returning `429`.
+pub mod rate_limit;
+pub mod router;
+/// Web security — central, path-based access rules (Spring's `HttpSecurity`).
+pub mod security;
+/// Visitor tracking + ban middleware (`VisitorTracking`, `BanFilter`).
+pub mod tracking;
+/// `UploadFile` — a large request body streamed to a temp file.
+pub mod upload;
 
 pub use app::{AppBuilder, Controller, KeepAliveConfig, KernwayApp};
 pub use middleware::{Middleware, Next};
@@ -83,24 +83,24 @@ pub use kernway_core::response::Response;
 pub use app::{forbidden, role_allowed, unauthorized};
 // Central, path-based access rules (Spring's HttpSecurity), and the SecurityHeaders
 // middleware (kernway-server implements `Middleware` for it — see security.rs).
-pub use kernway_security::SecurityHeaders;
-pub use security::{Access, HttpSecurity, SecurityLayer};
-pub use cors::Cors;
-pub use rate_limit::RateLimit;
 #[cfg(feature = "compression")]
 pub use compression::Compression;
+pub use cors::Cors;
+pub use kernway_security::SecurityHeaders;
+pub use rate_limit::RateLimit;
+pub use security::{Access, HttpSecurity, SecurityLayer};
 // Typed argument extraction + the extractors, re-exported so `#[controller]` method
 // params (`id: Path<u64>`, `body: Validated<T>`) reference only `::kernway_server::`.
-pub use extract::Extract;
-pub use upload::UploadFile;
-pub use multipart::{Multipart, Part};
 pub use app::UploadConfig;
+pub use extract::Extract;
 pub use kernway_web::{Json, Path, ProblemDetail, Query, Validated};
+pub use multipart::{Multipart, Part};
+pub use upload::UploadFile;
 // Visitor tracking + ban middleware and its types.
 pub use kernway_security::{BanList, Bans, RequestMeta};
 pub use tracking::{BanFilter, VisitorTracking};
 // Config-driven backend selection.
-pub use backends::{session_store_from_config, BanBackend, BackendError};
+pub use backends::{session_store_from_config, BackendError, BanBackend};
 // JWT bearer authentication (feature = `jwt`).
 #[cfg(feature = "jwt")]
 pub use auth::BearerAuth;

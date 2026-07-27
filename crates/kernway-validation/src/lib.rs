@@ -77,7 +77,10 @@ impl ValidationErrors {
 
     /// Record a failure for `field`.
     pub fn push(&mut self, field: impl Into<String>, message: impl Into<String>) {
-        self.errors.push(FieldError { field: field.into(), message: message.into() });
+        self.errors.push(FieldError {
+            field: field.into(),
+            message: message.into(),
+        });
     }
 
     /// Whether there are no failures.
@@ -264,14 +267,29 @@ mod tests {
 
     #[test]
     fn custom_message_and_custom_validator() {
-        let bad = Form { email: "nope".into(), ticket: 3 };
+        let bad = Form {
+            email: "nope".into(),
+            ticket: 3,
+        };
         let errors = bad.validate().unwrap_err();
-        let pairs: Vec<(&str, &str)> =
-            errors.errors().iter().map(|e| (e.field.as_str(), e.message.as_str())).collect();
-        assert!(pairs.contains(&("email", "Email không hợp lệ")), "custom message used: {errors}");
-        assert!(pairs.contains(&("ticket", "must be even")), "custom validator ran: {errors}");
+        let pairs: Vec<(&str, &str)> = errors
+            .errors()
+            .iter()
+            .map(|e| (e.field.as_str(), e.message.as_str()))
+            .collect();
+        assert!(
+            pairs.contains(&("email", "Email không hợp lệ")),
+            "custom message used: {errors}"
+        );
+        assert!(
+            pairs.contains(&("ticket", "must be even")),
+            "custom validator ran: {errors}"
+        );
 
-        let ok = Form { email: "a@b.com".into(), ticket: 4 };
+        let ok = Form {
+            email: "a@b.com".into(),
+            ticket: 4,
+        };
         assert!(ok.validate().is_ok());
     }
 
@@ -286,9 +304,9 @@ mod tests {
         assert!(ok.validate().is_ok());
 
         let bad = CreateUser {
-            name: "Al".into(),          // too short
+            name: "Al".into(),            // too short
             email: "not-an-email".into(), // bad email
-            age: 200,                    // out of range
+            age: 200,                     // out of range
             note: String::new(),
         };
         let errors = bad.validate().unwrap_err();

@@ -34,18 +34,27 @@ pub(crate) struct CookieJar {
 
 impl CookieJar {
     pub(crate) fn new() -> Self {
-        Self { cookies: Mutex::new(Vec::new()) }
+        Self {
+            cookies: Mutex::new(Vec::new()),
+        }
     }
 
     /// Store the `Set-Cookie` values from a response received from `url`.
-    pub(crate) fn store<'a>(&self, set_cookies: impl Iterator<Item = &'a str>, url: &Url, now: u64) {
+    pub(crate) fn store<'a>(
+        &self,
+        set_cookies: impl Iterator<Item = &'a str>,
+        url: &Url,
+        now: u64,
+    ) {
         let mut jar = self.cookies.lock().unwrap();
         for raw in set_cookies {
             let Some(cookie) = parse_set_cookie(raw, url, now) else {
                 continue;
             };
             // A cookie is identified by (name, domain, path); a new one replaces it.
-            jar.retain(|c| !(c.name == cookie.name && c.domain == cookie.domain && c.path == cookie.path));
+            jar.retain(|c| {
+                !(c.name == cookie.name && c.domain == cookie.domain && c.path == cookie.path)
+            });
             // An already-expired cookie is a deletion — do not re-add it.
             if cookie.expires.is_none_or(|e| e > now) {
                 jar.push(cookie);
@@ -105,7 +114,11 @@ fn parse_set_cookie(raw: &str, url: &Url, now: u64) -> Option<Cookie> {
             "path" if val.starts_with('/') => cookie.path = val.to_string(),
             "max-age" => {
                 if let Ok(secs) = val.parse::<i64>() {
-                    cookie.expires = Some(if secs <= 0 { 0 } else { now.saturating_add(secs as u64) });
+                    cookie.expires = Some(if secs <= 0 {
+                        0
+                    } else {
+                        now.saturating_add(secs as u64)
+                    });
                 }
             }
             "secure" => cookie.secure = true,
@@ -138,7 +151,8 @@ fn path_match(cookie_path: &str, request_path: &str) -> bool {
     let path = request_path.split('?').next().unwrap_or("/");
     path == cookie_path
         || (path.starts_with(cookie_path)
-            && (cookie_path.ends_with('/') || path.as_bytes().get(cookie_path.len()) == Some(&b'/')))
+            && (cookie_path.ends_with('/')
+                || path.as_bytes().get(cookie_path.len()) == Some(&b'/')))
 }
 
 #[cfg(test)]
@@ -152,8 +166,15 @@ mod tests {
     #[test]
     fn stores_and_sends_a_session_cookie() {
         let jar = CookieJar::new();
-        jar.store(["sid=abc; Path=/"].into_iter(), &url("https://x.example/login"), 1000);
-        assert_eq!(jar.header_for(&url("https://x.example/dashboard"), 1000), "sid=abc");
+        jar.store(
+            ["sid=abc; Path=/"].into_iter(),
+            &url("https://x.example/login"),
+            1000,
+        );
+        assert_eq!(
+            jar.header_for(&url("https://x.example/dashboard"), 1000),
+            "sid=abc"
+        );
     }
 
     #[test]
@@ -161,10 +182,10 @@ mod tests {
         let jar = CookieJar::new();
         jar.store(
             [
-                "a=1; Path=/admin",           // path-scoped
-                "b=2; Secure",                // https only
-                "c=3; Max-Age=100",           // expires at 1100
-                "d=4; Domain=example.com",    // subdomain-matching
+                "a=1; Path=/admin",        // path-scoped
+                "b=2; Secure",             // https only
+                "c=3; Max-Age=100",        // expires at 1100
+                "d=4; Domain=example.com", // subdomain-matching
             ]
             .into_iter(),
             &url("https://app.example.com/admin/panel"),
@@ -173,16 +194,30 @@ mod tests {
 
         // Under /admin over https, before expiry: all match (a is path-scoped to /admin).
         let here = jar.header_for(&url("https://app.example.com/admin/panel"), 1050);
-        assert!(here.contains("a=1") && here.contains("b=2") && here.contains("c=3") && here.contains("d=4"), "{here}");
+        assert!(
+            here.contains("a=1")
+                && here.contains("b=2")
+                && here.contains("c=3")
+                && here.contains("d=4"),
+            "{here}"
+        );
 
         // A different path drops the /admin cookie.
-        assert!(!jar.header_for(&url("https://app.example.com/other"), 1050).contains("a=1"));
+        assert!(!jar
+            .header_for(&url("https://app.example.com/other"), 1050)
+            .contains("a=1"));
         // Plain http drops the Secure cookie.
-        assert!(!jar.header_for(&url("http://app.example.com/admin"), 1050).contains("b=2"));
+        assert!(!jar
+            .header_for(&url("http://app.example.com/admin"), 1050)
+            .contains("b=2"));
         // After expiry the Max-Age cookie is gone.
-        assert!(!jar.header_for(&url("https://app.example.com/admin"), 2000).contains("c=3"));
+        assert!(!jar
+            .header_for(&url("https://app.example.com/admin"), 2000)
+            .contains("c=3"));
         // The Domain cookie reaches a sibling subdomain; a host-only would not.
-        assert!(jar.header_for(&url("https://api.example.com/admin"), 1050).contains("d=4"));
+        assert!(jar
+            .header_for(&url("https://api.example.com/admin"), 1050)
+            .contains("d=4"));
     }
 
     #[test]

@@ -30,7 +30,9 @@ pub enum DiError {
     },
 
     /// A `register_component` bean depends on a type nobody provides.
-    #[error("missing dependency for `{type_name}` — no registered bean or #[provides] supplies it")]
+    #[error(
+        "missing dependency for `{type_name}` — no registered bean or #[provides] supplies it"
+    )]
     MissingDependency {
         /// Name of the component whose dependency nobody provides.
         type_name: &'static str,
@@ -39,7 +41,9 @@ pub enum DiError {
     /// The registered instance's concrete type does not match the entry's `TypeId`.
     ///
     /// Guards `get`/`get_qualified` from ever downcasting to the wrong type.
-    #[error("type mismatch registering `{type_name}`: instance type does not match the entry TypeId")]
+    #[error(
+        "type mismatch registering `{type_name}`: instance type does not match the entry TypeId"
+    )]
     TypeMismatch {
         /// Name of the type the entry was filed under.
         type_name: &'static str,

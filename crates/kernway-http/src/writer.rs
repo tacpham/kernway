@@ -60,7 +60,12 @@ pub fn encode_head(response: &Response, connection: Connection, content_length: 
 /// Split out so [`encode_response_with`] can size one buffer for head *and* body
 /// up front and write into it — head and body in a single allocation, no realloc
 /// between them, which is the property the one-write coalescing depends on.
-fn encode_head_into(out: &mut Vec<u8>, response: &Response, connection: Connection, content_length: u64) {
+fn encode_head_into(
+    out: &mut Vec<u8>,
+    response: &Response,
+    connection: Connection,
+    content_length: u64,
+) {
     out.extend_from_slice(b"HTTP/1.1 ");
     out.extend_from_slice(itoa(u64::from(response.status.0)).as_bytes());
     out.push(b' ');
@@ -107,7 +112,9 @@ pub fn encode_response_with(response: &Response, connection: Connection) -> Vec<
 fn head_estimate(response: &Response) -> usize {
     const STATUS_AND_FIXED_HEADERS: usize = 64; // status line + content-length + connection
     const PER_PAIR_OVERHEAD: usize = 4; // ": " + "\r\n"
-    STATUS_AND_FIXED_HEADERS + response.headers.byte_len() + response.headers.len() * PER_PAIR_OVERHEAD
+    STATUS_AND_FIXED_HEADERS
+        + response.headers.byte_len()
+        + response.headers.len() * PER_PAIR_OVERHEAD
 }
 
 /// Decimal digits of `n`, without the allocation `format!`/`to_string` makes.
@@ -126,7 +133,10 @@ impl Digits {
 }
 
 fn itoa(mut n: u64) -> Digits {
-    let mut d = Digits { buf: [0; 20], start: 20 };
+    let mut d = Digits {
+        buf: [0; 20],
+        start: 20,
+    };
     loop {
         d.start -= 1;
         d.buf[d.start] = b'0' + u8::try_from(n % 10).expect("a decimal digit fits in u8");
@@ -154,7 +164,7 @@ fn status_text(code: u16) -> &'static str {
         429 => "Too Many Requests",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
-        _   => "Unknown",
+        _ => "Unknown",
     }
 }
 
@@ -214,8 +224,7 @@ mod tests {
 
     #[test]
     fn write_custom_content_type() {
-        let resp = Response::new(StatusCode::OK)
-            .content_type("application/json; charset=utf-8");
+        let resp = Response::new(StatusCode::OK).content_type("application/json; charset=utf-8");
         let out = capture(&resp);
         assert!(out.contains("content-type: application/json; charset=utf-8\r\n"));
     }

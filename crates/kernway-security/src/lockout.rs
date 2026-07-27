@@ -65,7 +65,11 @@ impl LoginGuard {
     /// Whether `key` may attempt a login now — `false` while locked out.
     #[must_use]
     pub fn check_at(&self, key: &str, now: u64) -> bool {
-        self.attempts.read().unwrap().get(key).is_none_or(|a| now >= a.locked_until)
+        self.attempts
+            .read()
+            .unwrap()
+            .get(key)
+            .is_none_or(|a| now >= a.locked_until)
     }
 
     /// Record a failed login for `key`. Returns `Some(locked_until)` (unix seconds) if
@@ -75,10 +79,16 @@ impl LoginGuard {
 
         // Occasionally drop entries that are neither locked nor in an active window.
         if map.len() > 1024 {
-            map.retain(|_, a| now < a.locked_until || now.saturating_sub(a.window_start) < self.window_secs);
+            map.retain(|_, a| {
+                now < a.locked_until || now.saturating_sub(a.window_start) < self.window_secs
+            });
         }
 
-        let entry = map.entry(key.to_string()).or_insert(Attempts { failures: 0, window_start: now, locked_until: 0 });
+        let entry = map.entry(key.to_string()).or_insert(Attempts {
+            failures: 0,
+            window_start: now,
+            locked_until: 0,
+        });
 
         // Start a fresh window if the last one has elapsed.
         if now.saturating_sub(entry.window_start) >= self.window_secs {
@@ -150,7 +160,11 @@ mod tests {
     fn locks_out_after_the_threshold() {
         let g = guard();
         for n in 1..=4 {
-            assert_eq!(g.record_failure_at("alice", 1000), None, "failure {n} not yet locking");
+            assert_eq!(
+                g.record_failure_at("alice", 1000),
+                None,
+                "failure {n} not yet locking"
+            );
             assert!(g.check_at("alice", 1000), "still allowed after {n}");
         }
         // The 5th failure trips the lock.
@@ -166,7 +180,10 @@ mod tests {
             g.record_failure_at("bob", 1000);
         }
         assert!(!g.check_at("bob", 1000), "locked");
-        assert!(!g.check_at("bob", 1000 + 899), "still locked one second before expiry");
+        assert!(
+            !g.check_at("bob", 1000 + 899),
+            "still locked one second before expiry"
+        );
         assert!(g.check_at("bob", 1000 + 900), "unlocked at expiry");
     }
 
@@ -179,9 +196,16 @@ mod tests {
         g.record_success("carol");
         // Back to a clean slate: it takes another full 5 to lock.
         for n in 1..=4 {
-            assert_eq!(g.record_failure_at("carol", 2000), None, "failure {n} after the reset");
+            assert_eq!(
+                g.record_failure_at("carol", 2000),
+                None,
+                "failure {n} after the reset"
+            );
         }
-        assert!(g.check_at("carol", 2000), "not locked — the earlier failures were cleared");
+        assert!(
+            g.check_at("carol", 2000),
+            "not locked — the earlier failures were cleared"
+        );
     }
 
     #[test]
@@ -191,7 +215,11 @@ mod tests {
         for _ in 0..4 {
             g.record_failure_at("dave", 1000);
         }
-        assert_eq!(g.record_failure_at("dave", 1000 + 901), None, "the window rolled over, so this is failure 1");
+        assert_eq!(
+            g.record_failure_at("dave", 1000 + 901),
+            None,
+            "the window rolled over, so this is failure 1"
+        );
         assert!(g.check_at("dave", 1000 + 901), "not locked");
     }
 

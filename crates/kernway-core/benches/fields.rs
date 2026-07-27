@@ -80,7 +80,10 @@ fn build_and_iterate(c: &mut Criterion) {
 fn lookup(c: &mut Criterion) {
     let mut group = c.benchmark_group("headers/lookup_one");
 
-    let map: HashMap<String, String> = MANY.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect();
+    let map: HashMap<String, String> = MANY
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect();
     let mut hdr = Headers::new();
     for (k, v) in MANY {
         hdr.insert(k, v);

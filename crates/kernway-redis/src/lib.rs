@@ -64,20 +64,31 @@ impl Pool {
     /// A pool that dials `addr`. No connection is opened until the first command.
     #[must_use]
     pub fn new(addr: SocketAddr) -> Self {
-        Self { addr, auth: None, idle: Mutex::new(Vec::new()), max_idle: DEFAULT_MAX_IDLE }
+        Self {
+            addr,
+            auth: None,
+            idle: Mutex::new(Vec::new()),
+            max_idle: DEFAULT_MAX_IDLE,
+        }
     }
 
     /// Authenticate every connection with a password (a `requirepass` server).
     #[must_use]
     pub fn with_auth(mut self, password: impl Into<String>) -> Self {
-        self.auth = Some(Auth { user: None, password: password.into() });
+        self.auth = Some(Auth {
+            user: None,
+            password: password.into(),
+        });
         self
     }
 
     /// Authenticate every connection as an ACL user (`AUTH user password`).
     #[must_use]
     pub fn with_user_auth(mut self, user: impl Into<String>, password: impl Into<String>) -> Self {
-        self.auth = Some(Auth { user: Some(user.into()), password: password.into() });
+        self.auth = Some(Auth {
+            user: Some(user.into()),
+            password: password.into(),
+        });
         self
     }
 

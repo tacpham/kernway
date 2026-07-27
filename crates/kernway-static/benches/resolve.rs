@@ -8,7 +8,9 @@
 //! (a load test, not a micro-benchmark).
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use kernway_static::{accepted_encodings, etag, etag_matches, is_compressible, mime_for, StaticFiles};
+use kernway_static::{
+    accepted_encodings, etag, etag_matches, is_compressible, mime_for, StaticFiles,
+};
 use std::path::Path;
 
 fn resolve(c: &mut Criterion) {

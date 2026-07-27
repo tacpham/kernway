@@ -150,14 +150,26 @@ impl OAuth2Client {
             .map(|(k, v)| format!("{k}={}", percent_encode(v)))
             .collect::<Vec<_>>()
             .join("&");
-        let sep = if self.auth_url.contains('?') { '&' } else { '?' };
+        let sep = if self.auth_url.contains('?') {
+            '&'
+        } else {
+            '?'
+        };
 
-        Authorization { url: format!("{}{sep}{query}", self.auth_url), state, pkce_verifier: verifier }
+        Authorization {
+            url: format!("{}{sep}{query}", self.auth_url),
+            state,
+            pkce_verifier: verifier,
+        }
     }
 
     /// Exchange the `code` from the callback (with the PKCE `verifier` you stored) for
     /// tokens.
-    pub async fn exchange_code(&self, code: &str, verifier: &str) -> Result<TokenResponse, OAuth2Error> {
+    pub async fn exchange_code(
+        &self,
+        code: &str,
+        verifier: &str,
+    ) -> Result<TokenResponse, OAuth2Error> {
         let body = form_body(&[
             ("grant_type", "authorization_code"),
             ("code", code),
@@ -181,7 +193,10 @@ impl OAuth2Client {
     /// Fetch the user's profile with an access token (the OIDC `userinfo` endpoint, or
     /// the provider's user API).
     pub async fn userinfo(&self, access_token: &str) -> Result<UserInfo, OAuth2Error> {
-        let url = self.userinfo_url.as_deref().ok_or_else(|| OAuth2Error::Config("no userinfo_url set".into()))?;
+        let url = self
+            .userinfo_url
+            .as_deref()
+            .ok_or_else(|| OAuth2Error::Config("no userinfo_url set".into()))?;
         let req = Request::new(Method::Get, Url::parse(url)?)
             .header("authorization", format!("Bearer {access_token}"))
             .header("accept", "application/json");
@@ -190,7 +205,8 @@ impl OAuth2Client {
         if !resp.is_success() {
             return Err(OAuth2Error::Status(resp.status, resp.text()));
         }
-        let raw: Value = serde_json::from_slice(&resp.body).map_err(|e| OAuth2Error::Parse(e.to_string()))?;
+        let raw: Value =
+            serde_json::from_slice(&resp.body).map_err(|e| OAuth2Error::Parse(e.to_string()))?;
         Ok(UserInfo { raw })
     }
 }
@@ -246,9 +262,11 @@ impl UserInfo {
     /// The stable subject id — `sub` (OIDC) or `id` (e.g. GitHub).
     #[must_use]
     pub fn subject(&self) -> Option<String> {
-        self.get("sub")
-            .map(str::to_string)
-            .or_else(|| self.raw.get("id").map(|v| v.to_string().trim_matches('"').to_string()))
+        self.get("sub").map(str::to_string).or_else(|| {
+            self.raw
+                .get("id")
+                .map(|v| v.to_string().trim_matches('"').to_string())
+        })
     }
 
     /// The email, if present and shared.
@@ -319,12 +337,21 @@ impl JwksClient {
     /// A verifier fetching keys from `jwks_url` (the issuer's `jwks_uri`).
     #[must_use]
     pub fn new(jwks_url: impl Into<String>) -> Self {
-        Self { jwks_url: jwks_url.into(), http: HttpClient::new(), cache: Mutex::new(None) }
+        Self {
+            jwks_url: jwks_url.into(),
+            http: HttpClient::new(),
+            cache: Mutex::new(None),
+        }
     }
 
     /// Verify an RS256 `token` and validate its claims. Uses the cached keys; if the
     /// token's key id is unknown (a rotation), re-fetches the JWKS once and retries.
-    pub async fn verify(&self, token: &str, now: u64, validation: &Validation) -> Result<Claims, OAuth2Error> {
+    pub async fn verify(
+        &self,
+        token: &str,
+        now: u64,
+        validation: &Validation,
+    ) -> Result<Claims, OAuth2Error> {
         // Bind the cached value to a statement so the MutexGuard temporary drops here,
         // BEFORE the `.await` below — holding it across `self.fetch()` (which re-locks
         // the same mutex to cache the fetched keys) would self-deadlock.
@@ -338,7 +365,9 @@ impl JwksClient {
             Err(JwtError::UnknownKey) => {
                 // The issuer may have rotated keys — refresh once and retry.
                 let fresh = self.fetch().await?;
-                fresh.verify(token, now, validation).map_err(OAuth2Error::Jwt)
+                fresh
+                    .verify(token, now, validation)
+                    .map_err(OAuth2Error::Jwt)
             }
             other => other.map_err(OAuth2Error::Jwt),
         }
@@ -378,7 +407,13 @@ mod tests {
     use super::*;
 
     fn client_to(token_url: &str, userinfo_url: &str) -> OAuth2Client {
-        let mut c = OAuth2Client::new("client-id", "secret", "https://accounts.example/auth", token_url, "https://app.example/cb");
+        let mut c = OAuth2Client::new(
+            "client-id",
+            "secret",
+            "https://accounts.example/auth",
+            token_url,
+            "https://app.example/cb",
+        );
         c.userinfo_url = Some(userinfo_url.to_string());
         c.scopes = vec!["openid".into(), "email".into()];
         c
@@ -397,11 +432,17 @@ mod tests {
         assert!(q.contains("code_challenge_method=S256"));
         assert!(q.contains(&format!("state={}", auth.state)));
         // scope "openid email profile" → percent-encoded spaces.
-        assert!(q.contains("scope=openid%20email%20profile"), "scopes space-encoded: {q}");
+        assert!(
+            q.contains("scope=openid%20email%20profile"),
+            "scopes space-encoded: {q}"
+        );
 
         // The challenge must be exactly base64url(sha256(verifier)).
         let expected = b64url_encode(&sha256(auth.pkce_verifier.as_bytes()));
-        assert!(q.contains(&format!("code_challenge={expected}")), "PKCE S256 challenge derived from verifier");
+        assert!(
+            q.contains(&format!("code_challenge={expected}")),
+            "PKCE S256 challenge derived from verifier"
+        );
         // The verifier is a valid length (43 chars for 32 bytes).
         assert_eq!(auth.pkce_verifier.len(), 43);
     }
@@ -412,7 +453,10 @@ mod tests {
         let a = g.authorize_url();
         let b = g.authorize_url();
         assert_ne!(a.state, b.state, "state is random per request");
-        assert_ne!(a.pkce_verifier, b.pkce_verifier, "verifier is random per request");
+        assert_ne!(
+            a.pkce_verifier, b.pkce_verifier,
+            "verifier is random per request"
+        );
     }
 
     /// A one-shot local HTTP server that replies to the next connection with `body` as
@@ -439,7 +483,9 @@ mod tests {
 
     #[test]
     fn exchange_code_posts_the_form_and_parses_tokens() {
-        let (token_url, server) = mock_json(r#"{"access_token":"ya29.abc","token_type":"Bearer","expires_in":3599,"id_token":"eyJ..."}"#);
+        let (token_url, server) = mock_json(
+            r#"{"access_token":"ya29.abc","token_type":"Bearer","expires_in":3599,"id_token":"eyJ..."}"#,
+        );
         let client = client_to(&token_url, "http://unused");
 
         let tokens = block(client.exchange_code("auth-code-xyz", "the-verifier")).unwrap();
@@ -455,7 +501,10 @@ mod tests {
         assert!(sent.contains("code=auth-code-xyz"));
         assert!(sent.contains("code_verifier=the-verifier"));
         assert!(sent.contains("client_secret=secret"));
-        assert!(sent.contains("accept: application/json"), "asks for JSON (GitHub needs it)");
+        assert!(
+            sent.contains("accept: application/json"),
+            "asks for JSON (GitHub needs it)"
+        );
     }
 
     // A real RS256 token + its JWKS (RSA-2048), as an external issuer would publish.
@@ -475,7 +524,10 @@ mod tests {
         assert_eq!(claims.sub.as_deref(), Some("1234567890"));
 
         let request = String::from_utf8(server.join().unwrap()).unwrap();
-        assert!(request.starts_with("GET "), "fetched the JWKS over HTTP: {request}");
+        assert!(
+            request.starts_with("GET "),
+            "fetched the JWKS over HTTP: {request}"
+        );
     }
 
     #[test]
@@ -488,7 +540,10 @@ mod tests {
         assert_eq!(info.email(), Some("alice@example.com"));
         assert_eq!(info.name(), Some("Alice"));
         let sent = String::from_utf8(server.join().unwrap()).unwrap();
-        assert!(sent.contains("authorization: Bearer access-tok"), "sent the bearer token");
+        assert!(
+            sent.contains("authorization: Bearer access-tok"),
+            "sent the bearer token"
+        );
 
         // GitHub shape: id + login, no sub/name.
         let (u2, s2) = mock_json(r#"{"id":42,"login":"octocat"}"#);

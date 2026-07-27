@@ -51,13 +51,20 @@ pub enum Expr {
     Template(Vec<Expr>),
     /// `@{/path/{v}(v=${x}, q=${y})}` — a URL. Path variables `{v}` are
     /// substituted (URL-encoded) into `base`; the rest become query parameters.
-    Url { base: String, params: Vec<(String, Expr)> },
+    Url {
+        base: String,
+        params: Vec<(String, Expr)>,
+    },
     /// `#{key(arg0, arg1)}` — an i18n message, with `{0}`/`{1}` placeholders
     /// filled from the arguments.
     Msg { key: String, args: Vec<Expr> },
     /// `#strings.toUpperCase(${x})` — a utility-object method call. A *separate*
     /// branch from `Var`, so a plain `${var}` never pays for method dispatch.
-    Util { object: String, method: String, args: Vec<Expr> },
+    Util {
+        object: String,
+        method: String,
+        args: Vec<Expr>,
+    },
     /// `-x`, `not x`, `!x`.
     Unary(UnOp, Box<Expr>),
     /// A binary operator.
@@ -184,7 +191,9 @@ fn value_to_string(value: &Value<'_>, out: &mut String) {
 /// Evaluate `e` against the environment and the current loop scope.
 pub fn eval<'m>(e: &Expr, env: &Env<'m>, scope: &[(&str, &'m Value<'m>)]) -> EvalVal<'m> {
     match e {
-        Expr::Var(p) => resolve(p, env.model, scope).map(EvalVal::Ref).unwrap_or(EvalVal::Null),
+        Expr::Var(p) => resolve(p, env.model, scope)
+            .map(EvalVal::Ref)
+            .unwrap_or(EvalVal::Null),
         Expr::Str(s) => EvalVal::Str(s.clone()),
         Expr::Num(n) => EvalVal::Num(*n),
         Expr::Bool(b) => EvalVal::Bool(*b),
@@ -198,7 +207,11 @@ pub fn eval<'m>(e: &Expr, env: &Env<'m>, scope: &[(&str, &'m Value<'m>)]) -> Eva
         }
         Expr::Url { base, params } => EvalVal::Str(eval_url(base, params, env, scope)),
         Expr::Msg { key, args } => EvalVal::Str(eval_msg(key, args, env, scope)),
-        Expr::Util { object, method, args } => {
+        Expr::Util {
+            object,
+            method,
+            args,
+        } => {
             let vals: Vec<EvalVal> = args.iter().map(|a| eval(a, env, scope)).collect();
             eval_util(object, method, &vals)
         }
@@ -313,17 +326,25 @@ fn eval_util<'m>(object: &str, method: &str, args: &[EvalVal<'m>]) -> EvalVal<'m
         }
         // #numbers
         ("numbers", "abs") => EvalVal::Num(num(0).abs()),
-        ("numbers", "formatInteger") => EvalVal::Str(format_decimal(num(0), args.get(1).and_then(EvalVal::as_num).unwrap_or(1.0) as usize, 0)),
+        ("numbers", "formatInteger") => EvalVal::Str(format_decimal(
+            num(0),
+            args.get(1).and_then(EvalVal::as_num).unwrap_or(1.0) as usize,
+            0,
+        )),
         ("numbers", "formatDecimal") => EvalVal::Str(format_decimal(
             num(0),
             args.get(1).and_then(EvalVal::as_num).unwrap_or(1.0) as usize,
             num(2) as usize,
         )),
         // #lists
-        ("lists", "size") => EvalVal::Num(args.first().and_then(EvalVal::as_seq).map_or(0, <[_]>::len) as f64),
-        ("lists", "isEmpty") => {
-            EvalVal::Bool(args.first().and_then(EvalVal::as_seq).is_none_or(<[_]>::is_empty))
+        ("lists", "size") => {
+            EvalVal::Num(args.first().and_then(EvalVal::as_seq).map_or(0, <[_]>::len) as f64)
         }
+        ("lists", "isEmpty") => EvalVal::Bool(
+            args.first()
+                .and_then(EvalVal::as_seq)
+                .is_none_or(<[_]>::is_empty),
+        ),
         ("lists", "contains") => {
             let found = args
                 .first()
@@ -378,7 +399,9 @@ fn url_encode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => {
                 let _ = write!(out, "%{b:02X}");
             }
@@ -662,7 +685,9 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
                     }
                     i += 1;
                 }
-                let n: f64 = s[start..i].parse().map_err(|_| format!("bad number `{}`", &s[start..i]))?;
+                let n: f64 = s[start..i]
+                    .parse()
+                    .map_err(|_| format!("bad number `{}`", &s[start..i]))?;
                 toks.push(Tok::Num(n));
             }
             _ if is_ident_start(c) => {
@@ -733,7 +758,10 @@ pub fn parse(s: &str) -> Result<Expr, String> {
     if toks.is_empty() {
         return Err("empty expression".into());
     }
-    let mut p = P { toks: &toks, pos: 0 };
+    let mut p = P {
+        toks: &toks,
+        pos: 0,
+    };
     let e = p.ternary()?;
     if p.pos != p.toks.len() {
         return Err(format!("unexpected trailing tokens in `{s}`"));
@@ -914,7 +942,11 @@ impl<'a> P<'a> {
                         return Err(format!("utility `#{util}` needs `(`"));
                     }
                     let args = self.arg_list()?;
-                    Ok(Expr::Util { object: object.to_string(), method: method.to_string(), args })
+                    Ok(Expr::Util {
+                        object: object.to_string(),
+                        method: method.to_string(),
+                        args,
+                    })
                 } else {
                     Ok(Expr::Var(split_path(&path)?))
                 }
@@ -981,7 +1013,10 @@ fn parse_url(raw: &str) -> Result<Expr, String> {
             .ok_or_else(|| format!("URL parameter needs `name=value`: `{part}`"))?;
         params.push((name.trim().to_string(), parse(value.trim())?));
     }
-    Ok(Expr::Url { base: base.trim().to_string(), params })
+    Ok(Expr::Url {
+        base: base.trim().to_string(),
+        params,
+    })
 }
 
 /// Parse the inside of a `#{…}`: `key` optionally followed by `(arg, …)`.
@@ -1002,7 +1037,10 @@ fn parse_msg(raw: &str) -> Result<Expr, String> {
             args.push(parse(part)?);
         }
     }
-    Ok(Expr::Msg { key: key.to_string(), args })
+    Ok(Expr::Msg {
+        key: key.to_string(),
+        args,
+    })
 }
 
 /// Split on commas that are at the top level — not inside `${…}`, `(…)`, or a
@@ -1060,8 +1098,14 @@ mod tests {
             ("m", Value::from(4)),
             ("name", Value::from("Alice")),
             ("flag", Value::from(true)),
-            ("user", Value::map([("age", Value::from(20)), ("admin", Value::from(false))])),
-            ("items", Value::seq([Value::from(1), Value::from(2), Value::from(3)])),
+            (
+                "user",
+                Value::map([("age", Value::from(20)), ("admin", Value::from(false))]),
+            ),
+            (
+                "items",
+                Value::seq([Value::from(1), Value::from(2), Value::from(3)]),
+            ),
         ])
     }
 
@@ -1073,7 +1117,13 @@ mod tests {
         let e = parse(src).unwrap_or_else(|err| panic!("parse `{src}`: {err}"));
         let m = model();
         let anon = kernway_core::security::Anonymous;
-        let env = Env { model: &m, messages, context_path: "", authz: &anon, csrf: None };
+        let env = Env {
+            model: &m,
+            messages,
+            context_path: "",
+            authz: &anon,
+            csrf: None,
+        };
         let mut out = String::new();
         eval(&e, &env, &[]).write_string(&mut out);
         out
@@ -1084,7 +1134,13 @@ mod tests {
         let m = model();
         let messages = HashMap::new();
         let anon = kernway_core::security::Anonymous;
-        let env = Env { model: &m, messages: &messages, context_path: "", authz: &anon, csrf: None };
+        let env = Env {
+            model: &m,
+            messages: &messages,
+            context_path: "",
+            authz: &anon,
+            csrf: None,
+        };
         eval(&e, &env, &[]).to_bool()
     }
 
@@ -1153,7 +1209,10 @@ mod tests {
 
     #[test]
     fn literal_substitution() {
-        assert_eq!(ev("|Hello ${name}, you are ${user.age}|"), "Hello Alice, you are 20");
+        assert_eq!(
+            ev("|Hello ${name}, you are ${user.age}|"),
+            "Hello Alice, you are 20"
+        );
     }
 
     #[test]
@@ -1177,12 +1236,18 @@ mod tests {
 
     #[test]
     fn url_query_params_are_appended_and_encoded() {
-        assert_eq!(ev("@{/search(q='a b&c', page=2)}"), "/search?q=a%20b%26c&page=2");
+        assert_eq!(
+            ev("@{/search(q='a b&c', page=2)}"),
+            "/search?q=a%20b%26c&page=2"
+        );
     }
 
     #[test]
     fn url_mixes_path_and_query() {
-        assert_eq!(ev("@{/u/{id}/posts(id=${n}, sort='new')}"), "/u/3/posts?sort=new");
+        assert_eq!(
+            ev("@{/u/{id}/posts(id=${n}, sort='new')}"),
+            "/u/3/posts?sort=new"
+        );
     }
 
     // --- #{…} messages (slice C) ------------------------------------------
@@ -1190,8 +1255,14 @@ mod tests {
     #[test]
     fn message_lookup_with_arguments() {
         let mut msgs = HashMap::new();
-        msgs.insert("greeting".to_string(), "Hello, {0}! You have {1}.".to_string());
-        assert_eq!(eval_with("#{greeting(${name}, '2 msgs')}", &msgs), "Hello, Alice! You have 2 msgs.");
+        msgs.insert(
+            "greeting".to_string(),
+            "Hello, {0}! You have {1}.".to_string(),
+        );
+        assert_eq!(
+            eval_with("#{greeting(${name}, '2 msgs')}", &msgs),
+            "Hello, Alice! You have 2 msgs."
+        );
     }
 
     #[test]

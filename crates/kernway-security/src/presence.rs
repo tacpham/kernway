@@ -48,7 +48,10 @@ impl InMemoryPresence {
     /// their last beat.
     #[must_use]
     pub fn new(window: Duration) -> Self {
-        Self { window_secs: window.as_secs(), beats: RwLock::new(HashMap::new()) }
+        Self {
+            window_secs: window.as_secs(),
+            beats: RwLock::new(HashMap::new()),
+        }
     }
 
     /// The oldest beat that still counts as online at `now`.
@@ -81,14 +84,25 @@ impl Presence for InMemoryPresence {
         let user = user.to_string();
         Box::pin(async move {
             let since = self.since(now);
-            Ok(self.beats.read().unwrap().get(&user).is_some_and(|last| *last >= since))
+            Ok(self
+                .beats
+                .read()
+                .unwrap()
+                .get(&user)
+                .is_some_and(|last| *last >= since))
         })
     }
 
     fn count(&self, now: u64) -> BoxFuture<'_, Result<usize, StoreError>> {
         Box::pin(async move {
             let since = self.since(now);
-            Ok(self.beats.read().unwrap().values().filter(|last| **last >= since).count())
+            Ok(self
+                .beats
+                .read()
+                .unwrap()
+                .values()
+                .filter(|last| **last >= since)
+                .count())
         })
     }
 }
@@ -130,13 +144,19 @@ mod redis_impl {
         /// Connect to `addr`, with a `window`-long online window.
         #[must_use]
         pub fn new(addr: SocketAddr, window: Duration) -> Self {
-            Self { pool: Pool::new(addr), window_secs: window.as_secs() }
+            Self {
+                pool: Pool::new(addr),
+                window_secs: window.as_secs(),
+            }
         }
 
         /// Use a pre-configured [`Pool`] (e.g. one carrying `AUTH`).
         #[must_use]
         pub fn from_pool(pool: Pool, window: Duration) -> Self {
-            Self { pool, window_secs: window.as_secs() }
+            Self {
+                pool,
+                window_secs: window.as_secs(),
+            }
         }
 
         fn since(&self, now: u64) -> u64 {
@@ -162,9 +182,11 @@ mod redis_impl {
                     .with(async |c| {
                         // Drop everything strictly older than the window, then read
                         // what remains.
-                        c.zremrangebyscore(PRESENCE_KEY, "-inf", &format!("({since}")).await?;
-                        let mut users =
-                            c.zrangebyscore(PRESENCE_KEY, &since.to_string(), "+inf").await?;
+                        c.zremrangebyscore(PRESENCE_KEY, "-inf", &format!("({since}"))
+                            .await?;
+                        let mut users = c
+                            .zrangebyscore(PRESENCE_KEY, &since.to_string(), "+inf")
+                            .await?;
                         users.sort();
                         Ok(users)
                     })
@@ -225,7 +247,10 @@ mod tests {
     fn a_recent_heartbeat_is_online() {
         let p = tracker();
         block(p.heartbeat("alice", 1000)).unwrap();
-        assert!(block(p.is_online("alice", 1010)).unwrap(), "beat 10s ago, window 30s");
+        assert!(
+            block(p.is_online("alice", 1010)).unwrap(),
+            "beat 10s ago, window 30s"
+        );
         assert_eq!(block(p.online(1010)).unwrap(), vec!["alice".to_string()]);
         assert_eq!(block(p.count(1010)).unwrap(), 1);
     }
@@ -235,7 +260,10 @@ mod tests {
         let p = tracker();
         block(p.heartbeat("alice", 1000)).unwrap();
         // 31s later, past the 30s window.
-        assert!(!block(p.is_online("alice", 1031)).unwrap(), "beat is now stale");
+        assert!(
+            !block(p.is_online("alice", 1031)).unwrap(),
+            "beat is now stale"
+        );
         assert_eq!(block(p.online(1031)).unwrap(), Vec::<String>::new());
         assert_eq!(block(p.count(1031)).unwrap(), 0);
     }
@@ -246,7 +274,10 @@ mod tests {
         block(p.heartbeat("alice", 1000)).unwrap();
         // Beat again before the window closes → still online well past the first.
         block(p.heartbeat("alice", 1025)).unwrap();
-        assert!(block(p.is_online("alice", 1050)).unwrap(), "the newer beat keeps her online");
+        assert!(
+            block(p.is_online("alice", 1050)).unwrap(),
+            "the newer beat keeps her online"
+        );
     }
 
     #[test]
@@ -302,8 +333,14 @@ mod tests {
 
                 // Alice beats again; bob goes stale past the window.
                 p.heartbeat("kw-presence-alice", base + 25).await.unwrap();
-                assert!(p.is_online("kw-presence-alice", base + 40).await.unwrap(), "fresh beat");
-                assert!(!p.is_online("kw-presence-bob", base + 40).await.unwrap(), "stale → offline");
+                assert!(
+                    p.is_online("kw-presence-alice", base + 40).await.unwrap(),
+                    "fresh beat"
+                );
+                assert!(
+                    !p.is_online("kw-presence-bob", base + 40).await.unwrap(),
+                    "stale → offline"
+                );
 
                 // A prune-and-read at base+40 drops bob and leaves alice.
                 let online = p.online(base + 40).await.unwrap();

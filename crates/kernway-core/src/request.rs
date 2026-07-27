@@ -53,15 +53,15 @@ impl std::fmt::Display for HttpVersion {
 #[derive(Debug)]
 pub struct Request {
     /// HTTP method, uppercase as it arrived on the wire (`GET`, `POST`, ...).
-    pub method:      String,
+    pub method: String,
     /// Request path, without the query string (`/users/42`).
-    pub path:        String,
+    pub path: String,
     /// Protocol version — decides the default keep-alive behaviour.
-    pub version:     HttpVersion,
+    pub version: HttpVersion,
     /// Request headers. Names compare case-insensitively, per RFC 9110 §5.1.
-    pub headers:     Headers,
+    pub headers: Headers,
     /// Parsed query string. Names are case-sensitive, unlike headers.
-    pub query:       QueryParams,
+    pub query: QueryParams,
     /// Values captured from the route pattern — `/users/{id}` yields `id`.
     ///
     /// Populated by the router after a route matches, so it is empty on a
@@ -69,11 +69,11 @@ pub struct Request {
     pub path_params: HashMap<String, String>,
     /// Raw request body, in memory. Empty when the request carries none, or when the
     /// body was too large and streamed to disk instead — see [`body_spool`](Self::body_spool).
-    pub body:        Vec<u8>,
+    pub body: Vec<u8>,
     /// Set instead of [`body`](Self::body) when the body exceeded `max_inmemory_body`
     /// and was streamed to a temporary file. Reached via the `UploadFile`/`Multipart`
     /// extractors; [`body_bytes`](Self::body_bytes) reads it for the buffered extractors.
-    pub body_spool:  Option<SpooledBody>,
+    pub body_spool: Option<SpooledBody>,
     /// The TCP peer address the request arrived on — the direct client, or a
     /// reverse proxy when one sits in front. `None` on a hand-built request. The
     /// *real* client IP behind a proxy is resolved from this plus the forwarded
@@ -85,14 +85,14 @@ impl Request {
     /// Create a new request (for testing). Defaults to HTTP/1.1.
     pub fn new(method: impl Into<String>, path: impl Into<String>) -> Self {
         Self {
-            method:      method.into(),
-            path:        path.into(),
-            version:     HttpVersion::default(),
-            headers:     Headers::new(),
-            query:       QueryParams::new(),
+            method: method.into(),
+            path: path.into(),
+            version: HttpVersion::default(),
+            headers: Headers::new(),
+            query: QueryParams::new(),
             path_params: HashMap::new(),
-            body:        Vec::new(),
-            body_spool:  None,
+            body: Vec::new(),
+            body_spool: None,
             remote_addr: None,
         }
     }

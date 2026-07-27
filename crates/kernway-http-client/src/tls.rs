@@ -26,11 +26,12 @@ pub fn default_config() -> Arc<ClientConfig> {
 
     // Use the ring provider explicitly, so we never depend on a process-wide default
     // provider being installed.
-    let config = ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .expect("ring provider supports the default protocol versions")
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("ring provider supports the default protocol versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth();
     Arc::new(config)
 }
 
@@ -45,7 +46,11 @@ pub struct AsyncTlsStream {
 impl AsyncTlsStream {
     /// Wrap `tcp` in TLS for `server_name` (used for SNI and certificate validation),
     /// completing the handshake before returning.
-    pub async fn connect(tcp: AsyncTcpStream, config: Arc<ClientConfig>, server_name: &str) -> io::Result<Self> {
+    pub async fn connect(
+        tcp: AsyncTcpStream,
+        config: Arc<ClientConfig>,
+        server_name: &str,
+    ) -> io::Result<Self> {
         let name = ServerName::try_from(server_name.to_string())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid server name"))?;
         let conn = ClientConnection::new(config, name).map_err(to_io)?;
@@ -62,7 +67,10 @@ impl AsyncTlsStream {
                 break;
             }
             if self.pump_from_socket().await? == 0 {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "peer closed during TLS handshake"));
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "peer closed during TLS handshake",
+                ));
             }
         }
         self.flush_tls().await // drain any final records

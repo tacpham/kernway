@@ -68,7 +68,10 @@ impl InMemoryActivity {
     /// after their last request.
     #[must_use]
     pub fn new(window: Duration) -> Self {
-        Self { window_secs: window.as_secs(), visitors: RwLock::new(HashMap::new()) }
+        Self {
+            window_secs: window.as_secs(),
+            visitors: RwLock::new(HashMap::new()),
+        }
     }
 
     /// The oldest request that still counts as active at `now`.
@@ -88,7 +91,10 @@ impl InMemoryActivity {
 impl Activity for InMemoryActivity {
     fn record(&self, visitor: ActiveVisitor) -> BoxFuture<'_, Result<(), StoreError>> {
         Box::pin(async move {
-            self.visitors.write().unwrap().insert(visitor.id.clone(), visitor);
+            self.visitors
+                .write()
+                .unwrap()
+                .insert(visitor.id.clone(), visitor);
             Ok(())
         })
     }
@@ -107,7 +113,13 @@ impl Activity for InMemoryActivity {
     fn count(&self, now: u64) -> BoxFuture<'_, Result<usize, StoreError>> {
         Box::pin(async move {
             let since = self.since(now);
-            Ok(self.visitors.read().unwrap().values().filter(|v| v.last_seen >= since).count())
+            Ok(self
+                .visitors
+                .read()
+                .unwrap()
+                .values()
+                .filter(|v| v.last_seen >= since)
+                .count())
         })
     }
 }
@@ -157,13 +169,19 @@ mod redis_impl {
         /// Connect to `addr`, with a `window`-long active window.
         #[must_use]
         pub fn new(addr: SocketAddr, window: Duration) -> Self {
-            Self { pool: Pool::new(addr), window_secs: window.as_secs() }
+            Self {
+                pool: Pool::new(addr),
+                window_secs: window.as_secs(),
+            }
         }
 
         /// Use a pre-configured [`Pool`] (e.g. one carrying `AUTH`).
         #[must_use]
         pub fn from_pool(pool: Pool, window: Duration) -> Self {
-            Self { pool, window_secs: window.as_secs() }
+            Self {
+                pool,
+                window_secs: window.as_secs(),
+            }
         }
 
         fn since(&self, now: u64) -> u64 {
@@ -179,7 +197,8 @@ mod redis_impl {
                 let bytes = encode_visitor(&visitor);
                 self.pool
                     .with(async |c| {
-                        c.zadd(INDEX_KEY, visitor.last_seen as i64, &visitor.id).await?;
+                        c.zadd(INDEX_KEY, visitor.last_seen as i64, &visitor.id)
+                            .await?;
                         c.set_ex(&key, &bytes, ttl).await
                     })
                     .await
@@ -193,8 +212,11 @@ mod redis_impl {
                 self.pool
                     .with(async |c| {
                         // Drop everything older than the window, then read the ids left.
-                        c.zremrangebyscore(INDEX_KEY, "-inf", &format!("({since}")).await?;
-                        let ids = c.zrangebyscore(INDEX_KEY, &since.to_string(), "+inf").await?;
+                        c.zremrangebyscore(INDEX_KEY, "-inf", &format!("({since}"))
+                            .await?;
+                        let ids = c
+                            .zrangebyscore(INDEX_KEY, &since.to_string(), "+inf")
+                            .await?;
                         let mut live = Vec::with_capacity(ids.len());
                         for id in ids {
                             if let Some(bytes) = c.get(&data_key(&id)).await? {
@@ -204,7 +226,9 @@ mod redis_impl {
                             }
                         }
                         // Most-recent first, id as a stable tiebreak.
-                        live.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then_with(|| a.id.cmp(&b.id)));
+                        live.sort_by(|a, b| {
+                            b.last_seen.cmp(&a.last_seen).then_with(|| a.id.cmp(&b.id))
+                        });
                         Ok(live)
                     })
                     .await
@@ -234,7 +258,10 @@ pub(crate) fn encode_visitor(v: &ActiveVisitor) -> Vec<u8> {
     let mut out = Vec::new();
     put_str(&mut out, &v.id);
     out.push(u8::from(v.authenticated));
-    put_str(&mut out, &v.ip.map_or_else(String::new, |ip| ip.to_string()));
+    put_str(
+        &mut out,
+        &v.ip.map_or_else(String::new, |ip| ip.to_string()),
+    );
     put_opt(&mut out, v.user_agent.as_deref());
     put_str(&mut out, &v.path);
     put_str(&mut out, &v.method);
@@ -249,12 +276,24 @@ pub(crate) fn decode_visitor(b: &[u8]) -> Option<ActiveVisitor> {
     let authenticated = *b.get(pos)? != 0;
     pos += 1;
     let ip_str = take_str(b, &mut pos)?;
-    let ip = if ip_str.is_empty() { None } else { ip_str.parse().ok() };
+    let ip = if ip_str.is_empty() {
+        None
+    } else {
+        ip_str.parse().ok()
+    };
     let user_agent = take_opt(b, &mut pos)?;
     let path = take_str(b, &mut pos)?;
     let method = take_str(b, &mut pos)?;
     let last_seen = take_u64(b, &mut pos)?;
-    Some(ActiveVisitor { id, authenticated, ip, user_agent, path, method, last_seen })
+    Some(ActiveVisitor {
+        id,
+        authenticated,
+        ip,
+        user_agent,
+        path,
+        method,
+        last_seen,
+    })
 }
 
 #[cfg(any(feature = "redis", feature = "persist"))]
@@ -372,8 +411,19 @@ mod tests {
         block(a.record(visitor("alice", "/a", 1000))).unwrap();
         block(a.record(visitor("anon-42", "/b", 1005))).unwrap();
         block(a.record(visitor("bob", "/c", 1003))).unwrap();
-        let ids: Vec<String> = block(a.active(1010)).unwrap().into_iter().map(|v| v.id).collect();
-        assert_eq!(ids, vec!["anon-42".to_string(), "bob".to_string(), "alice".to_string()]);
+        let ids: Vec<String> = block(a.active(1010))
+            .unwrap()
+            .into_iter()
+            .map(|v| v.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "anon-42".to_string(),
+                "bob".to_string(),
+                "alice".to_string()
+            ]
+        );
     }
 
     /// The Redis codec is binary-safe and preserves every field, including a `None`
@@ -425,17 +475,28 @@ mod tests {
             run(async {
                 // Timestamps far in the future so they never collide with real data.
                 let base = 4_100_000_000u64;
-                a.record(visitor("kw-act-alice", "/dashboard", base)).await.unwrap();
-                a.record(visitor("kw-act-bob", "/reports", base)).await.unwrap();
+                a.record(visitor("kw-act-alice", "/dashboard", base))
+                    .await
+                    .unwrap();
+                a.record(visitor("kw-act-bob", "/reports", base))
+                    .await
+                    .unwrap();
 
                 // Both within the 30s window, with their pages visible.
                 let live = a.active(base + 10).await.unwrap();
-                let alice = live.iter().find(|v| v.id == "kw-act-alice").expect("alice active");
+                let alice = live
+                    .iter()
+                    .find(|v| v.id == "kw-act-alice")
+                    .expect("alice active");
                 assert_eq!(alice.path, "/dashboard");
-                assert!(live.iter().any(|v| v.id == "kw-act-bob" && v.path == "/reports"));
+                assert!(live
+                    .iter()
+                    .any(|v| v.id == "kw-act-bob" && v.path == "/reports"));
 
                 // Alice moves to a new page; bob goes stale past the window.
-                a.record(visitor("kw-act-alice", "/settings", base + 25)).await.unwrap();
+                a.record(visitor("kw-act-alice", "/settings", base + 25))
+                    .await
+                    .unwrap();
                 let live = a.active(base + 40).await.unwrap();
                 assert_eq!(live.len(), 1, "only alice remains");
                 assert_eq!(live[0].id, "kw-act-alice");

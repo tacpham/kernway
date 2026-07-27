@@ -61,7 +61,11 @@ impl FileBackedBans {
         let (persist, loaded) = Persister::open(dir, fsync)?;
         let bans = Bans::new();
         replay(&bans, &loaded);
-        Ok(Self { bans, persist: Arc::new(persist), since_checkpoint: Arc::new(AtomicUsize::new(0)) })
+        Ok(Self {
+            bans,
+            persist: Arc::new(persist),
+            since_checkpoint: Arc::new(AtomicUsize::new(0)),
+        })
     }
 
     /// The in-memory list to hand to `BanFilter` for the per-request check.
@@ -98,13 +102,15 @@ impl FileBackedBans {
     pub async fn ban_user_agent_containing(&self, phrase: &str) -> Result<(), PersistError> {
         self.bans.ban_user_agent_containing(phrase);
         // Persist the lowercased form, matching how the in-memory rule is stored.
-        self.log(TAG_BAN_UA_CONTAINS, &phrase.to_ascii_lowercase()).await
+        self.log(TAG_BAN_UA_CONTAINS, &phrase.to_ascii_lowercase())
+            .await
     }
 
     /// Unban a User-Agent phrase in memory and on disk.
     pub async fn unban_user_agent_containing(&self, phrase: &str) -> Result<(), PersistError> {
         self.bans.unban_user_agent_containing(phrase);
-        self.log(TAG_UNBAN_UA_CONTAINS, &phrase.to_ascii_lowercase()).await
+        self.log(TAG_UNBAN_UA_CONTAINS, &phrase.to_ascii_lowercase())
+            .await
     }
 
     /// Append a mutation, then checkpoint if enough have accrued.
@@ -143,8 +149,12 @@ fn replay(bans: &Bans, loaded: &Loaded) {
 
 /// Apply one `[tag][payload]` record to the in-memory list.
 fn apply(bans: &Bans, rec: &[u8]) {
-    let Some((&tag, payload)) = rec.split_first() else { return };
-    let Ok(value) = std::str::from_utf8(payload) else { return };
+    let Some((&tag, payload)) = rec.split_first() else {
+        return;
+    };
+    let Ok(value) = std::str::from_utf8(payload) else {
+        return;
+    };
     match tag {
         TAG_BAN_IP => {
             if let Ok(ip) = value.parse() {
@@ -238,10 +248,22 @@ mod tests {
 
         let store = FileBackedBans::open(&dir, Fsync::EveryWrite).unwrap();
         let bans = store.bans();
-        assert!(bans.is_banned(Some(ip("203.0.113.7")), None), "IP ban recovered");
-        assert!(bans.is_banned(Some(ip("198.51.100.42")), None), "subnet ban recovered");
-        assert!(bans.is_banned(None, Some("has EVILBOT in it")), "UA ban recovered (case-insensitive)");
-        assert!(!bans.is_banned(Some(ip("8.8.8.8")), Some("Mozilla/5.0")), "a clean request is fine");
+        assert!(
+            bans.is_banned(Some(ip("203.0.113.7")), None),
+            "IP ban recovered"
+        );
+        assert!(
+            bans.is_banned(Some(ip("198.51.100.42")), None),
+            "subnet ban recovered"
+        );
+        assert!(
+            bans.is_banned(None, Some("has EVILBOT in it")),
+            "UA ban recovered (case-insensitive)"
+        );
+        assert!(
+            !bans.is_banned(Some(ip("8.8.8.8")), Some("Mozilla/5.0")),
+            "a clean request is fine"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -255,8 +277,14 @@ mod tests {
             block_on(store.unban_ip(ip("10.0.0.1"))).unwrap();
         }
         let store = FileBackedBans::open(&dir, Fsync::EveryWrite).unwrap();
-        assert!(!store.bans().is_banned(Some(ip("10.0.0.1")), None), "the unban was replayed");
-        assert!(store.bans().is_banned(Some(ip("10.0.0.2")), None), "the other ban stands");
+        assert!(
+            !store.bans().is_banned(Some(ip("10.0.0.1")), None),
+            "the unban was replayed"
+        );
+        assert!(
+            store.bans().is_banned(Some(ip("10.0.0.2")), None),
+            "the other ban stands"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -273,10 +301,16 @@ mod tests {
         }
         let store = FileBackedBans::open(&dir, Fsync::EveryWrite).unwrap();
         let bans = store.bans();
-        assert!(bans.is_banned(Some(ip("10.1.0.0")), None), "an early ban (from the snapshot)");
+        assert!(
+            bans.is_banned(Some(ip("10.1.0.0")), None),
+            "an early ban (from the snapshot)"
+        );
         let last = CHECKPOINT_EVERY + 2;
         assert!(
-            bans.is_banned(Some(ip(&format!("10.1.{}.{}", last / 256, last % 256))), None),
+            bans.is_banned(
+                Some(ip(&format!("10.1.{}.{}", last / 256, last % 256))),
+                None
+            ),
             "a late ban (from the post-checkpoint log)"
         );
         let _ = std::fs::remove_dir_all(&dir);

@@ -18,7 +18,9 @@ use kernway_core::error::StatusCode;
 use kernway_core::layer::BoxFuture;
 use kernway_core::request::Request;
 use kernway_core::response::Response;
-use kernway_security::tracking::{client_ip, new_visitor_id, visitor_cookie, visitor_from_cookie, RequestMeta};
+use kernway_security::tracking::{
+    client_ip, new_visitor_id, visitor_cookie, visitor_from_cookie, RequestMeta,
+};
 use kernway_security::Bans;
 
 use crate::middleware::{Middleware, Next};
@@ -39,7 +41,9 @@ impl VisitorTracking {
     /// ignored). Add proxies with [`trust_proxy`](Self::trust_proxy).
     #[must_use]
     pub fn new() -> Self {
-        Self { trusted: Vec::new() }
+        Self {
+            trusted: Vec::new(),
+        }
     }
 
     /// Trust a reverse proxy by IP, so `X-Forwarded-For` from it is honoured.
@@ -61,9 +65,17 @@ impl Middleware for VisitorTracking {
         "VisitorTracking"
     }
 
-    fn handle<'a>(&'a self, req: Request, scope: &'a RequestScope, next: Next<'a>) -> BoxFuture<'a, Response> {
+    fn handle<'a>(
+        &'a self,
+        req: Request,
+        scope: &'a RequestScope,
+        next: Next<'a>,
+    ) -> BoxFuture<'a, Response> {
         // Resolve everything synchronously (borrows req/scope), then move on.
-        let existing = req.header("cookie").and_then(visitor_from_cookie).map(str::to_string);
+        let existing = req
+            .header("cookie")
+            .and_then(visitor_from_cookie)
+            .map(str::to_string);
         let is_new = existing.is_none();
         let visitor_id = existing.unwrap_or_else(new_visitor_id);
         let ip = client_ip(req.remote_addr, req.header(FORWARDED_FOR), &self.trusted);
@@ -104,7 +116,11 @@ impl BanFilter {
     /// [`trust_proxy`](Self::trust_proxy)) and returns a default `403`.
     #[must_use]
     pub fn new(bans: Bans) -> Self {
-        Self { bans, trusted: Vec::new(), response: None }
+        Self {
+            bans,
+            trusted: Vec::new(),
+            response: None,
+        }
     }
 
     /// Trust a reverse proxy by IP (so the ban applies to the real client IP behind it).
@@ -139,10 +155,18 @@ impl Middleware for BanFilter {
         "BanFilter"
     }
 
-    fn handle<'a>(&'a self, req: Request, scope: &'a RequestScope, next: Next<'a>) -> BoxFuture<'a, Response> {
+    fn handle<'a>(
+        &'a self,
+        req: Request,
+        scope: &'a RequestScope,
+        next: Next<'a>,
+    ) -> BoxFuture<'a, Response> {
         let ip = client_ip(req.remote_addr, req.header(FORWARDED_FOR), &self.trusted);
         if self.bans.is_banned(ip, req.header("user-agent")) {
-            let response = self.response.as_ref().map_or_else(banned_response, |custom| custom());
+            let response = self
+                .response
+                .as_ref()
+                .map_or_else(banned_response, |custom| custom());
             return Box::pin(async move { response });
         }
         next.run(req, scope)
@@ -184,7 +208,12 @@ impl Middleware for ActivityTracking {
         "ActivityTracking"
     }
 
-    fn handle<'a>(&'a self, req: Request, scope: &'a RequestScope, next: Next<'a>) -> BoxFuture<'a, Response> {
+    fn handle<'a>(
+        &'a self,
+        req: Request,
+        scope: &'a RequestScope,
+        next: Next<'a>,
+    ) -> BoxFuture<'a, Response> {
         use kernway_security::{ActiveVisitor, SecurityContext};
 
         // Needs the RequestMeta from VisitorTracking; without it, just pass through.

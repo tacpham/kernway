@@ -178,7 +178,12 @@ impl Claims {
         self.custom
             .get("roles")
             .and_then(Value::as_array)
-            .map(|array| array.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|array| {
+                array
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 }
@@ -225,7 +230,11 @@ impl Jwt {
     /// Sign `claims` into a compact JWT string.
     pub fn encode(&self, claims: &Claims) -> Result<String, JwtError> {
         let payload = serde_json::to_vec(claims).map_err(|_| JwtError::Serialization)?;
-        let signing_input = format!("{}.{}", b64url_encode(HEADER_JSON.as_bytes()), b64url_encode(&payload));
+        let signing_input = format!(
+            "{}.{}",
+            b64url_encode(HEADER_JSON.as_bytes()),
+            b64url_encode(&payload)
+        );
         let signature = b64url_encode(&hmac_sha256(&self.key, signing_input.as_bytes()));
         Ok(format!("{signing_input}.{signature}"))
     }
@@ -237,7 +246,12 @@ impl Jwt {
     }
 
     /// Verify and decode a token against an explicit [`Validation`].
-    pub fn decode_with(&self, token: &str, now: u64, validation: &Validation) -> Result<Claims, JwtError> {
+    pub fn decode_with(
+        &self,
+        token: &str,
+        now: u64,
+        validation: &Validation,
+    ) -> Result<Claims, JwtError> {
         // Split into exactly three parts.
         let mut parts = token.split('.');
         let (header_b64, payload_b64, signature_b64) =
@@ -256,14 +270,16 @@ impl Jwt {
         // The header must declare HS256 — refuse `none` and any asymmetric alg we
         // cannot verify with a MAC (defeats alg-confusion).
         let header_bytes = b64url_decode(header_b64).ok_or(JwtError::Malformed)?;
-        let header: Header = serde_json::from_slice(&header_bytes).map_err(|_| JwtError::Malformed)?;
+        let header: Header =
+            serde_json::from_slice(&header_bytes).map_err(|_| JwtError::Malformed)?;
         if header.alg != "HS256" {
             return Err(JwtError::UnsupportedAlg);
         }
 
         // Only now decode and validate the claims.
         let payload_bytes = b64url_decode(payload_b64).ok_or(JwtError::Malformed)?;
-        let claims: Claims = serde_json::from_slice(&payload_bytes).map_err(|_| JwtError::Malformed)?;
+        let claims: Claims =
+            serde_json::from_slice(&payload_bytes).map_err(|_| JwtError::Malformed)?;
         validate_claims(&claims, now, validation)?;
         Ok(claims)
     }
@@ -271,7 +287,11 @@ impl Jwt {
 
 /// Check the time + identity claims against `validation` — shared by HS256
 /// ([`Jwt::decode`]) and RS256 ([`Jwks::verify`]).
-pub(crate) fn validate_claims(claims: &Claims, now: u64, validation: &Validation) -> Result<(), JwtError> {
+pub(crate) fn validate_claims(
+    claims: &Claims,
+    now: u64,
+    validation: &Validation,
+) -> Result<(), JwtError> {
     if validation.validate_exp {
         if let Some(exp) = claims.exp {
             if now > exp.saturating_add(validation.leeway_secs) {
@@ -359,7 +379,11 @@ mod jwks {
                 .into_iter()
                 .filter(|k| k.kty == "RSA")
                 .filter_map(|k| {
-                    Some(RsaKey { kid: k.kid, n: b64url_decode(k.n.as_deref()?)?, e: b64url_decode(k.e.as_deref()?)? })
+                    Some(RsaKey {
+                        kid: k.kid,
+                        n: b64url_decode(k.n.as_deref()?)?,
+                        e: b64url_decode(k.e.as_deref()?)?,
+                    })
                 })
                 .collect();
             Ok(Jwks { keys })
@@ -381,7 +405,12 @@ mod jwks {
         /// Verify an **RS256** `token` against these keys and validate its claims. The
         /// signature is checked with the RSA public key whose `kid` matches the token
         /// header, before any claim is trusted. `now` is unix seconds.
-        pub fn verify(&self, token: &str, now: u64, validation: &Validation) -> Result<Claims, JwtError> {
+        pub fn verify(
+            &self,
+            token: &str,
+            now: u64,
+            validation: &Validation,
+        ) -> Result<Claims, JwtError> {
             let mut parts = token.split('.');
             let (header_b64, payload_b64, signature_b64) =
                 match (parts.next(), parts.next(), parts.next(), parts.next()) {
@@ -391,22 +420,33 @@ mod jwks {
 
             // Header → algorithm + key id. Only RS256 here.
             let header_bytes = b64url_decode(header_b64).ok_or(JwtError::Malformed)?;
-            let header: RsaHeader = serde_json::from_slice(&header_bytes).map_err(|_| JwtError::Malformed)?;
+            let header: RsaHeader =
+                serde_json::from_slice(&header_bytes).map_err(|_| JwtError::Malformed)?;
             if header.alg != "RS256" {
                 return Err(JwtError::UnsupportedAlg);
             }
-            let key = self.find(header.kid.as_deref()).ok_or(JwtError::UnknownKey)?;
+            let key = self
+                .find(header.kid.as_deref())
+                .ok_or(JwtError::UnknownKey)?;
 
             // Verify the RSA signature over `header.payload` BEFORE trusting the claims.
             let signing_input = format!("{header_b64}.{payload_b64}");
             let signature = b64url_decode(signature_b64).ok_or(JwtError::Malformed)?;
-            let public_key = RsaPublicKeyComponents { n: &key.n, e: &key.e };
+            let public_key = RsaPublicKeyComponents {
+                n: &key.n,
+                e: &key.e,
+            };
             public_key
-                .verify(&RSA_PKCS1_2048_8192_SHA256, signing_input.as_bytes(), &signature)
+                .verify(
+                    &RSA_PKCS1_2048_8192_SHA256,
+                    signing_input.as_bytes(),
+                    &signature,
+                )
                 .map_err(|_| JwtError::InvalidSignature)?;
 
-            let claims: Claims = serde_json::from_slice(&b64url_decode(payload_b64).ok_or(JwtError::Malformed)?)
-                .map_err(|_| JwtError::Malformed)?;
+            let claims: Claims =
+                serde_json::from_slice(&b64url_decode(payload_b64).ok_or(JwtError::Malformed)?)
+                    .map_err(|_| JwtError::Malformed)?;
             validate_claims(&claims, now, validation)?;
             Ok(claims)
         }
@@ -438,7 +478,10 @@ mod tests {
         assert_eq!(token.split('.').count(), 3);
         let decoded = jwt().decode(&token, NOW).unwrap();
         assert_eq!(decoded.sub.as_deref(), Some("alice"));
-        assert_eq!(decoded.role_list(), vec!["ADMIN".to_string(), "USER".to_string()]);
+        assert_eq!(
+            decoded.role_list(),
+            vec!["ADMIN".to_string(), "USER".to_string()]
+        );
     }
 
     #[test]
@@ -451,7 +494,9 @@ mod tests {
 
     #[test]
     fn a_tampered_payload_is_rejected() {
-        let token = jwt().encode(&Claims::new().subject("alice").roles(["USER"])).unwrap();
+        let token = jwt()
+            .encode(&Claims::new().subject("alice").roles(["USER"]))
+            .unwrap();
         // Re-encode a payload that grants ADMIN, keep the original signature.
         let mut parts: Vec<&str> = token.split('.').collect();
         let forged = b64url_encode(
@@ -459,13 +504,19 @@ mod tests {
         );
         parts[1] = &forged;
         let forged_token = parts.join(".");
-        assert_eq!(jwt().decode(&forged_token, NOW), Err(JwtError::InvalidSignature));
+        assert_eq!(
+            jwt().decode(&forged_token, NOW),
+            Err(JwtError::InvalidSignature)
+        );
     }
 
     #[test]
     fn a_wrong_secret_is_rejected() {
         let token = jwt().encode(&Claims::new().subject("alice")).unwrap();
-        assert_eq!(Jwt::new("other-secret").decode(&token, NOW), Err(JwtError::InvalidSignature));
+        assert_eq!(
+            Jwt::new("other-secret").decode(&token, NOW),
+            Err(JwtError::InvalidSignature)
+        );
     }
 
     #[test]
@@ -473,37 +524,69 @@ mod tests {
         // Craft header {"alg":"none"} + the same payload, and (per the attack) an
         // empty signature. Our HMAC check fails first, but even a matching MAC would
         // be refused by the alg check.
-        let payload = b64url_encode(&serde_json::to_vec(&Claims::new().subject("attacker").roles(["ADMIN"])).unwrap());
+        let payload = b64url_encode(
+            &serde_json::to_vec(&Claims::new().subject("attacker").roles(["ADMIN"])).unwrap(),
+        );
         let header = b64url_encode(br#"{"alg":"none","typ":"JWT"}"#);
         let none_token = format!("{header}.{payload}.");
         let err = jwt().decode(&none_token, NOW).unwrap_err();
-        assert!(matches!(err, JwtError::InvalidSignature | JwtError::UnsupportedAlg), "must never accept alg:none, got {err:?}");
+        assert!(
+            matches!(err, JwtError::InvalidSignature | JwtError::UnsupportedAlg),
+            "must never accept alg:none, got {err:?}"
+        );
     }
 
     #[test]
     fn an_expired_token_is_rejected() {
-        let token = jwt().encode(&Claims::new().subject("alice").expires_at(NOW - 3600)).unwrap();
+        let token = jwt()
+            .encode(&Claims::new().subject("alice").expires_at(NOW - 3600))
+            .unwrap();
         assert_eq!(jwt().decode(&token, NOW), Err(JwtError::Expired));
         // Within the leeway it is still fine.
-        let border = jwt().encode(&Claims::new().subject("alice").expires_at(NOW - 30)).unwrap();
-        assert!(jwt().decode(&border, NOW).is_ok(), "30s past exp is inside the 60s leeway");
+        let border = jwt()
+            .encode(&Claims::new().subject("alice").expires_at(NOW - 30))
+            .unwrap();
+        assert!(
+            jwt().decode(&border, NOW).is_ok(),
+            "30s past exp is inside the 60s leeway"
+        );
     }
 
     #[test]
     fn a_not_yet_valid_token_is_rejected() {
-        let token = jwt().encode(&Claims::new().subject("alice").not_before(NOW + 3600)).unwrap();
+        let token = jwt()
+            .encode(&Claims::new().subject("alice").not_before(NOW + 3600))
+            .unwrap();
         assert_eq!(jwt().decode(&token, NOW), Err(JwtError::NotYetValid));
     }
 
     #[test]
     fn issuer_and_audience_are_checked_when_expected() {
-        let token = jwt().encode(&Claims::new().subject("a").issuer("kernway").audience("web")).unwrap();
-        let ok = Validation { expected_iss: Some("kernway".into()), expected_aud: Some("web".into()), ..Default::default() };
+        let token = jwt()
+            .encode(&Claims::new().subject("a").issuer("kernway").audience("web"))
+            .unwrap();
+        let ok = Validation {
+            expected_iss: Some("kernway".into()),
+            expected_aud: Some("web".into()),
+            ..Default::default()
+        };
         assert!(jwt().decode_with(&token, NOW, &ok).is_ok());
-        let wrong_iss = Validation { expected_iss: Some("evil".into()), ..Default::default() };
-        assert_eq!(jwt().decode_with(&token, NOW, &wrong_iss), Err(JwtError::InvalidIssuer));
-        let wrong_aud = Validation { expected_aud: Some("mobile".into()), ..Default::default() };
-        assert_eq!(jwt().decode_with(&token, NOW, &wrong_aud), Err(JwtError::InvalidAudience));
+        let wrong_iss = Validation {
+            expected_iss: Some("evil".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            jwt().decode_with(&token, NOW, &wrong_iss),
+            Err(JwtError::InvalidIssuer)
+        );
+        let wrong_aud = Validation {
+            expected_aud: Some("mobile".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            jwt().decode_with(&token, NOW, &wrong_aud),
+            Err(JwtError::InvalidAudience)
+        );
     }
 
     #[test]
@@ -531,7 +614,9 @@ mod tests {
             expected_aud: Some("my-api".into()),
             ..Default::default()
         };
-        let claims = jwks.verify(RS256_TOKEN, NOW, &v).expect("valid RS256 token verifies");
+        let claims = jwks
+            .verify(RS256_TOKEN, NOW, &v)
+            .expect("valid RS256 token verifies");
         assert_eq!(claims.sub.as_deref(), Some("1234567890"));
         assert_eq!(claims.iss.as_deref(), Some("https://issuer.example"));
     }
@@ -543,18 +628,34 @@ mod tests {
 
         // A tampered payload fails the signature.
         let mut parts: Vec<&str> = RS256_TOKEN.split('.').collect();
-        let forged = b64url_encode(br#"{"sub":"attacker","iss":"https://issuer.example","aud":"my-api","exp":4102444800}"#);
+        let forged = b64url_encode(
+            br#"{"sub":"attacker","iss":"https://issuer.example","aud":"my-api","exp":4102444800}"#,
+        );
         parts[1] = &forged;
         let tampered = parts.join(".");
-        assert_eq!(jwks.verify(&tampered, NOW, &Validation::default()), Err(JwtError::InvalidSignature));
+        assert_eq!(
+            jwks.verify(&tampered, NOW, &Validation::default()),
+            Err(JwtError::InvalidSignature)
+        );
 
         // The wrong expected issuer is rejected (after a valid signature).
-        let wrong_iss = Validation { expected_iss: Some("https://evil.example".into()), ..Default::default() };
-        assert_eq!(jwks.verify(RS256_TOKEN, NOW, &wrong_iss), Err(JwtError::InvalidIssuer));
+        let wrong_iss = Validation {
+            expected_iss: Some("https://evil.example".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            jwks.verify(RS256_TOKEN, NOW, &wrong_iss),
+            Err(JwtError::InvalidIssuer)
+        );
 
         // A JWKS without the token's kid cannot verify it.
-        let other = Jwks::from_json(br#"{"keys":[{"kty":"RSA","kid":"other","n":"AQAB","e":"AQAB"}]}"#).unwrap();
-        assert_eq!(other.verify(RS256_TOKEN, NOW, &Validation::default()), Err(JwtError::UnknownKey));
+        let other =
+            Jwks::from_json(br#"{"keys":[{"kty":"RSA","kid":"other","n":"AQAB","e":"AQAB"}]}"#)
+                .unwrap();
+        assert_eq!(
+            other.verify(RS256_TOKEN, NOW, &Validation::default()),
+            Err(JwtError::UnknownKey)
+        );
     }
 
     #[test]
@@ -565,8 +666,17 @@ mod tests {
         let token = jwt().encode(&claims).unwrap();
         let parts: Vec<&str> = token.split('.').collect();
         let payload = String::from_utf8(b64url_decode(parts[1]).unwrap()).unwrap();
-        assert_eq!(payload, r#"{"sub":"1234567890","iat":1516239022}"#, "compact JSON claims");
-        let expected_sig = b64url_encode(&hmac_sha256(b"shared-secret", format!("{}.{}", parts[0], parts[1]).as_bytes()));
-        assert_eq!(parts[2], expected_sig, "signature is HMAC over header.payload");
+        assert_eq!(
+            payload, r#"{"sub":"1234567890","iat":1516239022}"#,
+            "compact JSON claims"
+        );
+        let expected_sig = b64url_encode(&hmac_sha256(
+            b"shared-secret",
+            format!("{}.{}", parts[0], parts[1]).as_bytes(),
+        ));
+        assert_eq!(
+            parts[2], expected_sig,
+            "signature is HMAC over header.payload"
+        );
     }
 }

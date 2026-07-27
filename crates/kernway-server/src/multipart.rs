@@ -65,7 +65,9 @@ pub enum MultipartError {
 impl std::fmt::Display for MultipartError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MultipartError::NotMultipart => f.write_str("not a multipart/form-data body (no boundary)"),
+            MultipartError::NotMultipart => {
+                f.write_str("not a multipart/form-data body (no boundary)")
+            }
             MultipartError::Malformed(w) => write!(f, "malformed multipart body: {w}"),
             MultipartError::MissingName => f.write_str("a multipart part is missing its `name`"),
             MultipartError::TooLarge(w) => write!(f, "multipart body rejected: {w}"),
@@ -107,7 +109,9 @@ impl Multipart {
     /// boundary; [`MultipartError::Malformed`] / [`MissingName`](MultipartError::MissingName)
     /// / [`TooLarge`](MultipartError::TooLarge) on a bad body.
     pub fn from_request(req: &Request) -> Result<Self, MultipartError> {
-        let content_type = req.header("content-type").ok_or(MultipartError::NotMultipart)?;
+        let content_type = req
+            .header("content-type")
+            .ok_or(MultipartError::NotMultipart)?;
         let boundary = boundary_of(content_type).ok_or(MultipartError::NotMultipart)?;
 
         // First cut: parse the body we already have. `body_bytes()` borrows `req.body`
@@ -123,7 +127,10 @@ impl Multipart {
             .and_then(|s| s.path.parent().map(std::path::Path::to_path_buf))
             .unwrap_or_else(std::env::temp_dir);
 
-        Ok(Self { parts: parts.into_iter(), spool_dir })
+        Ok(Self {
+            parts: parts.into_iter(),
+            spool_dir,
+        })
     }
 
     /// The next part, or `None` at the end.
@@ -136,7 +143,10 @@ impl Multipart {
     /// `Result` is part of the streaming-ready signature.
     #[allow(clippy::unused_async, clippy::missing_errors_doc)]
     pub async fn next(&mut self) -> Result<Option<Part>, MultipartError> {
-        Ok(self.parts.next().map(|raw| Part { raw, spool_dir: self.spool_dir.clone() }))
+        Ok(self.parts.next().map(|raw| Part {
+            raw,
+            spool_dir: self.spool_dir.clone(),
+        }))
     }
 }
 
@@ -184,7 +194,9 @@ impl Part {
     /// # Errors
     /// [`MultipartError::NotUtf8`] if the bytes are not valid UTF-8.
     pub fn text(&self) -> Result<String, MultipartError> {
-        std::str::from_utf8(&self.raw.body).map(str::to_owned).map_err(|_| MultipartError::NotUtf8)
+        std::str::from_utf8(&self.raw.body)
+            .map(str::to_owned)
+            .map_err(|_| MultipartError::NotUtf8)
     }
 
     /// Spool this part's bytes to a temp file and return it as an [`UploadFile`],
@@ -201,7 +213,9 @@ impl Part {
         match written {
             Some(Ok(())) => Ok(UploadFile::from_spooled(path, len)),
             Some(Err(e)) => Err(MultipartError::Io(e)),
-            None => Err(MultipartError::Io(std::io::Error::other("blocking pool unavailable"))),
+            None => Err(MultipartError::Io(std::io::Error::other(
+                "blocking pool unavailable",
+            ))),
         }
     }
 }
@@ -214,7 +228,10 @@ fn boundary_of(content_type: &str) -> Option<String> {
     }
     for param in ct.split(';').skip(1) {
         let param = param.trim();
-        if let Some(rest) = param.strip_prefix("boundary=").or_else(|| param.strip_prefix("boundary =")) {
+        if let Some(rest) = param
+            .strip_prefix("boundary=")
+            .or_else(|| param.strip_prefix("boundary ="))
+        {
             let b = rest.trim().trim_matches('"');
             if !b.is_empty() {
                 return Some(b.to_string());
@@ -262,8 +279,9 @@ fn parse_parts(body: &[u8], boundary: &[u8]) -> Result<Vec<RawPart>, MultipartEr
         let mut next_delim = Vec::with_capacity(dash.len() + 2);
         next_delim.extend_from_slice(b"\r\n");
         next_delim.extend_from_slice(&dash);
-        let body_end = find(body, &next_delim, pos)
-            .ok_or(MultipartError::Malformed("part body not terminated by a boundary"))?;
+        let body_end = find(body, &next_delim, pos).ok_or(MultipartError::Malformed(
+            "part body not terminated by a boundary",
+        ))?;
         let part_body = body[pos..body_end].to_vec();
         pos = body_end + next_delim.len();
 
@@ -271,7 +289,12 @@ fn parse_parts(body: &[u8], boundary: &[u8]) -> Result<Vec<RawPart>, MultipartEr
         if parts.len() >= MAX_PARTS {
             return Err(MultipartError::TooLarge("too many parts"));
         }
-        parts.push(RawPart { name, filename, content_type, body: part_body });
+        parts.push(RawPart {
+            name,
+            filename,
+            content_type,
+            body: part_body,
+        });
     }
 }
 
@@ -281,7 +304,8 @@ type PartMeta = (String, Option<String>, Option<String>);
 
 /// Parse a part's header block into its [`PartMeta`].
 fn parse_headers(headers: &[u8]) -> Result<PartMeta, MultipartError> {
-    let text = std::str::from_utf8(headers).map_err(|_| MultipartError::Malformed("non-UTF-8 part header"))?;
+    let text = std::str::from_utf8(headers)
+        .map_err(|_| MultipartError::Malformed("non-UTF-8 part header"))?;
     let mut name = None;
     let mut filename = None;
     let mut content_type = None;
@@ -291,7 +315,9 @@ fn parse_headers(headers: &[u8]) -> Result<PartMeta, MultipartError> {
         if line.is_empty() {
             continue;
         }
-        let Some((key, value)) = line.split_once(':') else { continue };
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
         let key = key.trim().to_ascii_lowercase();
         let value = value.trim();
         match key.as_str() {
@@ -310,7 +336,11 @@ fn parse_headers(headers: &[u8]) -> Result<PartMeta, MultipartError> {
         }
     }
 
-    Ok((name.ok_or(MultipartError::MissingName)?, filename, content_type))
+    Ok((
+        name.ok_or(MultipartError::MissingName)?,
+        filename,
+        content_type,
+    ))
 }
 
 /// Strip surrounding double quotes from a header parameter value.
@@ -345,7 +375,12 @@ fn part_temp_path(dir: &std::path::Path) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    dir.join(format!("kernway-part-{}-{}-{}.tmp", std::process::id(), nanos, n))
+    dir.join(format!(
+        "kernway-part-{}-{}-{}.tmp",
+        std::process::id(),
+        nanos,
+        n
+    ))
 }
 
 #[cfg(test)]
@@ -379,7 +414,10 @@ mod tests {
 
     fn req_with(boundary: &str, body: Vec<u8>) -> Request {
         let mut req = Request::new("POST", "/upload");
-        req.headers.insert("content-type", &format!("multipart/form-data; boundary={boundary}"));
+        req.headers.insert(
+            "content-type",
+            &format!("multipart/form-data; boundary={boundary}"),
+        );
         req.body = body;
         req
     }
@@ -396,12 +434,20 @@ mod tests {
         let req = req_with("X1Y2", body);
         let mut mp = Multipart::from_request(&req).unwrap();
 
-        let field = rt_core::Executor::new().unwrap().block_on(async { mp.next().await.unwrap() }).unwrap().unwrap();
+        let field = rt_core::Executor::new()
+            .unwrap()
+            .block_on(async { mp.next().await.unwrap() })
+            .unwrap()
+            .unwrap();
         assert_eq!(field.name(), "title");
         assert!(!field.is_file());
         assert_eq!(field.text().unwrap(), "My Song");
 
-        let file = rt_core::Executor::new().unwrap().block_on(async { mp.next().await.unwrap() }).unwrap().unwrap();
+        let file = rt_core::Executor::new()
+            .unwrap()
+            .block_on(async { mp.next().await.unwrap() })
+            .unwrap()
+            .unwrap();
         assert_eq!(file.name(), "cover");
         assert_eq!(file.filename(), Some("c.png"));
         assert_eq!(file.content_type(), Some("image/png"));
@@ -418,7 +464,10 @@ mod tests {
             .unwrap()
             .block_on(async {
                 assert!(mp.next().await.unwrap().is_some());
-                assert!(mp.next().await.unwrap().is_none(), "no part past the closing boundary");
+                assert!(
+                    mp.next().await.unwrap().is_none(),
+                    "no part past the closing boundary"
+                );
             })
             .unwrap();
     }
@@ -458,14 +507,20 @@ mod tests {
                 // `upload` drops here without persist → its temp file must be removed
             })
             .unwrap();
-        assert!(!path.exists(), "an un-persisted file part leaks its temp file");
+        assert!(
+            !path.exists(),
+            "an un-persisted file part leaks its temp file"
+        );
     }
 
     #[test]
     fn a_non_multipart_request_is_rejected() {
         let mut req = Request::new("POST", "/x");
         req.headers.insert("content-type", "application/json");
-        assert!(matches!(Multipart::from_request(&req), Err(MultipartError::NotMultipart)));
+        assert!(matches!(
+            Multipart::from_request(&req),
+            Err(MultipartError::NotMultipart)
+        ));
     }
 
     #[test]
@@ -473,13 +528,22 @@ mod tests {
         // Hand-built: a part whose Content-Disposition has no name.
         let body = b"--B\r\nContent-Disposition: form-data\r\n\r\nx\r\n--B--\r\n".to_vec();
         let req = req_with("B", body);
-        assert!(matches!(Multipart::from_request(&req), Err(MultipartError::MissingName)));
+        assert!(matches!(
+            Multipart::from_request(&req),
+            Err(MultipartError::MissingName)
+        ));
     }
 
     #[test]
     fn boundary_is_read_from_the_content_type() {
-        assert_eq!(boundary_of("multipart/form-data; boundary=abc").as_deref(), Some("abc"));
-        assert_eq!(boundary_of("multipart/form-data; boundary=\"a b\"").as_deref(), Some("a b"));
+        assert_eq!(
+            boundary_of("multipart/form-data; boundary=abc").as_deref(),
+            Some("abc")
+        );
+        assert_eq!(
+            boundary_of("multipart/form-data; boundary=\"a b\"").as_deref(),
+            Some("a b")
+        );
         assert_eq!(boundary_of("application/json"), None);
         assert_eq!(boundary_of("multipart/form-data"), None); // no boundary
     }

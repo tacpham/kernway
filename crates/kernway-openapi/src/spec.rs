@@ -9,29 +9,36 @@ use std::collections::HashMap;
 /// assembled by hand — this type exists to be serialized, not edited.
 pub struct OpenApiSpec {
     openapi: &'static str,
-    info:    Info,
+    info: Info,
     servers: Vec<Server>,
-    paths:   HashMap<String, PathItem>,
+    paths: HashMap<String, PathItem>,
 }
 
 #[derive(Serialize)]
 struct Info {
-    title:       String,
-    version:     String,
+    title: String,
+    version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
 }
 
 #[derive(Serialize)]
-struct Server { url: String }
+struct Server {
+    url: String,
+}
 
 #[derive(Serialize, Default)]
 struct PathItem {
-    #[serde(skip_serializing_if = "Option::is_none")] get:    Option<Operation>,
-    #[serde(skip_serializing_if = "Option::is_none")] post:   Option<Operation>,
-    #[serde(skip_serializing_if = "Option::is_none")] put:    Option<Operation>,
-    #[serde(skip_serializing_if = "Option::is_none")] delete: Option<Operation>,
-    #[serde(skip_serializing_if = "Option::is_none")] patch:  Option<Operation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    get: Option<Operation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    post: Option<Operation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    put: Option<Operation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delete: Option<Operation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    patch: Option<Operation>,
 }
 
 #[derive(Serialize)]
@@ -40,15 +47,15 @@ struct Operation {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    tags:         Vec<String>,
+    tags: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    parameters:   Vec<Parameter>,
+    parameters: Vec<Parameter>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "requestBody")]
     request_body: Option<RequestBody>,
-    responses:    HashMap<String, Response>,
+    responses: HashMap<String, Response>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
-    deprecated:   bool,
+    deprecated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "operationId")]
     operation_id: Option<String>,
@@ -56,13 +63,13 @@ struct Operation {
 
 #[derive(Serialize)]
 struct Parameter {
-    name:        String,
+    name: String,
     #[serde(rename = "in")]
-    location:    String,
+    location: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
-    required:    bool,
-    schema:      Schema,
+    required: bool,
+    schema: Schema,
 }
 
 #[derive(Serialize)]
@@ -74,8 +81,8 @@ struct Schema {
 #[derive(Serialize)]
 struct RequestBody {
     description: String,
-    required:    bool,
-    content:     HashMap<String, MediaType>,
+    required: bool,
+    content: HashMap<String, MediaType>,
 }
 
 #[derive(Serialize)]
@@ -86,14 +93,17 @@ struct MediaType {
 
 #[derive(Serialize)]
 enum SchemaRef {
-    Ref { #[serde(rename = "$ref")] reference: String },
+    Ref {
+        #[serde(rename = "$ref")]
+        reference: String,
+    },
 }
 
 #[derive(Serialize)]
 struct Response {
     description: String,
     #[serde(skip_serializing_if = "HashMap::is_empty")]
-    content:     HashMap<String, MediaType>,
+    content: HashMap<String, MediaType>,
 }
 
 impl OpenApiSpec {
@@ -109,36 +119,64 @@ impl OpenApiSpec {
 
             let mut responses = HashMap::new();
             if route.responses.is_empty() {
-                responses.insert("200".to_string(), Response {
-                    description: "OK".to_string(), content: HashMap::new(),
-                });
+                responses.insert(
+                    "200".to_string(),
+                    Response {
+                        description: "OK".to_string(),
+                        content: HashMap::new(),
+                    },
+                );
             }
             for r in &route.responses {
                 let mut content = HashMap::new();
                 if let Some(ct) = &r.content_type {
-                    content.insert(ct.clone(), MediaType {
-                        schema: r.schema_ref.as_ref().map(|s| SchemaRef::Ref { reference: s.clone() }),
-                    });
+                    content.insert(
+                        ct.clone(),
+                        MediaType {
+                            schema: r.schema_ref.as_ref().map(|s| SchemaRef::Ref {
+                                reference: s.clone(),
+                            }),
+                        },
+                    );
                 }
-                responses.insert(r.status.to_string(), Response {
-                    description: r.description.clone(), content,
-                });
+                responses.insert(
+                    r.status.to_string(),
+                    Response {
+                        description: r.description.clone(),
+                        content,
+                    },
+                );
             }
 
-            let params = route.params.iter().map(|p| Parameter {
-                name: p.name.clone(),
-                location: format!("{:?}", p.location).to_lowercase(),
-                description: p.description.clone(),
-                required: p.required,
-                schema: Schema { schema_type: p.schema_type.clone() },
-            }).collect();
+            let params = route
+                .params
+                .iter()
+                .map(|p| Parameter {
+                    name: p.name.clone(),
+                    location: format!("{:?}", p.location).to_lowercase(),
+                    description: p.description.clone(),
+                    required: p.required,
+                    schema: Schema {
+                        schema_type: p.schema_type.clone(),
+                    },
+                })
+                .collect();
 
             let request_body = route.request_body.as_ref().map(|b| {
                 let mut content = HashMap::new();
-                content.insert(b.content_type.clone(), MediaType {
-                    schema: b.schema_ref.as_ref().map(|s| SchemaRef::Ref { reference: s.clone() }),
-                });
-                RequestBody { description: b.description.clone(), required: b.required, content }
+                content.insert(
+                    b.content_type.clone(),
+                    MediaType {
+                        schema: b.schema_ref.as_ref().map(|s| SchemaRef::Ref {
+                            reference: s.clone(),
+                        }),
+                    },
+                );
+                RequestBody {
+                    description: b.description.clone(),
+                    required: b.required,
+                    content,
+                }
             });
 
             let op = Operation {
@@ -165,11 +203,15 @@ impl OpenApiSpec {
         Self {
             openapi: "3.0.3",
             info: Info {
-                title:       registry.title.clone(),
-                version:     registry.version.clone(),
+                title: registry.title.clone(),
+                version: registry.version.clone(),
                 description: registry.description.clone(),
             },
-            servers: registry.servers.iter().map(|u| Server { url: u.clone() }).collect(),
+            servers: registry
+                .servers
+                .iter()
+                .map(|u| Server { url: u.clone() })
+                .collect(),
             paths,
         }
     }
@@ -177,7 +219,7 @@ impl OpenApiSpec {
 
 #[cfg(test)]
 mod tests {
-    use crate::{route_doc::RouteDoc, registry::OpenApiRegistry};
+    use crate::{registry::OpenApiRegistry, route_doc::RouteDoc};
 
     fn make_registry() -> OpenApiRegistry {
         let mut r = OpenApiRegistry::new("Test API", "1.0.0");
@@ -187,14 +229,16 @@ mod tests {
                 .path_param("id", "User ID", "integer")
                 .response_json(200, "User found", "#/components/schemas/User")
                 .response(404, "User not found"),
-            "GET", "/users/{id}",
+            "GET",
+            "/users/{id}",
         );
         r.add_route(
             RouteDoc::new("Create user")
                 .tag("users")
                 .body_json("User data", "#/components/schemas/CreateUser")
                 .response_json(201, "User created", "#/components/schemas/User"),
-            "POST", "/users",
+            "POST",
+            "/users",
         );
         r
     }

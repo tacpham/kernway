@@ -50,7 +50,10 @@ fn missing_derived_dependency_is_error_not_panic() {
     let mut ctx = AppContext::new();
     ctx.register_component::<Service>(); // Repo never registered
     let err = ctx.refresh().unwrap_err();
-    assert!(matches!(err, DiError::MissingDependency { .. }), "got {err:?}");
+    assert!(
+        matches!(err, DiError::MissingDependency { .. }),
+        "got {err:?}"
+    );
 }
 
 // --- Interface injection: #[provides(dyn Trait)] + Arc<dyn Trait> ------
@@ -81,7 +84,8 @@ fn trait_object_injection_resolves_concrete_binding() {
     // Register the consumer first — refresh must still order the provider ahead.
     ctx.register_component::<UserService>()
         .register_component::<PgUserRepo>();
-    ctx.refresh().expect("provider must be wired before consumer");
+    ctx.refresh()
+        .expect("provider must be wired before consumer");
 
     let svc = ctx.get::<UserService>().unwrap();
     assert_eq!(svc.repo.find(7), "pg#7");
@@ -148,14 +152,18 @@ trait Plugin: Send + Sync {
 #[provides(dyn Plugin)]
 struct PluginA;
 impl Plugin for PluginA {
-    fn tag(&self) -> &'static str { "A" }
+    fn tag(&self) -> &'static str {
+        "A"
+    }
 }
 
 #[derive(Component)]
 #[provides(dyn Plugin)]
 struct PluginB;
 impl Plugin for PluginB {
-    fn tag(&self) -> &'static str { "B" }
+    fn tag(&self) -> &'static str {
+        "B"
+    }
 }
 
 #[derive(Component)]
@@ -176,7 +184,11 @@ fn collection_injection_gathers_all_providers() {
     let reg = ctx.get::<PluginRegistry>().unwrap();
     let mut tags: Vec<&str> = reg.plugins.iter().map(|p| p.tag()).collect();
     tags.sort_unstable();
-    assert_eq!(tags, ["A", "B"], "collection must see the COMPLETE provider set");
+    assert_eq!(
+        tags,
+        ["A", "B"],
+        "collection must see the COMPLETE provider set"
+    );
 }
 
 // --- Lifecycle hook: #[post_construct(method)] -------------------------
@@ -202,7 +214,10 @@ fn post_construct_hook_runs_after_wiring() {
     let mut ctx = AppContext::new();
     ctx.register_component::<Worker>();
     ctx.refresh().unwrap();
-    assert!(STARTED.load(Ordering::SeqCst), "post_construct should have fired");
+    assert!(
+        STARTED.load(Ordering::SeqCst),
+        "post_construct should have fired"
+    );
 }
 
 // --- Container seam: build a component against a MOCK, no AppContext ----
@@ -216,13 +231,19 @@ impl Container for MockContainer {
     fn get<T: Any + Send + Sync + 'static>(&self) -> Result<Arc<T>, DiError> {
         (Arc::clone(&self.repo) as Arc<dyn Any + Send + Sync>)
             .downcast::<T>()
-            .map_err(|_| DiError::NotFound { type_name: std::any::type_name::<T>() })
+            .map_err(|_| DiError::NotFound {
+                type_name: std::any::type_name::<T>(),
+            })
     }
     fn get_qualified<T: Any + Send + Sync + 'static>(&self, _q: &str) -> Result<Arc<T>, DiError> {
-        Err(DiError::NotFound { type_name: std::any::type_name::<T>() })
+        Err(DiError::NotFound {
+            type_name: std::any::type_name::<T>(),
+        })
     }
     fn get_as<T: ?Sized + Send + Sync + 'static>(&self) -> Result<Arc<T>, DiError> {
-        Err(DiError::NotFound { type_name: std::any::type_name::<T>() })
+        Err(DiError::NotFound {
+            type_name: std::any::type_name::<T>(),
+        })
     }
     fn get_all<T: Any + Send + Sync + 'static>(&self) -> Vec<Arc<T>> {
         Vec::new()
@@ -236,7 +257,9 @@ impl Container for MockContainer {
 fn component_builds_against_a_mock_container() {
     use di_core::Buildable;
     // No AppContext, no refresh — just a hand-rolled container.
-    let mock = MockContainer { repo: Arc::new(Repo) };
+    let mock = MockContainer {
+        repo: Arc::new(Repo),
+    };
     let svc = Service::build(&mock).expect("Service should build from the mock");
     assert_eq!(svc.repo.name(), "repo");
 }
@@ -252,7 +275,9 @@ trait Notifier: Send + Sync {
 #[primary]
 struct EmailNotifier;
 impl Notifier for EmailNotifier {
-    fn channel(&self) -> &'static str { "email" }
+    fn channel(&self) -> &'static str {
+        "email"
+    }
 }
 
 #[derive(Component)]
@@ -260,7 +285,9 @@ impl Notifier for EmailNotifier {
 #[qualifier("sms")]
 struct SmsNotifier;
 impl Notifier for SmsNotifier {
-    fn channel(&self) -> &'static str { "sms" }
+    fn channel(&self) -> &'static str {
+        "sms"
+    }
 }
 
 #[derive(Component)]
@@ -277,7 +304,8 @@ fn primary_and_qualifier_disambiguate_trait_bindings() {
     ctx.register_component::<AlertService>()
         .register_component::<EmailNotifier>()
         .register_component::<SmsNotifier>();
-    ctx.refresh().expect("primary + qualifier must resolve both fields");
+    ctx.refresh()
+        .expect("primary + qualifier must resolve both fields");
 
     let svc = ctx.get::<AlertService>().unwrap();
     // Unqualified `Arc<dyn Notifier>` → the #[primary] provider.
@@ -311,14 +339,18 @@ trait Clock: Send + Sync {
 #[default_impl]
 struct SystemClock;
 impl Clock for SystemClock {
-    fn now(&self) -> u64 { 0 }
+    fn now(&self) -> u64 {
+        0
+    }
 }
 
 #[derive(Component)]
 #[provides(dyn Clock)]
 struct FixedClock;
 impl Clock for FixedClock {
-    fn now(&self) -> u64 { 42 }
+    fn now(&self) -> u64 {
+        42
+    }
 }
 
 #[test]
@@ -336,8 +368,16 @@ fn user_bean_overrides_default_impl_in_either_order() {
     ctx.register_component::<SystemClock>()
         .register_component::<FixedClock>();
     ctx.refresh().unwrap();
-    assert_eq!(ctx.get_as::<dyn Clock>().unwrap().now(), 42, "user bean must win");
-    assert_eq!(ctx.get_all_as::<dyn Clock>().len(), 1, "default must be dropped, not kept");
+    assert_eq!(
+        ctx.get_as::<dyn Clock>().unwrap().now(),
+        42,
+        "user bean must win"
+    );
+    assert_eq!(
+        ctx.get_all_as::<dyn Clock>().len(),
+        1,
+        "default must be dropped, not kept"
+    );
 
     // User bean registered first — same outcome.
     let mut ctx2 = AppContext::new();

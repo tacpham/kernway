@@ -46,7 +46,11 @@ impl FileBackedActivity {
         let (persist, loaded) = Persister::open(dir, fsync)?;
         let inner = InMemoryActivity::new(window);
         replay(&inner, &loaded);
-        Ok(Self { inner, persist: Arc::new(persist), since_checkpoint: Arc::new(AtomicUsize::new(0)) })
+        Ok(Self {
+            inner,
+            persist: Arc::new(persist),
+            since_checkpoint: Arc::new(AtomicUsize::new(0)),
+        })
     }
 
     /// The whole map, framed as length-prefixed records for a snapshot.
@@ -69,7 +73,10 @@ impl Activity for FileBackedActivity {
             self.persist.append(record).await.map_err(backend)?;
             if self.since_checkpoint.fetch_add(1, Ordering::Relaxed) + 1 >= CHECKPOINT_EVERY {
                 self.since_checkpoint.store(0, Ordering::Relaxed);
-                self.persist.checkpoint(self.snapshot_bytes()).await.map_err(backend)?;
+                self.persist
+                    .checkpoint(self.snapshot_bytes())
+                    .await
+                    .map_err(backend)?;
             }
             Ok(())
         })
@@ -174,12 +181,14 @@ mod tests {
     fn the_live_map_survives_a_restart() {
         let dir = temp_dir("restart");
         {
-            let a = FileBackedActivity::open(&dir, Duration::from_secs(300), Fsync::EveryWrite).unwrap();
+            let a = FileBackedActivity::open(&dir, Duration::from_secs(300), Fsync::EveryWrite)
+                .unwrap();
             block_on(a.record(visitor("alice", "/dashboard", 1000))).unwrap();
             block_on(a.record(visitor("anon-9", "/pricing", 1005))).unwrap();
             block_on(a.record(visitor("alice", "/settings", 1010))).unwrap(); // she moved
         }
-        let a = FileBackedActivity::open(&dir, Duration::from_secs(300), Fsync::EveryWrite).unwrap();
+        let a =
+            FileBackedActivity::open(&dir, Duration::from_secs(300), Fsync::EveryWrite).unwrap();
         let live = block_on(a.active(1020)).unwrap();
         assert_eq!(live.len(), 2, "two identities recovered: {live:?}");
         let alice = live.iter().find(|v| v.id == "alice").unwrap();
@@ -192,16 +201,26 @@ mod tests {
     fn checkpoint_folds_the_log_and_still_recovers() {
         let dir = temp_dir("checkpoint");
         {
-            let a = FileBackedActivity::open(&dir, Duration::from_secs(3600), Fsync::Batched(Duration::from_secs(3600))).unwrap();
+            let a = FileBackedActivity::open(
+                &dir,
+                Duration::from_secs(3600),
+                Fsync::Batched(Duration::from_secs(3600)),
+            )
+            .unwrap();
             // One visitor recorded many times drives past CHECKPOINT_EVERY.
             for t in 0..(CHECKPOINT_EVERY + 5) {
                 block_on(a.record(visitor("alice", "/p", 1000 + t as u64))).unwrap();
             }
         }
-        let a = FileBackedActivity::open(&dir, Duration::from_secs(3600), Fsync::EveryWrite).unwrap();
+        let a =
+            FileBackedActivity::open(&dir, Duration::from_secs(3600), Fsync::EveryWrite).unwrap();
         let live = block_on(a.active(u64::from(CHECKPOINT_EVERY as u32) + 2000)).unwrap();
         assert_eq!(live.len(), 1, "still one row after folding the log");
-        assert_eq!(live[0].last_seen, 1000 + (CHECKPOINT_EVERY + 4) as u64, "latest record stands");
+        assert_eq!(
+            live[0].last_seen,
+            1000 + (CHECKPOINT_EVERY + 4) as u64,
+            "latest record stands"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
