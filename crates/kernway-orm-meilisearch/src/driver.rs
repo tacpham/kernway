@@ -60,11 +60,7 @@ impl Driver for MeilisearchDriver {
         {
             let url = self.config.url.clone();
             let api_key = self.config.api_key.clone();
-            Box::pin(async move {
-                rt_core::spawn_blocking(move || crate::api::ping(&url, &api_key))
-                    .await
-                    .unwrap_or(Err(OrmError::Connection("blocking pool panicked".into())))
-            })
+            Box::pin(async move { crate::api::ping(&url, &api_key).await })
         }
         #[cfg(not(feature = "meilisearch"))]
         Box::pin(async {

@@ -30,8 +30,10 @@ members = [
     "crates/kernway-config",
     "crates/kernway-validation",
     "crates/kernway-persist",
-        "crates/kernway-compress",
-"crates/kernway-http-client",
+    "crates/kernway-compress",
+    "crates/kernway-http-client",
+    "crates/kernway-udp",
+    "crates/kernway-tcp",
     "crates/kernway-oauth2",
     "crates/kernway",
     "examples/echo-server",
@@ -144,6 +146,8 @@ kernway-validation   = { path = "crates/kernway-validation" }
 kernway-persist      = { path = "crates/kernway-persist" }
 kernway-compress     = { path = "crates/kernway-compress" }
 kernway-http-client  = { path = "crates/kernway-http-client" }
+kernway-udp          = { path = "crates/kernway-udp" }
+kernway-tcp          = { path = "crates/kernway-tcp" }
 kernway-oauth2       = { path = "crates/kernway-oauth2" }
 rt-core              = { path = "crates/rt-core" }
 rt-net               = { path = "crates/rt-net" }

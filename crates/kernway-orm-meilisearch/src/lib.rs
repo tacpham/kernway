@@ -73,4 +73,4 @@ pub use driver::{MeilisearchConfig, MeilisearchDriver};
 pub use repository::MeilisearchRepository;
 
 #[cfg(feature = "meilisearch")]
-pub(crate) mod api;
+pub mod api;

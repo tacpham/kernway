@@ -32,6 +32,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use rt_net::AsyncTcpStream;
+use rt_core;
 
 /// Default cap on establishing a connection (TCP connect + TLS handshake).
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -584,7 +585,7 @@ impl HttpClient {
         keep_alive: bool,
         cookie: Option<&str>,
     ) -> Result<(Conn, HeadRead), HttpError> {
-        let addr = resolve(&req.url.host, req.url.port)?;
+        let addr = resolve(&req.url.host, req.url.port).await?;
         let mut conn = self.connect(addr, &req.url).await?;
         let head = self
             .head_exchange(&mut conn, req, keep_alive, cookie)
@@ -664,7 +665,7 @@ impl HttpClient {
         keep_alive: bool,
         cookie: Option<&str>,
     ) -> Result<(Conn, Response, bool), HttpError> {
-        let addr = resolve(&req.url.host, req.url.port)?;
+        let addr = resolve(&req.url.host, req.url.port).await?;
         let mut conn = self.connect(addr, &req.url).await?;
         let (response, keepable) = send_on(&mut conn, req, keep_alive, cookie).await?;
         Ok((conn, response, keepable))
@@ -711,15 +712,30 @@ impl Default for HttpClient {
     }
 }
 
-/// Resolve `host:port` to a socket address. NOTE: `to_socket_addrs` is a *blocking*
-/// DNS lookup; acceptable at the low call volumes this client targets (OAuth, the odd
-/// API call), but a caller on a hot path should cache the address.
-fn resolve(host: &str, port: u16) -> Result<std::net::SocketAddr, HttpError> {
-    (host, port)
-        .to_socket_addrs()
-        .map_err(|e| HttpError::Dns(format!("{host}:{port}: {e}")))?
-        .next()
-        .ok_or_else(|| HttpError::Dns(format!("no address for {host}:{port}")))
+/// Resolve `host:port` to a socket address.
+///
+/// Uses [`rt_core::spawn_blocking`] to offload the blocking `getaddrinfo` system call
+/// so the async executor thread is never stalled. For `localhost` / bare IP addresses
+/// the OS returns immediately without a real DNS query, so the overhead is negligible.
+///
+/// # Future work
+/// Replace with a pure-async DNS resolver once `kernway-udp` lands:
+/// - Add `AsyncUdpSocket` to `kernway-udp` (backed by `rt-net`'s reactor)
+/// - Implement DNS wire format (RFC 1035): A/AAAA/CNAME, TTL cache, TCP fallback
+/// - Read `/etc/resolv.conf` for the upstream resolver
+/// - Tracked in: `crates/kernway-udp/` (skeleton) and `crates/kernway-dns/` (TODO)
+async fn resolve(host: &str, port: u16) -> Result<std::net::SocketAddr, HttpError> {
+    let host = host.to_owned();
+    let p = port;
+    rt_core::spawn_blocking(move || {
+        (host.as_str(), p)
+            .to_socket_addrs()
+            .map_err(|e| HttpError::Dns(format!("{host}:{p}: {e}")))?
+            .next()
+            .ok_or_else(|| HttpError::Dns(format!("no address for {host}:{p}")))
+    })
+    .await
+    .unwrap_or(Err(HttpError::Dns("DNS thread panicked".into())))
 }
 
 /// Write a request and read its full response. Returns the response and whether the

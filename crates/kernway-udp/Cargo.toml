@@ -1,0 +1,16 @@
+[package]
+name        = "kernway-udp"
+description = "Async UDP socket for the Kernway runtime — foundation for kernway-dns"
+version.workspace  = true
+edition.workspace  = true
+license.workspace  = true
+
+# TODO: kernway-dns will depend on this once AsyncUdpSocket is implemented.
+# kernway-http-client will then use kernway-dns for non-blocking DNS resolution
+# instead of rt_core::spawn_blocking + std::net::ToSocketAddrs.
+
+[dependencies]
+rt-core = { workspace = true }
+
+[lints]
+workspace = true

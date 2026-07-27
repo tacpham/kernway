@@ -1,0 +1,13 @@
+[package]
+name        = "kernway-tcp"
+description = "Higher-level async TCP utilities on top of rt-net — connection pools, framing, keep-alive"
+version.workspace  = true
+edition.workspace  = true
+license.workspace  = true
+
+[dependencies]
+rt-core = { workspace = true }
+rt-net  = { workspace = true }
+
+[lints]
+workspace = true

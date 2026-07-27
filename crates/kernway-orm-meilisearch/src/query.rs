@@ -183,7 +183,7 @@ impl<T: Entity + Serialize + DeserializeOwned + Send + 'static> QueryBuilder<T> 
     fn fetch_all(self: Box<Self>) -> BoxFuture<'static, Result<Vec<T>, OrmError>> {
         #[cfg(feature = "meilisearch")]
         {
-            use crate::api::{self, SearchRequest};
+            use crate::api::SearchRequest;
             let config = self.config.clone();
             let filter = self.build_filter();
             let q = self.search_query.clone();
@@ -191,21 +191,17 @@ impl<T: Entity + Serialize + DeserializeOwned + Send + 'static> QueryBuilder<T> 
             let limit = self.limit;
             let offset = self.offset;
             Box::pin(async move {
-                rt_core::spawn_blocking(move || -> Result<Vec<T>, OrmError> {
-                    let req = SearchRequest {
-                        q: q.as_deref(),
-                        filter,
-                        sort,
-                        limit,
-                        offset: if offset > 0 { Some(offset) } else { None },
-                        hits_per_page: None,
-                    };
-                    let url = format!("{}/indexes/{}/search", config.url, T::table_name());
-                    let result: api::SearchResult<T> = api::post(&url, &config.api_key, &req)?;
-                    Ok(result.hits)
-                })
-                .await
-                .unwrap_or(Err(OrmError::Connection("blocking pool panicked".into())))
+                let req = SearchRequest {
+                    q: q.as_deref(),
+                    filter,
+                    sort,
+                    limit,
+                    offset: if offset > 0 { Some(offset) } else { None },
+                };
+                let url = format!("{}/indexes/{}/search", config.url, T::table_name());
+                let result: crate::api::SearchResult<T> =
+                    crate::api::post(&url, &config.api_key, &req).await?;
+                Ok(result.hits)
             })
         }
         #[cfg(not(feature = "meilisearch"))]
@@ -217,27 +213,23 @@ impl<T: Entity + Serialize + DeserializeOwned + Send + 'static> QueryBuilder<T> 
     fn fetch_one(self: Box<Self>) -> BoxFuture<'static, Result<Option<T>, OrmError>> {
         #[cfg(feature = "meilisearch")]
         {
-            use crate::api::{self, SearchRequest};
+            use crate::api::SearchRequest;
             let config = self.config.clone();
             let filter = self.build_filter();
             let q = self.search_query.clone();
             let sort = self.sort.clone();
             Box::pin(async move {
-                rt_core::spawn_blocking(move || -> Result<Option<T>, OrmError> {
-                    let req = SearchRequest {
-                        q: q.as_deref(),
-                        filter,
-                        sort,
-                        limit: Some(1),
-                        offset: None,
-                        hits_per_page: None,
-                    };
-                    let url = format!("{}/indexes/{}/search", config.url, T::table_name());
-                    let result: api::SearchResult<T> = api::post(&url, &config.api_key, &req)?;
-                    Ok(result.hits.into_iter().next())
-                })
-                .await
-                .unwrap_or(Err(OrmError::Connection("blocking pool panicked".into())))
+                let req = SearchRequest {
+                    q: q.as_deref(),
+                    filter,
+                    sort,
+                    limit: Some(1),
+                    offset: None,
+                };
+                let url = format!("{}/indexes/{}/search", config.url, T::table_name());
+                let result: crate::api::SearchResult<T> =
+                    crate::api::post(&url, &config.api_key, &req).await?;
+                Ok(result.hits.into_iter().next())
             })
         }
         #[cfg(not(feature = "meilisearch"))]
@@ -249,26 +241,22 @@ impl<T: Entity + Serialize + DeserializeOwned + Send + 'static> QueryBuilder<T> 
     fn fetch_count(self: Box<Self>) -> BoxFuture<'static, Result<u64, OrmError>> {
         #[cfg(feature = "meilisearch")]
         {
-            use crate::api::{self, SearchRequest};
+            use crate::api::SearchRequest;
             let config = self.config.clone();
             let filter = self.build_filter();
             let q = self.search_query.clone();
             Box::pin(async move {
-                rt_core::spawn_blocking(move || -> Result<u64, OrmError> {
-                    let req = SearchRequest {
-                        q: q.as_deref(),
-                        filter,
-                        sort: vec![],
-                        limit: Some(0),
-                        offset: None,
-                        hits_per_page: None,
-                    };
-                    let url = format!("{}/indexes/{}/search", config.url, T::table_name());
-                    let result: api::SearchResult<T> = api::post(&url, &config.api_key, &req)?;
-                    Ok(result.total_hits.or(result.estimated_total_hits).unwrap_or(0))
-                })
-                .await
-                .unwrap_or(Err(OrmError::Connection("blocking pool panicked".into())))
+                let req = SearchRequest {
+                    q: q.as_deref(),
+                    filter,
+                    sort: vec![],
+                    limit: Some(0),
+                    offset: None,
+                };
+                let url = format!("{}/indexes/{}/search", config.url, T::table_name());
+                let result: crate::api::SearchResult<T> =
+                    crate::api::post(&url, &config.api_key, &req).await?;
+                Ok(result.total_hits.or(result.estimated_total_hits).unwrap_or(0))
             })
         }
         #[cfg(not(feature = "meilisearch"))]
@@ -280,29 +268,25 @@ impl<T: Entity + Serialize + DeserializeOwned + Send + 'static> QueryBuilder<T> 
     fn fetch_page(self: Box<Self>, page: u64, size: u64) -> BoxFuture<'static, Result<Page<T>, OrmError>> {
         #[cfg(feature = "meilisearch")]
         {
-            use crate::api::{self, SearchRequest};
+            use crate::api::SearchRequest;
             let config = self.config.clone();
             let filter = self.build_filter();
             let q = self.search_query.clone();
             let sort = self.sort.clone();
             Box::pin(async move {
-                rt_core::spawn_blocking(move || -> Result<Page<T>, OrmError> {
-                    let offset = page.saturating_mul(size);
-                    let req = SearchRequest {
-                        q: q.as_deref(),
-                        filter,
-                        sort,
-                        limit: Some(size),
-                        offset: Some(offset),
-                        hits_per_page: None,
-                    };
-                    let url = format!("{}/indexes/{}/search", config.url, T::table_name());
-                    let result: api::SearchResult<T> = api::post(&url, &config.api_key, &req)?;
-                    let total = result.total_hits.or(result.estimated_total_hits).unwrap_or(0);
-                    Ok(Page::new(result.hits, total, page, size))
-                })
-                .await
-                .unwrap_or(Err(OrmError::Connection("blocking pool panicked".into())))
+                let offset = page.saturating_mul(size);
+                let req = SearchRequest {
+                    q: q.as_deref(),
+                    filter,
+                    sort,
+                    limit: Some(size),
+                    offset: Some(offset),
+                };
+                let url = format!("{}/indexes/{}/search", config.url, T::table_name());
+                let result: crate::api::SearchResult<T> =
+                    crate::api::post(&url, &config.api_key, &req).await?;
+                let total = result.total_hits.or(result.estimated_total_hits).unwrap_or(0);
+                Ok(Page::new(result.hits, total, page, size))
             })
         }
         #[cfg(not(feature = "meilisearch"))]
