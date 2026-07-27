@@ -4,7 +4,7 @@
 //! force and unsalted, so equal passwords collide and rainbow tables apply. A password
 //! hash must be **salted** (a unique random salt per password) and **slow** (a large,
 //! tunable work factor). This provides that with PBKDF2 — the KDF that is just HMAC
-//! iterated `c` times, so it is safe to implement over the audited [`hmac_sha256`]
+//! iterated `c` times, so it is safe to implement over the audited `hmac_sha256`
 //! rather than pulling in crypto (KEP-0000 §1). Argon2/bcrypt are stronger against
 //! GPU/ASIC attackers; if you need them, wrap an audited crate behind the same two
 //! functions — this is the dependency-free default, not a ceiling.

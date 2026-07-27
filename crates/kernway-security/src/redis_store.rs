@@ -1,4 +1,4 @@
-//! A Redis-backed [`SessionStore`] (feature = `redis`).
+//! A Redis-backed `SessionStore` (feature = `redis`).
 //!
 //! The distributed backend for a multi-instance deployment: the session registry
 //! lives in Redis instead of one process's memory, so every instance sees the same
@@ -8,7 +8,7 @@
 //!
 //! ## Keys
 //!
-//! - `kw:sess:{sid}` — the encoded [`SessionRecord`], with a TTL backstop (KEP-0004:
+//! - `kw:sess:{sid}` — the encoded `SessionRecord`, with a TTL backstop (KEP-0004:
 //!   the storage TTL is a garbage-collection floor, never the authority on timeout).
 //! - `kw:user:{user}` — a set of the user's `sid`s, for `sessions_of` / `remove_user`.
 //! - `kw:sess:index` — a set of every live `sid`, for the `len` capacity check.
@@ -16,7 +16,7 @@
 //! ## Errors are reported, not swallowed
 //!
 //! Every method returns [`Result`]: a Redis failure surfaces as
-//! [`StoreError::Backend`] rather than being hidden. The *policy* for a failure
+//! `StoreError::Backend` rather than being hidden. The *policy* for a failure
 //! lives in the [`SessionManager`](crate::session::SessionManager), not here —
 //! `login` fails loudly (no token for an unstored session), while `authenticate`
 //! fails closed (a registry it cannot reach means "not authenticated"). This
@@ -35,7 +35,7 @@ use crate::session::{SessionRecord, SessionStore, StoreError};
 /// The set holding every live `sid`, for `len`.
 const INDEX_KEY: &str = "kw:sess:index";
 
-/// A [`SessionStore`] backed by Redis via [`kernway_redis`].
+/// A `SessionStore` backed by Redis via [`kernway_redis`].
 pub struct RedisSessionStore {
     pool: Pool,
     /// Storage TTL backstop, in seconds — refreshed on write and on `touch`.
