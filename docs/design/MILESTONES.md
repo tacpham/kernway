@@ -381,14 +381,14 @@ incorrectly has not passed.
 
 **Goal**: edit and see it, without thinking about the server.
 
-**Tiered**, because most edits need no rebuild at all:
+**Tiered**, because most edits need no rebuild at all (targets — not yet measured):
 
-| Edit | Mechanism | Latency | Restart |
+| Edit | Mechanism | Target latency | Restart |
 |---|---|---|---|
-| Template `.kwl` | watcher → recompile IR | < 10ms | no |
-| Static asset | watcher → invalidate cache + ETag | < 10ms | no |
+| Template `.kwl` | watcher → recompile IR | < 10 ms | no |
+| Static asset | watcher → invalidate cache + ETag | < 10 ms | no |
 | Config | watcher → reload the reloadable parts | ms | no |
-| Rust code | rebuild + socket handover | 1–3s | yes, zero-downtime |
+| Rust code | rebuild + socket handover | 1–3 s | yes, zero-downtime |
 
 The last row replaces the `.so` plugin idea. A supervisor holds the listening
 socket (or both processes bind with `SO_REUSEPORT`), the new child starts

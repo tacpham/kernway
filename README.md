@@ -393,7 +393,7 @@ Progress follows the [walking-skeleton milestones](docs/design/MILESTONES.md) �
 | **M2b** — streaming, HEAD, Range, precompressed | ✅ 2026-07-24 | `Body::File`, HEAD, Range (206/416), `.br`/`.gz` negotiation, `Vary: Accept-Encoding` |
 | **M3** — htmx | ✅ | `features = ["htmx"]`; `Vary: HX-Request` automatic; 1.39× faster than axum-htmx |
 | **M4** — templates + security | 🔶 | `kernleaf` (Thymeleaf dialect, 1.7× vs minijinja), CSRF token injection, security headers; CSRF *verify* route-guard pending |
-| **M5** — hot reload | ⏳ | Template/static changes < 10 ms (no restart); Rust changes via socket handover |
+| **M5** — hot reload | ⏳ | Template/static reload without restart; Rust changes via zero-downtime socket handover |
 | **M6** — production build | ⏳ | `kernway build` → one static binary, assets embedded, allocator decision |
 
 ---
