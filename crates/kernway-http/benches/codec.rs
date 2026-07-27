@@ -91,7 +91,12 @@ fn encoding(c: &mut Criterion) {
         b.iter(|| black_box(encode_response(black_box(&small))));
     });
     group.bench_function("small_json_keep_alive", |b| {
-        b.iter(|| black_box(encode_response_with(black_box(&small), Connection::KeepAlive)));
+        b.iter(|| {
+            black_box(encode_response_with(
+                black_box(&small),
+                Connection::KeepAlive,
+            ))
+        });
     });
     // Build a many-header response and encode it: the full response path with a
     // realistic header count, which is where the one-buffer layout should pay.
@@ -101,7 +106,10 @@ fn encoding(c: &mut Criterion) {
             for (k, v) in many_pairs {
                 resp.headers.insert(k, v);
             }
-            black_box(encode_response_with(black_box(&resp), Connection::KeepAlive))
+            black_box(encode_response_with(
+                black_box(&resp),
+                Connection::KeepAlive,
+            ))
         });
     });
 
@@ -109,7 +117,12 @@ fn encoding(c: &mut Criterion) {
     // number to watch if that trade is ever revisited.
     group.throughput(Throughput::Bytes(64 * 1024));
     group.bench_function("64kb_body", |b| {
-        b.iter(|| black_box(encode_response_with(black_box(&large), Connection::KeepAlive)));
+        b.iter(|| {
+            black_box(encode_response_with(
+                black_box(&large),
+                Connection::KeepAlive,
+            ))
+        });
     });
     group.finish();
 }

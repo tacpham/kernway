@@ -57,15 +57,18 @@ use syn::{
 )]
 pub fn derive_component(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let name  = &input.ident;
+    let name = &input.ident;
 
     // --- Bean metadata: `#[primary]`, `#[qualifier("…")]`, `#[default_impl]` ---
     let bean_qualifier: Option<String> = match parse_bean_qualifier(&input.attrs) {
         Ok(q) => q,
         Err(e) => return e.to_compile_error().into(),
     };
-    let is_primary   = input.attrs.iter().any(|a| a.path().is_ident("primary"));
-    let is_default   = input.attrs.iter().any(|a| a.path().is_ident("default_impl"));
+    let is_primary = input.attrs.iter().any(|a| a.path().is_ident("primary"));
+    let is_default = input
+        .attrs
+        .iter()
+        .any(|a| a.path().is_ident("default_impl"));
 
     // --- Interface bindings: `#[provides(dyn Trait)]` on the struct ---
     let provided: Vec<Type> = match parse_provides(&input.attrs) {
@@ -80,12 +83,15 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
 
     // --- Fields: initializers + hard/soft dependency TypeIds ---
     let mut field_inits: Vec<TokenStream2> = Vec::new();
-    let mut hard_deps:   Vec<TokenStream2> = Vec::new();
-    let mut soft_deps:   Vec<TokenStream2> = Vec::new();
+    let mut hard_deps: Vec<TokenStream2> = Vec::new();
+    let mut soft_deps: Vec<TokenStream2> = Vec::new();
     let is_unit;
 
     match &input.data {
-        Data::Struct(DataStruct { fields: Fields::Named(FieldsNamed { named, .. }), .. }) => {
+        Data::Struct(DataStruct {
+            fields: Fields::Named(FieldsNamed { named, .. }),
+            ..
+        }) => {
             is_unit = false;
             for field in named {
                 let fname = field.ident.as_ref().unwrap();
@@ -98,19 +104,28 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
 
                 let qualifier = match parse_inject_qualifier(attr) {
                     Ok(q) => q,
-                    Err(e) => { field_inits.push(e.to_compile_error()); continue; }
+                    Err(e) => {
+                        field_inits.push(e.to_compile_error());
+                        continue;
+                    }
                 };
 
                 // Classify the wrapper: Arc<T> | Option<Arc<T>> | Vec<Arc<T>>.
                 let (kind, arc_inner) = if let Some(opt) = extract_generic_inner(ftype, "Option") {
                     match extract_arc_inner(opt) {
                         Some(i) => (InjectKind::Optional, i),
-                        None => { field_inits.push(inject_type_error(ftype)); continue; }
+                        None => {
+                            field_inits.push(inject_type_error(ftype));
+                            continue;
+                        }
                     }
                 } else if let Some(vec) = extract_generic_inner(ftype, "Vec") {
                     match extract_arc_inner(vec) {
                         Some(i) => (InjectKind::Collection, i),
-                        None => { field_inits.push(inject_type_error(ftype)); continue; }
+                        None => {
+                            field_inits.push(inject_type_error(ftype));
+                            continue;
+                        }
                     }
                 } else if let Some(i) = extract_arc_inner(ftype) {
                     (InjectKind::Required, i)
@@ -134,24 +149,28 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                 // Field initializer.
                 let init = match kind {
                     InjectKind::Required => match (is_trait, &qualifier) {
-                        (false, None)    => quote! { ctx.get::<#inner>()? },
+                        (false, None) => quote! { ctx.get::<#inner>()? },
                         (false, Some(q)) => quote! { ctx.get_qualified::<#inner>(#q)? },
-                        (true,  None)    => quote! { ctx.get_as::<#inner>()? },
-                        (true,  Some(q)) => quote! {{
+                        (true, None) => quote! { ctx.get_as::<#inner>()? },
+                        (true, Some(q)) => quote! {{
                             let __bound = ctx.get_qualified::<::std::sync::Arc<#inner>>(#q)?;
                             (*__bound).clone()
                         }},
                     },
-                    InjectKind::Optional => if is_trait {
-                        quote! { ctx.get_as::<#inner>().ok() }
-                    } else {
-                        quote! { ctx.get::<#inner>().ok() }
-                    },
-                    InjectKind::Collection => if is_trait {
-                        quote! { ctx.get_all_as::<#inner>() }
-                    } else {
-                        quote! { ctx.get_all::<#inner>() }
-                    },
+                    InjectKind::Optional => {
+                        if is_trait {
+                            quote! { ctx.get_as::<#inner>().ok() }
+                        } else {
+                            quote! { ctx.get::<#inner>().ok() }
+                        }
+                    }
+                    InjectKind::Collection => {
+                        if is_trait {
+                            quote! { ctx.get_all_as::<#inner>() }
+                        } else {
+                            quote! { ctx.get_all::<#inner>() }
+                        }
+                    }
                 };
                 field_inits.push(quote! { #fname: #init, });
 
@@ -168,14 +187,23 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
             }
         }
         // Unit struct: `pub struct Foo;`  or  empty: `pub struct Foo {}`
-        Data::Struct(DataStruct { fields: Fields::Unit, .. })
-        | Data::Struct(DataStruct { fields: Fields::Unnamed(_), .. }) => {
+        Data::Struct(DataStruct {
+            fields: Fields::Unit,
+            ..
+        })
+        | Data::Struct(DataStruct {
+            fields: Fields::Unnamed(_),
+            ..
+        }) => {
             is_unit = true;
         }
         _ => {
-            return syn::Error::new_spanned(&input.ident, "#[derive(Component)] only supports structs")
-                .to_compile_error()
-                .into()
+            return syn::Error::new_spanned(
+                &input.ident,
+                "#[derive(Component)] only supports structs",
+            )
+            .to_compile_error()
+            .into()
         }
     }
 
@@ -193,38 +221,48 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
         .collect();
     let bind_registrations: Vec<TokenStream2> = provided
         .iter()
-        .map(|t| quote! {
-            // Clone to the concrete `Arc<Self>`, then let-coerce to `Arc<dyn Trait>`.
-            let __concrete = ::std::sync::Arc::clone(this);
-            let __binding: ::std::sync::Arc<#t> = __concrete;
-            // Carries this bean's origin/primary/qualifier onto the binding, so
-            // `Arc<dyn Trait>` injection honours `#[primary]` / `#[qualifier]`.
-            ctx.register_as_component::<Self, #t>(__binding)?;
+        .map(|t| {
+            quote! {
+                // Clone to the concrete `Arc<Self>`, then let-coerce to `Arc<dyn Trait>`.
+                let __concrete = ::std::sync::Arc::clone(this);
+                let __binding: ::std::sync::Arc<#t> = __concrete;
+                // Carries this bean's origin/primary/qualifier onto the binding, so
+                // `Arc<dyn Trait>` injection honours `#[primary]` / `#[qualifier]`.
+                ctx.register_as_component::<Self, #t>(__binding)?;
+            }
         })
         .collect();
 
     // Bean metadata overrides on `RegistersComponent`.
-    let origin_impl = is_default.then(|| quote! {
-        fn bean_origin() -> ::di_core::BeanOrigin {
-            ::di_core::BeanOrigin::FrameworkDefault
+    let origin_impl = is_default.then(|| {
+        quote! {
+            fn bean_origin() -> ::di_core::BeanOrigin {
+                ::di_core::BeanOrigin::FrameworkDefault
+            }
         }
     });
-    let primary_impl = is_primary.then(|| quote! {
-        fn is_primary() -> bool { true }
+    let primary_impl = is_primary.then(|| {
+        quote! {
+            fn is_primary() -> bool { true }
+        }
     });
-    let qualifier_impl = bean_qualifier.map(|q| quote! {
-        fn qualifier() -> ::std::option::Option<&'static str> {
-            ::std::option::Option::Some(#q)
+    let qualifier_impl = bean_qualifier.map(|q| {
+        quote! {
+            fn qualifier() -> ::std::option::Option<&'static str> {
+                ::std::option::Option::Some(#q)
+            }
         }
     });
 
     // `#[post_construct(method)]` → override the lifecycle hook.
-    let post_construct_impl = post_ctor.map(|m| quote! {
-        fn post_construct(
-            ctx: &::di_core::AppContext,
-            this: &::std::sync::Arc<Self>,
-        ) -> ::std::result::Result<(), ::di_core::DiError> {
-            Self::#m(this, ctx)
+    let post_construct_impl = post_ctor.map(|m| {
+        quote! {
+            fn post_construct(
+                ctx: &::di_core::AppContext,
+                this: &::std::sync::Arc<Self>,
+            ) -> ::std::result::Result<(), ::di_core::DiError> {
+                Self::#m(this, ctx)
+            }
         }
     });
 
@@ -359,7 +397,10 @@ fn parse_bean_qualifier(attrs: &[syn::Attribute]) -> syn::Result<Option<String>>
     let mut found: Option<String> = None;
     for attr in attrs.iter().filter(|a| a.path().is_ident("qualifier")) {
         if found.is_some() {
-            return Err(syn::Error::new_spanned(attr, "duplicate `#[qualifier]` on this bean"));
+            return Err(syn::Error::new_spanned(
+                attr,
+                "duplicate `#[qualifier]` on this bean",
+            ));
         }
         let lit: syn::LitStr = attr.parse_args()?;
         found = Some(lit.value());
@@ -399,7 +440,7 @@ fn parse_inject_qualifier(attr: &syn::Attribute) -> syn::Result<Option<String>> 
 pub fn component(args: TokenStream, input: TokenStream) -> TokenStream {
     let _ = args;
     let input_struct = parse_macro_input!(input as ItemStruct);
-    let struct_name  = &input_struct.ident;
+    let struct_name = &input_struct.ident;
 
     let expanded = quote! {
         #input_struct
@@ -478,12 +519,20 @@ fn controller_impl(args: &str, mut item_impl: ItemImpl) -> TokenStream {
         let route = extract_route(&method.attrs);
         let role = extract_role(&method.attrs);
         // Strip the helper attributes so they do not re-expand on the output.
-        method.attrs.retain(|a| !a.path().is_ident("route") && !a.path().is_ident("require_role"));
+        method
+            .attrs
+            .retain(|a| !a.path().is_ident("route") && !a.path().is_ident("require_role"));
 
         let Some((http, path)) = route else { continue };
         let name = method.sig.ident.clone();
         let inputs = method.sig.inputs.clone();
-        match route_registration(&name, &inputs, &http, &format!("{prefix}{path}"), role.as_deref()) {
+        match route_registration(
+            &name,
+            &inputs,
+            &http,
+            &format!("{prefix}{path}"),
+            role.as_deref(),
+        ) {
             Ok(tokens) => registrations.push(tokens),
             Err(e) => return e.to_compile_error().into(),
         }
@@ -538,7 +587,10 @@ fn route_registration(
     for arg in inputs {
         let FnArg::Typed(pt) = arg else { continue };
         let Pat::Ident(pat) = &*pt.pat else {
-            return Err(syn::Error::new_spanned(&pt.pat, "#[route] method parameters must be simple names"));
+            return Err(syn::Error::new_spanned(
+                &pt.pat,
+                "#[route] method parameters must be simple names",
+            ));
         };
         let name = &pat.ident;
         let ty = &pt.ty;
@@ -562,8 +614,16 @@ fn route_registration(
     // code has no "unused variable" warnings.
     let req_used = has_request || !extractions.is_empty();
     let scope_used = role.is_some() || !extractions.is_empty();
-    let req_param = if req_used { quote! { req } } else { quote! { _req } };
-    let scope_param = if scope_used { quote! { scope } } else { quote! { _scope } };
+    let req_param = if req_used {
+        quote! { req }
+    } else {
+        quote! { _req }
+    };
+    let scope_param = if scope_used {
+        quote! { scope }
+    } else {
+        quote! { _scope }
+    };
     let guard = match role {
         Some(role) => quote! {
             if !::kernway_server::role_allowed(scope, #role) {
@@ -599,14 +659,18 @@ fn is_request_type(ty: &Type) -> bool {
 /// Read `#[route(METHOD, "/path")]` → `(method, path)`.
 fn extract_route(attrs: &[Attribute]) -> Option<(String, String)> {
     let attr = attrs.iter().find(|a| a.path().is_ident("route"))?;
-    let args = attr.parse_args_with(Punctuated::<Expr, Comma>::parse_terminated).ok()?;
+    let args = attr
+        .parse_args_with(Punctuated::<Expr, Comma>::parse_terminated)
+        .ok()?;
     let mut it = args.iter();
     let method = match it.next()? {
         Expr::Path(p) => p.path.segments.last()?.ident.to_string(),
         _ => return None,
     };
     let path = match it.next()? {
-        Expr::Lit(syn::ExprLit { lit: Lit::Str(s), .. }) => s.value(),
+        Expr::Lit(syn::ExprLit {
+            lit: Lit::Str(s), ..
+        }) => s.value(),
         _ => return None,
     };
     Some((method, path))
@@ -681,11 +745,17 @@ pub fn derive_validate(input: TokenStream) -> TokenStream {
     let name = &input.ident;
 
     let fields = match &input.data {
-        Data::Struct(DataStruct { fields: Fields::Named(FieldsNamed { named, .. }), .. }) => named,
+        Data::Struct(DataStruct {
+            fields: Fields::Named(FieldsNamed { named, .. }),
+            ..
+        }) => named,
         _ => {
-            return syn::Error::new_spanned(name, "#[derive(Validate)] requires a struct with named fields")
-                .to_compile_error()
-                .into();
+            return syn::Error::new_spanned(
+                name,
+                "#[derive(Validate)] requires a struct with named fields",
+            )
+            .to_compile_error()
+            .into();
         }
     };
 
@@ -704,14 +774,26 @@ pub fn derive_validate(input: TokenStream) -> TokenStream {
             for meta in metas {
                 let check = match &meta {
                     // A bare rule: `not_blank`, `email` — default message.
-                    Meta::Path(path) => {
-                        builtin_check(fname, &fstr, path.segments.last().map(|s| &s.ident), None, None, None)
-                    }
+                    Meta::Path(path) => builtin_check(
+                        fname,
+                        &fstr,
+                        path.segments.last().map(|s| &s.ident),
+                        None,
+                        None,
+                        None,
+                    ),
                     // A rule with args: `length(min = .., max = .., message = "..")`,
                     // `range(...)`, or a message-only override `email(message = "..")`.
                     Meta::List(list) => {
                         let (min, max, message) = parse_rule_args(list);
-                        builtin_check(fname, &fstr, list.path.segments.last().map(|s| &s.ident), min, max, message)
+                        builtin_check(
+                            fname,
+                            &fstr,
+                            list.path.segments.last().map(|s| &s.ident),
+                            min,
+                            max,
+                            message,
+                        )
                     }
                     // A user validator: `custom = my_fn` — calls `my_fn(&self.field)`,
                     // which returns `Result<(), String>` (its own message on failure).
@@ -723,7 +805,10 @@ pub fn derive_validate(input: TokenStream) -> TokenStream {
                             }
                         })
                     }
-                    other => Err(syn::Error::new_spanned(other, "unexpected `#[validate(...)]` entry")),
+                    other => Err(syn::Error::new_spanned(
+                        other,
+                        "unexpected `#[validate(...)]` entry",
+                    )),
                 };
                 match check {
                     Ok(tokens) => checks.push(tokens),
@@ -754,7 +839,9 @@ fn named_iter(named: &Punctuated<syn::Field, Comma>) -> impl Iterator<Item = &sy
 /// `email(message = "..")` attribute list; any may be absent.
 fn parse_rule_args(list: &MetaList) -> (Option<syn::Expr>, Option<syn::Expr>, Option<syn::Expr>) {
     let (mut min, mut max, mut message) = (None, None, None);
-    if let Ok(pairs) = list.parse_args_with(Punctuated::<syn::MetaNameValue, Comma>::parse_terminated) {
+    if let Ok(pairs) =
+        list.parse_args_with(Punctuated::<syn::MetaNameValue, Comma>::parse_terminated)
+    {
         for pair in pairs {
             if pair.path.is_ident("min") {
                 min = Some(pair.value);
@@ -855,7 +942,11 @@ pub fn configuration(args: TokenStream, input: TokenStream) -> TokenStream {
         let fname = field.ident.as_ref().unwrap();
         let ty = &field.ty;
         let suffix = fname.to_string().replace('_', "-");
-        let key = if prefix.is_empty() { suffix } else { format!("{prefix}.{suffix}") };
+        let key = if prefix.is_empty() {
+            suffix
+        } else {
+            format!("{prefix}.{suffix}")
+        };
         match extract_generic_inner(ty, "Option") {
             // Option<T> → present-or-absent, no default needed.
             Some(inner) => quote! { #fname: config.get::<#inner>(#key) },

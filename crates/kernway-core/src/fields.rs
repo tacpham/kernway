@@ -83,7 +83,8 @@ impl<const CASE_INSENSITIVE: bool> Fields<CASE_INSENSITIVE> {
     /// # Panics
     /// If the accumulated text would exceed 4GiB.
     pub fn insert(&mut self, name: &str, value: &str) {
-        self.entries.retain(|e| !Self::name_matches(&self.buf, e, name));
+        self.entries
+            .retain(|e| !Self::name_matches(&self.buf, e, name));
         self.push(name, value);
     }
 
@@ -104,7 +105,8 @@ impl<const CASE_INSENSITIVE: bool> Fields<CASE_INSENSITIVE> {
         if CASE_INSENSITIVE {
             // Normalized once here so that `get` never has to allocate a
             // lowercased copy of the name it is handed.
-            self.buf.extend(name.bytes().map(|b| b.to_ascii_lowercase()));
+            self.buf
+                .extend(name.bytes().map(|b| b.to_ascii_lowercase()));
         } else {
             self.buf.extend_from_slice(name.as_bytes());
         }

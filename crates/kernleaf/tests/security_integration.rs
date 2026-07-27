@@ -64,8 +64,14 @@ fn an_anonymous_visitor_gets_the_form_with_a_real_csrf_token() {
     assert!(!out.contains("Welcome"), "anonymous sees no greeting");
     assert!(out.contains("<form"), "the login form is shown");
     // The auto-injected CSRF field carries the real 64-hex token.
-    let field = format!("<input type=\"hidden\" name=\"_csrf\" value=\"{}\">", token.as_str());
-    assert!(out.contains(&field), "form must carry the CSRF token: {out}");
+    let field = format!(
+        "<input type=\"hidden\" name=\"_csrf\" value=\"{}\">",
+        token.as_str()
+    );
+    assert!(
+        out.contains(&field),
+        "form must carry the CSRF token: {out}"
+    );
 }
 
 #[test]
@@ -83,5 +89,8 @@ fn the_rendered_token_round_trips_through_verify_request() {
     let mut forged = Request::new("POST", "/login");
     forged.headers.insert("cookie", &token.set_cookie(false));
     forged.body = b"username=alice&_csrf=deadbeef".to_vec();
-    assert!(!csrf::verify_request(&forged), "a mismatched token must be rejected");
+    assert!(
+        !csrf::verify_request(&forged),
+        "a mismatched token must be rejected"
+    );
 }

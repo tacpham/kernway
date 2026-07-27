@@ -8,7 +8,11 @@ use std::net::{TcpListener, TcpStream};
 use hello_controller::build_app_secured;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn connect(port: u16) -> TcpStream {
@@ -53,12 +57,21 @@ fn path_rules_are_enforced_centrally() {
         let anon = get(port, "/secret/data", None);
         assert!(anon.starts_with("HTTP/1.1 401"), "anonymous → 401: {anon}");
         let logged_in = get(port, "/secret/data", Some("USER"));
-        assert!(logged_in.starts_with("HTTP/1.1 200"), "authenticated → 200: {logged_in}");
+        assert!(
+            logged_in.starts_with("HTTP/1.1 200"),
+            "authenticated → 200: {logged_in}"
+        );
 
         // has_role("/admin/**", "ADMIN") — role gate.
         let user = get(port, "/admin/panel", Some("USER"));
-        assert!(user.starts_with("HTTP/1.1 403"), "USER on /admin → 403: {user}");
+        assert!(
+            user.starts_with("HTTP/1.1 403"),
+            "USER on /admin → 403: {user}"
+        );
         let admin = get(port, "/admin/panel", Some("ADMIN"));
-        assert!(admin.starts_with("HTTP/1.1 200"), "ADMIN on /admin → 200: {admin}");
+        assert!(
+            admin.starts_with("HTTP/1.1 200"),
+            "ADMIN on /admin → 200: {admin}"
+        );
     });
 }

@@ -16,13 +16,13 @@ use kernway_core::request::Request;
 #[derive(Debug, Clone)]
 pub struct MultipartField {
     /// Field name (from `Content-Disposition: form-data; name="..."`)
-    pub name:         String,
+    pub name: String,
     /// Original filename, if this is a file upload.
-    pub filename:     Option<String>,
+    pub filename: Option<String>,
     /// Content-Type of this field (default: `text/plain`).
     pub content_type: String,
     /// Raw bytes of the field value.
-    pub data:         Vec<u8>,
+    pub data: Vec<u8>,
 }
 
 impl MultipartField {
@@ -32,7 +32,9 @@ impl MultipartField {
     }
 
     /// Whether this field is a file upload (has a filename).
-    pub fn is_file(&self) -> bool { self.filename.is_some() }
+    pub fn is_file(&self) -> bool {
+        self.filename.is_some()
+    }
 }
 
 /// Parsed multipart/form-data form.
@@ -45,42 +47,52 @@ impl MultipartForm {
     /// Parse from raw bytes and boundary string.
     pub fn parse(body: &[u8], boundary: &str) -> Result<Self, String> {
         let delimiter = format!("--{}", boundary);
-        let body_str  = String::from_utf8_lossy(body);
+        let body_str = String::from_utf8_lossy(body);
 
         let mut fields = Vec::new();
 
         for part in body_str.split(&delimiter) {
             let part = part.trim();
-            if part.is_empty() || part == "--" { continue; }
+            if part.is_empty() || part == "--" {
+                continue;
+            }
 
-            let split_pos = part.find("\r\n\r\n")
+            let split_pos = part
+                .find("\r\n\r\n")
                 .map(|p| (p, 4))
                 .or_else(|| part.find("\n\n").map(|p| (p, 2)));
 
             let (header_pos, sep_len) = match split_pos {
                 Some(x) => x,
-                None    => continue,
+                None => continue,
             };
 
             let headers_raw = &part[..header_pos];
-            let content     = &part[header_pos + sep_len..];
+            let content = &part[header_pos + sep_len..];
             let content = content.trim_end_matches("\r\n").trim_end_matches('\n');
 
-            let mut name: Option<String>     = None;
+            let mut name: Option<String> = None;
             let mut filename: Option<String> = None;
             let mut content_type = "text/plain".to_string();
 
             for line in headers_raw.lines() {
                 let line = line.trim();
                 if line.to_lowercase().starts_with("content-disposition:") {
-                    if let Some(n) = extract_quoted(line, "name=") { name = Some(n); }
-                    if let Some(f) = extract_quoted(line, "filename=") { filename = Some(f); }
+                    if let Some(n) = extract_quoted(line, "name=") {
+                        name = Some(n);
+                    }
+                    if let Some(f) = extract_quoted(line, "filename=") {
+                        filename = Some(f);
+                    }
                 } else if line.to_lowercase().starts_with("content-type:") {
                     content_type = line[line.find(':').unwrap() + 1..].trim().to_string();
                 }
             }
 
-            let name = match name { Some(n) => n, None => continue };
+            let name = match name {
+                Some(n) => n,
+                None => continue,
+            };
 
             fields.push(MultipartField {
                 name,
@@ -107,7 +119,9 @@ impl MultipartForm {
 
     /// Parse from a `Request` directly.
     pub fn from_request(req: &Request) -> Result<Self, String> {
-        let ct = req.headers.get("content-type")
+        let ct = req
+            .headers
+            .get("content-type")
             .ok_or_else(|| "missing Content-Type header".to_string())?;
         let boundary = Self::boundary_from_content_type(ct)
             .ok_or_else(|| "missing boundary in Content-Type".to_string())?;
@@ -125,12 +139,18 @@ impl MultipartForm {
     }
 
     /// All fields.
-    pub fn fields(&self) -> &[MultipartField] { &self.fields }
+    pub fn fields(&self) -> &[MultipartField] {
+        &self.fields
+    }
 
     /// Number of fields.
-    pub fn len(&self) -> usize { self.fields.len() }
+    pub fn len(&self) -> usize {
+        self.fields.len()
+    }
     /// Whether the form carried no fields at all.
-    pub fn is_empty(&self) -> bool { self.fields.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
 }
 
 /// Extract a quoted value: given `name="foo"` returns `"foo"`.
@@ -157,7 +177,10 @@ mod tests {
         for (name, ct, filename, data) in parts {
             body.push_str(&format!("--{}\r\n", BOUNDARY));
             let disp = if let Some(f) = filename {
-                format!("Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\n", name, f)
+                format!(
+                    "Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\n",
+                    name, f
+                )
             } else {
                 format!("Content-Disposition: form-data; name=\"{}\"\r\n", name)
             };
@@ -193,12 +216,15 @@ mod tests {
     #[test]
     fn parse_multiple_fields() {
         let body = make_body(&[
-            ("name",  "text/plain", None, "Bob"),
+            ("name", "text/plain", None, "Bob"),
             ("email", "text/plain", None, "bob@test.com"),
         ]);
         let form = MultipartForm::parse(&body, BOUNDARY).unwrap();
         assert_eq!(form.len(), 2);
-        assert_eq!(form.field("email").unwrap().as_text().unwrap(), "bob@test.com");
+        assert_eq!(
+            form.field("email").unwrap().as_text().unwrap(),
+            "bob@test.com"
+        );
     }
 
     #[test]

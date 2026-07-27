@@ -21,7 +21,14 @@ impl<'a> Next<'a> {
     /// Run the next middleware, or the handler when the chain is exhausted.
     pub fn run(self, req: Request, scope: &'a RequestScope) -> BoxFuture<'a, Response> {
         match self.rest.split_first() {
-            Some((first, rest)) => first.handle(req, scope, Next { rest, terminal: self.terminal }),
+            Some((first, rest)) => first.handle(
+                req,
+                scope,
+                Next {
+                    rest,
+                    terminal: self.terminal,
+                },
+            ),
             None => (self.terminal)(req, scope),
         }
     }
@@ -58,7 +65,12 @@ impl Middleware for RequestIdMiddleware {
         "RequestId"
     }
 
-    fn handle<'a>(&'a self, mut req: Request, scope: &'a RequestScope, next: Next<'a>) -> BoxFuture<'a, Response> {
+    fn handle<'a>(
+        &'a self,
+        mut req: Request,
+        scope: &'a RequestScope,
+        next: Next<'a>,
+    ) -> BoxFuture<'a, Response> {
         Box::pin(async move {
             let id = generate_request_id();
             req.headers.insert("x-request-id", &id);
@@ -80,7 +92,12 @@ impl Middleware for LoggingMiddleware {
         "Logging"
     }
 
-    fn handle<'a>(&'a self, req: Request, scope: &'a RequestScope, next: Next<'a>) -> BoxFuture<'a, Response> {
+    fn handle<'a>(
+        &'a self,
+        req: Request,
+        scope: &'a RequestScope,
+        next: Next<'a>,
+    ) -> BoxFuture<'a, Response> {
         Box::pin(async move {
             let start = std::time::Instant::now();
             let method = req.method.clone();
@@ -137,7 +154,10 @@ mod tests {
                 resp
             }) as BoxFuture<'static, Response>
         };
-        let next = Next { rest: &[], terminal };
+        let next = Next {
+            rest: &[],
+            terminal,
+        };
         let resp = block_on(middleware.handle(Request::new("GET", "/ping"), &scope, next));
 
         // The middleware set x-request-id on the response, and the terminal saw the
@@ -153,9 +173,13 @@ mod tests {
         let scope = RequestScope::new(&app);
 
         let terminal: &Terminal = &|_req: Request, _scope: &RequestScope| {
-            Box::pin(async { Response::new(StatusCode::NO_CONTENT) }) as BoxFuture<'static, Response>
+            Box::pin(async { Response::new(StatusCode::NO_CONTENT) })
+                as BoxFuture<'static, Response>
         };
-        let next = Next { rest: &[], terminal };
+        let next = Next {
+            rest: &[],
+            terminal,
+        };
         let resp = block_on(middleware.handle(Request::new("GET", "/health"), &scope, next));
 
         assert_eq!(resp.status, StatusCode::NO_CONTENT);

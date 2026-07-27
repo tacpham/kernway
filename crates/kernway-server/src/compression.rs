@@ -37,7 +37,9 @@ impl Compression {
     /// A compressor with the default [`DEFAULT_MIN_SIZE`] threshold.
     #[must_use]
     pub fn new() -> Self {
-        Self { min_size: DEFAULT_MIN_SIZE }
+        Self {
+            min_size: DEFAULT_MIN_SIZE,
+        }
     }
 
     /// Only compress bodies at least `bytes` long.
@@ -59,7 +61,12 @@ impl Middleware for Compression {
         "Compression"
     }
 
-    fn handle<'a>(&'a self, req: Request, scope: &'a RequestScope, next: Next<'a>) -> BoxFuture<'a, Response> {
+    fn handle<'a>(
+        &'a self,
+        req: Request,
+        scope: &'a RequestScope,
+        next: Next<'a>,
+    ) -> BoxFuture<'a, Response> {
         let accept = req.header("accept-encoding").unwrap_or("").to_string();
         let min_size = self.min_size;
         Box::pin(async move {
@@ -98,8 +105,12 @@ fn compress(response: &mut Response, accept: &str, min_size: usize) {
 
     let length = encoded.len();
     response.body = Body::Bytes(encoded);
-    response.headers.insert("content-encoding", encoding.as_str());
-    response.headers.insert("content-length", &length.to_string());
+    response
+        .headers
+        .insert("content-encoding", encoding.as_str());
+    response
+        .headers
+        .insert("content-length", &length.to_string());
     add_vary(response);
 }
 
@@ -107,7 +118,9 @@ fn compress(response: &mut Response, accept: &str, min_size: usize) {
 fn add_vary(response: &mut Response) {
     match response.headers.get("vary").map(str::to_string) {
         Some(existing) if existing.to_ascii_lowercase().contains("accept-encoding") => {}
-        Some(existing) => response.headers.insert("vary", &format!("{existing}, Accept-Encoding")),
+        Some(existing) => response
+            .headers
+            .insert("vary", &format!("{existing}, Accept-Encoding")),
         None => response.headers.insert("vary", "Accept-Encoding"),
     }
 }
@@ -142,43 +155,76 @@ mod tests {
         let terminal: &Terminal = &move |_req, _scope| {
             let body = body.clone();
             Box::pin(async move {
-                Response::new(StatusCode::OK).content_type(content_type).body(body)
+                Response::new(StatusCode::OK)
+                    .content_type(content_type)
+                    .body(body)
             }) as BoxFuture<'static, Response>
         };
-        block_on(Compression::new().min_size(min_size).handle(req, &scope, Next { rest: &[], terminal }))
+        block_on(Compression::new().min_size(min_size).handle(
+            req,
+            &scope,
+            Next {
+                rest: &[],
+                terminal,
+            },
+        ))
     }
 
     #[test]
     fn compresses_a_large_compressible_body() {
-        let body = "hello world, this JSON is very repetitive. ".repeat(50).into_bytes();
+        let body = "hello world, this JSON is very repetitive. "
+            .repeat(50)
+            .into_bytes();
         let resp = run("gzip, deflate, br", "application/json", body.clone(), 1024);
-        assert_eq!(resp.headers.get("content-encoding"), Some("br"), "picks the best offered (br)");
+        assert_eq!(
+            resp.headers.get("content-encoding"),
+            Some("br"),
+            "picks the best offered (br)"
+        );
         assert_eq!(resp.headers.get("vary"), Some("Accept-Encoding"));
         let encoded = resp.body_bytes().to_vec();
         assert!(encoded.len() < body.len(), "actually smaller");
-        assert_eq!(resp.headers.get("content-length"), Some(encoded.len().to_string().as_str()));
+        assert_eq!(
+            resp.headers.get("content-length"),
+            Some(encoded.len().to_string().as_str())
+        );
         // And it decodes back to the original.
-        assert_eq!(kernway_compress::decode(&encoded, Encoding::Br).unwrap(), body);
+        assert_eq!(
+            kernway_compress::decode(&encoded, Encoding::Br).unwrap(),
+            body
+        );
     }
 
     #[test]
     fn skips_small_bodies() {
         let resp = run("gzip", "text/plain", b"tiny".to_vec(), 1024);
-        assert_eq!(resp.headers.get("content-encoding"), None, "below the threshold");
+        assert_eq!(
+            resp.headers.get("content-encoding"),
+            None,
+            "below the threshold"
+        );
     }
 
     #[test]
     fn skips_incompressible_types() {
         let body = vec![0u8; 4096];
         let resp = run("gzip", "image/png", body, 1024);
-        assert_eq!(resp.headers.get("content-encoding"), None, "images are already compressed");
+        assert_eq!(
+            resp.headers.get("content-encoding"),
+            None,
+            "images are already compressed"
+        );
     }
 
     #[test]
     fn skips_when_the_client_does_not_accept_it() {
         let body = "compressible text ".repeat(100).into_bytes();
         let resp = run("", "text/plain", body, 1024);
-        assert_eq!(resp.headers.get("content-encoding"), None, "no Accept-Encoding → no compression");
+        assert_eq!(
+            resp.headers.get("content-encoding"),
+            None,
+            "no Accept-Encoding → no compression"
+        );
     }
 
     #[test]

@@ -34,12 +34,18 @@ pub struct RequestScope<'a> {
 impl<'a> RequestScope<'a> {
     /// A fresh, empty scope over the application context.
     pub fn new(parent: &'a AppContext) -> Self {
-        Self { local: RwLock::new(HashMap::new()), parent }
+        Self {
+            local: RwLock::new(HashMap::new()),
+            parent,
+        }
     }
 
     /// Put a request-scoped bean by value.
     pub fn set<T: Any + Send + Sync + 'static>(&self, value: T) {
-        self.local.write().unwrap().insert(TypeId::of::<T>(), Arc::new(value));
+        self.local
+            .write()
+            .unwrap()
+            .insert(TypeId::of::<T>(), Arc::new(value));
     }
 
     /// Put a request-scoped bean already wrapped in an `Arc`.
@@ -58,11 +64,15 @@ impl<'a> RequestScope<'a> {
     }
 
     fn local_get<T: Any + Send + Sync + 'static>(&self) -> Option<Arc<T>> {
-        self.local.read().unwrap().get(&TypeId::of::<T>()).map(|inst| {
-            Arc::clone(inst)
-                .downcast::<T>()
-                .expect("RequestScope invariant: stored type matches its TypeId key")
-        })
+        self.local
+            .read()
+            .unwrap()
+            .get(&TypeId::of::<T>())
+            .map(|inst| {
+                Arc::clone(inst)
+                    .downcast::<T>()
+                    .expect("RequestScope invariant: stored type matches its TypeId key")
+            })
     }
 
     // Inherent resolution — request-local beans first, then the application
@@ -135,7 +145,8 @@ mod tests {
 
     fn app() -> AppContext {
         let mut ctx = AppContext::new();
-        ctx.register_instance::<String>(Arc::new("singleton".to_string())).unwrap();
+        ctx.register_instance::<String>(Arc::new("singleton".to_string()))
+            .unwrap();
         ctx
     }
 
@@ -170,7 +181,10 @@ mod tests {
         b.set(2u64);
         assert_eq!(*a.get::<u64>().unwrap(), 1);
         assert_eq!(*b.get::<u64>().unwrap(), 2);
-        assert!(!RequestScope::new(&app).has::<u64>(), "a fresh scope has no request beans");
+        assert!(
+            !RequestScope::new(&app).has::<u64>(),
+            "a fresh scope has no request beans"
+        );
     }
 
     #[test]

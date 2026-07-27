@@ -39,7 +39,9 @@ impl RedisBanStore {
     /// A store talking to Redis at `addr`.
     #[must_use]
     pub fn new(addr: SocketAddr) -> Self {
-        Self { pool: Pool::new(addr) }
+        Self {
+            pool: Pool::new(addr),
+        }
     }
 
     /// Use a pre-configured [`Pool`] (e.g. one carrying `AUTH` credentials).
@@ -117,12 +119,14 @@ impl RedisBanStore {
 
     /// Persist a User-Agent-contains ban (stored lowercased, matching the in-memory rule).
     pub async fn ban_user_agent_containing(&self, phrase: &str) -> Result<(), StoreError> {
-        self.add(KEY_UA_CONTAINS, &phrase.to_ascii_lowercase()).await
+        self.add(KEY_UA_CONTAINS, &phrase.to_ascii_lowercase())
+            .await
     }
 
     /// Persist a User-Agent-contains unban.
     pub async fn unban_user_agent_containing(&self, phrase: &str) -> Result<(), StoreError> {
-        self.remove(KEY_UA_CONTAINS, &phrase.to_ascii_lowercase()).await
+        self.remove(KEY_UA_CONTAINS, &phrase.to_ascii_lowercase())
+            .await
     }
 }
 
@@ -147,7 +151,10 @@ impl PersistentBans {
     /// Load the persisted bans into memory and return a handle over both.
     pub async fn restore(store: RedisBanStore) -> Result<Self, StoreError> {
         let list = store.load().await?;
-        Ok(Self { bans: Bans::with(list), store: Arc::new(store) })
+        Ok(Self {
+            bans: Bans::with(list),
+            store: Arc::new(store),
+        })
     }
 
     /// The in-memory list to hand to `BanFilter` for the per-request check.

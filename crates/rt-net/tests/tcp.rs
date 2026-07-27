@@ -95,7 +95,10 @@ fn connect_to_a_closed_port_reports_the_error() {
     let result = ex
         .block_on(async move { AsyncTcpStream::connect(addr).await })
         .unwrap();
-    assert!(result.is_err(), "connect to a closed port must fail, not hang");
+    assert!(
+        result.is_err(),
+        "connect to a closed port must fail, not hang"
+    );
 }
 
 #[test]

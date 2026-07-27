@@ -47,13 +47,19 @@ impl RedisSessionStore {
     /// backstop — set it to at least the maximum session lifetime).
     #[must_use]
     pub fn new(addr: SocketAddr, ttl: Duration) -> Self {
-        Self { pool: Pool::new(addr), ttl_secs: ttl.as_secs() }
+        Self {
+            pool: Pool::new(addr),
+            ttl_secs: ttl.as_secs(),
+        }
     }
 
     /// Use a pre-configured [`Pool`] (e.g. one carrying `AUTH` credentials).
     #[must_use]
     pub fn from_pool(pool: Pool, ttl: Duration) -> Self {
-        Self { pool, ttl_secs: ttl.as_secs() }
+        Self {
+            pool,
+            ttl_secs: ttl.as_secs(),
+        }
     }
 }
 
@@ -95,7 +101,11 @@ impl SessionStore for RedisSessionStore {
     fn get(&self, sid: &str) -> BoxFuture<'_, Result<Option<SessionRecord>, StoreError>> {
         let sk = sess_key(sid);
         Box::pin(async move {
-            let bytes = self.pool.with(async |c| c.get(&sk).await).await.map_err(to_store)?;
+            let bytes = self
+                .pool
+                .with(async |c| c.get(&sk).await)
+                .await
+                .map_err(to_store)?;
             Ok(bytes.and_then(|b| decode_record(&b)))
         })
     }
@@ -126,7 +136,11 @@ impl SessionStore for RedisSessionStore {
             self.pool
                 .with(async |c| {
                     // Find the owning user first, to clean its index.
-                    let user = c.get(&sk).await?.and_then(|b| decode_record(&b)).map(|r| r.user);
+                    let user = c
+                        .get(&sk)
+                        .await?
+                        .and_then(|b| decode_record(&b))
+                        .map(|r| r.user);
                     c.del(&[sk.as_str()]).await?;
                     if let Some(user) = user {
                         c.srem(&user_key(&user), &sid).await?;
@@ -156,7 +170,10 @@ impl SessionStore for RedisSessionStore {
         })
     }
 
-    fn sessions_of(&self, user: &str) -> BoxFuture<'_, Result<Vec<(String, SessionRecord)>, StoreError>> {
+    fn sessions_of(
+        &self,
+        user: &str,
+    ) -> BoxFuture<'_, Result<Vec<(String, SessionRecord)>, StoreError>> {
         let uk = user_key(user);
         Box::pin(async move {
             self.pool
@@ -178,7 +195,11 @@ impl SessionStore for RedisSessionStore {
 
     fn len(&self) -> BoxFuture<'_, Result<usize, StoreError>> {
         Box::pin(async move {
-            let n = self.pool.with(async |c| c.scard(INDEX_KEY).await).await.map_err(to_store)?;
+            let n = self
+                .pool
+                .with(async |c| c.scard(INDEX_KEY).await)
+                .await
+                .map_err(to_store)?;
             Ok(n.max(0) as usize)
         })
     }
@@ -210,7 +231,12 @@ fn decode_record(b: &[u8]) -> Option<SessionRecord> {
     let created = take_u64(b, &mut pos)?;
     let last_seen = take_u64(b, &mut pos)?;
     let meta = take_str(b, &mut pos)?;
-    Some(SessionRecord { user, created, last_seen, meta })
+    Some(SessionRecord {
+        user,
+        created,
+        last_seen,
+        meta,
+    })
 }
 
 fn take_str(b: &[u8], pos: &mut usize) -> Option<String> {
@@ -256,7 +282,12 @@ mod tests {
 
     #[test]
     fn empty_strings_round_trip() {
-        let record = SessionRecord { user: String::new(), created: 0, last_seen: 0, meta: String::new() };
+        let record = SessionRecord {
+            user: String::new(),
+            created: 0,
+            last_seen: 0,
+            meta: String::new(),
+        };
         let decoded = decode_record(&encode_record(&record)).unwrap();
         assert_eq!(decoded.user, "");
         assert_eq!(decoded.meta, "");
@@ -272,7 +303,10 @@ mod tests {
         });
         // Every prefix shorter than the whole must fail cleanly.
         for cut in 0..bytes.len() {
-            assert!(decode_record(&bytes[..cut]).is_none(), "prefix len {cut} must not decode");
+            assert!(
+                decode_record(&bytes[..cut]).is_none(),
+                "prefix len {cut} must not decode"
+            );
         }
         assert!(decode_record(&bytes).is_some());
     }

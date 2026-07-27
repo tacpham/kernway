@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
-    pub id:   u64,
+    pub id: u64,
     pub name: String,
 }
 
@@ -33,29 +33,44 @@ pub struct CreateUser {
 
 #[derive(Component)]
 pub struct UserService {
-    users:   Mutex<Vec<User>>,
+    users: Mutex<Vec<User>>,
     counter: Mutex<u64>,
 }
 
 impl Default for UserService {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl UserService {
     pub fn new() -> Self {
         Self {
             users: Mutex::new(vec![
-                User { id: 1, name: "Alice".into() },
-                User { id: 2, name: "Bob".into() },
+                User {
+                    id: 1,
+                    name: "Alice".into(),
+                },
+                User {
+                    id: 2,
+                    name: "Bob".into(),
+                },
             ]),
             counter: Mutex::new(2),
         }
     }
 
-    pub fn list(&self) -> Vec<User> { self.users.lock().unwrap().clone() }
+    pub fn list(&self) -> Vec<User> {
+        self.users.lock().unwrap().clone()
+    }
 
     pub fn get(&self, id: u64) -> Option<User> {
-        self.users.lock().unwrap().iter().find(|u| u.id == id).cloned()
+        self.users
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|u| u.id == id)
+            .cloned()
     }
 
     pub fn create(&self, name: String) -> User {
@@ -76,39 +91,53 @@ impl UserService {
 
 fn main() {
     let mut ctx = AppContext::new();
-    ctx.register_instance::<UserService>(Arc::new(UserService::new())).unwrap();
+    ctx.register_instance::<UserService>(Arc::new(UserService::new()))
+        .unwrap();
 
     let mut openapi = OpenApiRegistry::new("Kernway User API", "0.6.0")
         .description("Demo API with OpenAPI 3.0, SSE, and Multipart support");
 
     openapi.add_route(
-        RouteDoc::new("List all users").tag("users").response_json(200, "User list", "#/components/schemas/User"),
-        "GET", "/users",
+        RouteDoc::new("List all users").tag("users").response_json(
+            200,
+            "User list",
+            "#/components/schemas/User",
+        ),
+        "GET",
+        "/users",
     );
     openapi.add_route(
-        RouteDoc::new("Get user by ID").tag("users")
+        RouteDoc::new("Get user by ID")
+            .tag("users")
             .path_param("id", "User ID", "integer")
             .response_json(200, "User found", "#/components/schemas/User")
             .response(404, "User not found"),
-        "GET", "/users/{id}",
+        "GET",
+        "/users/{id}",
     );
     openapi.add_route(
-        RouteDoc::new("Create user").tag("users")
+        RouteDoc::new("Create user")
+            .tag("users")
             .body_json("User to create", "#/components/schemas/CreateUser")
             .response_json(201, "User created", "#/components/schemas/User"),
-        "POST", "/users",
+        "POST",
+        "/users",
     );
     openapi.add_route(
-        RouteDoc::new("Delete user").tag("users")
+        RouteDoc::new("Delete user")
+            .tag("users")
             .path_param("id", "User ID", "integer")
             .response(204, "Deleted")
             .response(404, "Not found"),
-        "DELETE", "/users/{id}",
+        "DELETE",
+        "/users/{id}",
     );
     openapi.add_route(
-        RouteDoc::new("Server-Sent Events stream").tag("events")
+        RouteDoc::new("Server-Sent Events stream")
+            .tag("events")
             .response(200, "SSE stream — text/event-stream"),
-        "GET", "/events",
+        "GET",
+        "/events",
     );
 
     let openapi_json = Arc::new(openapi.to_json());

@@ -18,7 +18,10 @@ fn policy(n: usize) -> SecurityLayer {
     for i in 0..n {
         builder = builder.has_role(&format!("/resource{i}/**"), "ADMIN");
     }
-    builder.permit_all("/public/**").any_request(Access::Authenticated).build()
+    builder
+        .permit_all("/public/**")
+        .any_request(Access::Authenticated)
+        .build()
 }
 
 fn security(c: &mut Criterion) {

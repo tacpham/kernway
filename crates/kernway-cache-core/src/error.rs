@@ -41,7 +41,10 @@ mod tests {
 
     #[test]
     fn cache_error_display_key_too_large() {
-        let e = CacheError::KeyTooLarge { max: 256, actual: 512 };
+        let e = CacheError::KeyTooLarge {
+            max: 256,
+            actual: 512,
+        };
         assert!(e.to_string().contains("256"));
         assert!(e.to_string().contains("512"));
     }

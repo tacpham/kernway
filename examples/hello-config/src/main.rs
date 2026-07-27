@@ -33,7 +33,10 @@ struct ServerConfig {
 /// parser by assembling its `default,module=level,…` spec — no coupling between the
 /// two crates, just a few lines at the app layer.
 fn log_filter(config: &Config) -> Filter {
-    let mut spec = config.get_str("logging.level").unwrap_or("info").to_string();
+    let mut spec = config
+        .get_str("logging.level")
+        .unwrap_or("info")
+        .to_string();
     for (module, level) in config.with_prefix("logging.level.") {
         spec.push(',');
         spec.push_str(module);
@@ -57,9 +60,15 @@ fn main() {
 
     println!("--- resolved config ---");
     println!("typed ServerConfig -> bind {}:{}", server.host, server.port);
-    println!("server.host = {}", config.get_str("server.host").unwrap_or("?"));
+    println!(
+        "server.host = {}",
+        config.get_str("server.host").unwrap_or("?")
+    );
     println!("server.port = {}", config.get_or("server.port", 0u16));
-    println!("logging.level (default) = {}", config.get_str("logging.level").unwrap_or("info"));
+    println!(
+        "logging.level (default) = {}",
+        config.get_str("logging.level").unwrap_or("info")
+    );
     for (module, level) in config.with_prefix("logging.level.") {
         println!("logging.level.{module} = {level}");
     }

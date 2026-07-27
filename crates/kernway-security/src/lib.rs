@@ -25,8 +25,8 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 
 pub mod hash;
-pub mod token;
 pub mod session;
+pub mod token;
 
 /// Request tracking — visitor id, client IP (proxy-aware), User-Agent, and a ban
 /// list (IP / subnet / User-Agent).
@@ -44,28 +44,28 @@ pub use lockout::LoginGuard;
 /// JSON Web Tokens (RFC 7519), HS256 — a stateless bearer token (feature = `jwt`).
 #[cfg(feature = "jwt")]
 pub mod jwt;
-#[cfg(feature = "jwt")]
-pub use jwt::{Claims, Jwt, JwtError, Validation};
 #[cfg(feature = "jwks")]
 pub use jwt::Jwks;
+#[cfg(feature = "jwt")]
+pub use jwt::{Claims, Jwt, JwtError, Validation};
 
 /// Presence / heartbeat — who is online now, distinct from who has a session
 /// (feature = `presence`).
 #[cfg(feature = "presence")]
 pub mod presence;
-#[cfg(feature = "presence")]
-pub use presence::{InMemoryPresence, Presence};
 #[cfg(all(feature = "presence", feature = "redis"))]
 pub use presence::RedisPresence;
+#[cfg(feature = "presence")]
+pub use presence::{InMemoryPresence, Presence};
 
 /// Activity — who is here right now and on what page, recorded per request (the live
 /// "who's on the site" view). Same feature as presence.
 #[cfg(feature = "presence")]
 pub mod activity;
-#[cfg(feature = "presence")]
-pub use activity::{ActiveVisitor, Activity, InMemoryActivity};
 #[cfg(all(feature = "presence", feature = "redis"))]
 pub use activity::RedisActivity;
+#[cfg(feature = "presence")]
+pub use activity::{ActiveVisitor, Activity, InMemoryActivity};
 
 /// Redis-backed [`SessionStore`](session::SessionStore) — the distributed backend
 /// (feature = `redis`).
@@ -267,7 +267,10 @@ pub mod csrf {
         /// `Secure` when `secure` (i.e. served over HTTPS).
         pub fn set_cookie(&self, secure: bool) -> String {
             let secure = if secure { "; Secure" } else { "" };
-            format!("{COOKIE}={}; Path=/; HttpOnly; SameSite=Lax{secure}", self.0)
+            format!(
+                "{COOKIE}={}; Path=/; HttpOnly; SameSite=Lax{secure}",
+                self.0
+            )
         }
     }
 
@@ -307,7 +310,9 @@ pub mod csrf {
     pub fn verify_request(req: &Request) -> bool {
         let expected = req.header("cookie").and_then(token_from_cookie);
         let submitted = req.header(HEADER).map(str::to_string).or_else(|| {
-            std::str::from_utf8(&req.body).ok().and_then(|b| form_field(b, FIELD))
+            std::str::from_utf8(&req.body)
+                .ok()
+                .and_then(|b| form_field(b, FIELD))
         });
         match (submitted, expected) {
             (Some(s), Some(e)) => verify(&s, e),
@@ -473,7 +478,10 @@ mod tests {
         let t = csrf::CsrfToken::generate();
         assert!(csrf::verify(t.as_str(), t.as_str()));
         assert!(!csrf::verify(t.as_str(), "wrong"));
-        assert!(!csrf::verify("short", t.as_str()), "different length is not equal");
+        assert!(
+            !csrf::verify("short", t.as_str()),
+            "different length is not equal"
+        );
     }
 
     #[test]
@@ -493,7 +501,10 @@ mod tests {
 
     #[test]
     fn form_field_is_url_decoded() {
-        assert_eq!(csrf::form_field("a=1&_csrf=ab%20cd&b=2", "_csrf"), Some("ab cd".to_string()));
+        assert_eq!(
+            csrf::form_field("a=1&_csrf=ab%20cd&b=2", "_csrf"),
+            Some("ab cd".to_string())
+        );
         assert_eq!(csrf::form_field("a=1", "_csrf"), None);
     }
 

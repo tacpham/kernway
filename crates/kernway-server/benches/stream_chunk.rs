@@ -22,7 +22,11 @@ const KIB: usize = 1024;
 const MIB: usize = 1024 * 1024;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 /// Download `/big.bin` once, returning (bytes_of_body, elapsed_seconds).
@@ -39,7 +43,8 @@ fn download(port: u16) -> (usize, f64) {
         }
         s.expect("server never came up")
     };
-    sock.write_all(b"GET /big.bin HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+    sock.write_all(b"GET /big.bin HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .unwrap();
 
     let start = Instant::now();
     let mut buf = vec![0u8; 256 * KIB];
@@ -56,8 +61,14 @@ fn download(port: u16) -> (usize, f64) {
 }
 
 fn main() {
-    let mb: usize = std::env::var("KERNWAY_BENCH_MB").ok().and_then(|s| s.parse().ok()).unwrap_or(128);
-    let reps: usize = std::env::var("KERNWAY_BENCH_REPS").ok().and_then(|s| s.parse().ok()).unwrap_or(5);
+    let mb: usize = std::env::var("KERNWAY_BENCH_MB")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(128);
+    let reps: usize = std::env::var("KERNWAY_BENCH_REPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
     let file_bytes = mb * MIB;
 
     // One temp file, reused across every chunk size.
@@ -74,8 +85,17 @@ fn main() {
         f.flush().unwrap();
     }
 
-    let chunk_sizes =
-        [64 * KIB, 128 * KIB, 256 * KIB, 512 * KIB, MIB, 2 * MIB, 4 * MIB, 8 * MIB, 16 * MIB];
+    let chunk_sizes = [
+        64 * KIB,
+        128 * KIB,
+        256 * KIB,
+        512 * KIB,
+        MIB,
+        2 * MIB,
+        4 * MIB,
+        8 * MIB,
+        16 * MIB,
+    ];
 
     println!("\nStreaming {mb} MiB over loopback, {reps} reps each, best of.\n");
     println!("{:>10}   {:>10}   {:>10}", "chunk", "best MB/s", "GiB/s");
@@ -105,8 +125,17 @@ fn main() {
         stop.trigger();
         let _ = server.join().unwrap();
 
-        let label = if cs >= MIB { format!("{} MiB", cs / MIB) } else { format!("{} KiB", cs / KIB) };
-        println!("{:>10}   {:>10.0}   {:>10.2}", label, best_mbps, best_mbps / 1024.0);
+        let label = if cs >= MIB {
+            format!("{} MiB", cs / MIB)
+        } else {
+            format!("{} KiB", cs / KIB)
+        };
+        println!(
+            "{:>10}   {:>10.0}   {:>10.2}",
+            label,
+            best_mbps,
+            best_mbps / 1024.0
+        );
     }
 
     std::fs::remove_dir_all(&dir).ok();

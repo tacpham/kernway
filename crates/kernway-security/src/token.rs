@@ -61,7 +61,11 @@ const SEP: char = '\u{1f}';
 
 fn encode_claims(c: &Claims) -> Vec<u8> {
     let roles = c.roles.join(",");
-    format!("{}{SEP}{}{SEP}{}{SEP}{}{SEP}{}", c.sid, c.user, roles, c.version, c.exp).into_bytes()
+    format!(
+        "{}{SEP}{}{SEP}{}{SEP}{}{SEP}{}",
+        c.sid, c.user, roles, c.version, c.exp
+    )
+    .into_bytes()
 }
 
 fn decode_claims(bytes: &[u8]) -> Option<Claims> {
@@ -80,7 +84,13 @@ fn decode_claims(bytes: &[u8]) -> Option<Claims> {
     } else {
         roles_s.split(',').map(String::from).collect()
     };
-    Some(Claims { sid, user, roles, version, exp })
+    Some(Claims {
+        sid,
+        user,
+        roles,
+        version,
+        exp,
+    })
 }
 
 // --- base64url (no padding) — shared with the password hasher and JWT ---
@@ -150,7 +160,11 @@ mod tests {
     fn base64url_round_trips_arbitrary_bytes() {
         for len in 0..20 {
             let data: Vec<u8> = (0..len).map(|i| (i * 37 + 11) as u8).collect();
-            assert_eq!(b64url_decode(&b64url_encode(&data)).unwrap(), data, "len {len}");
+            assert_eq!(
+                b64url_decode(&b64url_encode(&data)).unwrap(),
+                data,
+                "len {len}"
+            );
         }
     }
 
@@ -177,7 +191,11 @@ mod tests {
         let a = TokenCodec::new("key-a");
         let b = TokenCodec::new("key-b");
         let token = a.sign(&claims());
-        assert_eq!(b.verify(&token), None, "a token signed with a different key must not verify");
+        assert_eq!(
+            b.verify(&token),
+            None,
+            "a token signed with a different key must not verify"
+        );
     }
 
     #[test]

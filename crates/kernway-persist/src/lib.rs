@@ -178,15 +178,31 @@ impl Persister {
         let records = read_wal(&dir.join("wal"))?;
 
         // The append handle the writer thread owns from here on.
-        let wal = OpenOptions::new().create(true).read(true).append(true).open(dir.join("wal"))?;
-        let writer = Writer { dir: dir.clone(), wal, fsync, last_sync: Instant::now(), dirty: false };
+        let wal = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(dir.join("wal"))?;
+        let writer = Writer {
+            dir: dir.clone(),
+            wal,
+            fsync,
+            last_sync: Instant::now(),
+            dirty: false,
+        };
 
         let (tx, rx) = mpsc::channel();
         let handle = std::thread::Builder::new()
             .name("kernway-persist".into())
             .spawn(move || writer.run(&rx))?;
 
-        Ok((Persister { tx: Mutex::new(tx), handle: Some(handle) }, Loaded { snapshot, records }))
+        Ok((
+            Persister {
+                tx: Mutex::new(tx),
+                handle: Some(handle),
+            },
+            Loaded { snapshot, records },
+        ))
     }
 
     /// Append one record. Under [`Fsync::EveryWrite`] the returned future resolves
@@ -256,8 +272,8 @@ impl Writer {
     }
 
     fn append(&mut self, record: &[u8]) -> Result<(), PersistError> {
-        let len = u32::try_from(record.len())
-            .map_err(|_| PersistError("record exceeds 4 GiB".into()))?;
+        let len =
+            u32::try_from(record.len()).map_err(|_| PersistError("record exceeds 4 GiB".into()))?;
         self.wal.write_all(&len.to_le_bytes())?;
         self.wal.write_all(record)?;
         self.dirty = true;
@@ -359,7 +375,10 @@ mod tests {
         let dir = temp_dir("replay");
         {
             let (p, loaded) = Persister::open(&dir, Fsync::EveryWrite).unwrap();
-            assert!(loaded.snapshot.is_none() && loaded.records.is_empty(), "empty to start");
+            assert!(
+                loaded.snapshot.is_none() && loaded.records.is_empty(),
+                "empty to start"
+            );
             block_on(p.append(b"one".to_vec())).unwrap();
             block_on(p.append(b"two".to_vec())).unwrap();
             block_on(p.append(b"three".to_vec())).unwrap();
@@ -367,7 +386,10 @@ mod tests {
 
         let (_p, loaded) = Persister::open(&dir, Fsync::EveryWrite).unwrap();
         assert!(loaded.snapshot.is_none());
-        assert_eq!(loaded.records, vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]);
+        assert_eq!(
+            loaded.records,
+            vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -385,7 +407,11 @@ mod tests {
 
         let (_p, loaded) = Persister::open(&dir, Fsync::EveryWrite).unwrap();
         assert_eq!(loaded.snapshot.as_deref(), Some(b"STATE={a,b}".as_slice()));
-        assert_eq!(loaded.records, vec![b"c".to_vec()], "only the post-checkpoint record remains");
+        assert_eq!(
+            loaded.records,
+            vec![b"c".to_vec()],
+            "only the post-checkpoint record remains"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -402,7 +428,11 @@ mod tests {
         std::fs::write(dir.join("wal"), &bytes).unwrap();
 
         let (_p, loaded) = Persister::open(&dir, Fsync::EveryWrite).unwrap();
-        assert_eq!(loaded.records, vec![b"ok!".to_vec()], "the torn final record is dropped");
+        assert_eq!(
+            loaded.records,
+            vec![b"ok!".to_vec()],
+            "the torn final record is dropped"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

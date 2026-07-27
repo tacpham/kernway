@@ -26,7 +26,11 @@ fn block<T>(fut: impl Future<Output = T>) -> T {
 }
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn connect(port: u16) -> TcpStream {
@@ -42,7 +46,9 @@ fn connect(port: u16) -> TcpStream {
 /// GET `path`, optionally sending a Cookie header, and return the raw response.
 fn get(port: u16, path: &str, cookie: Option<&str>) -> String {
     let mut stream = connect(port);
-    let cookie_line = cookie.map(|c| format!("Cookie: {c}\r\n")).unwrap_or_default();
+    let cookie_line = cookie
+        .map(|c| format!("Cookie: {c}\r\n"))
+        .unwrap_or_default();
     let raw = format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n{cookie_line}\r\n");
     stream.write_all(raw.as_bytes()).unwrap();
     let mut got = String::new();
@@ -62,7 +68,10 @@ fn visitor_cookie(response: &str) -> String {
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 #[test]
@@ -81,9 +90,19 @@ fn one_visitor_navigating_two_pages_is_one_active_row_on_the_latest_page() {
 
     // The shared store (also held by the middleware) shows one visitor, on /reports.
     let live = block(activity.active(now())).unwrap();
-    assert_eq!(live.len(), 1, "same cookie ⇒ one identity, not two: {live:?}");
-    assert_eq!(live[0].path, "/reports", "we see the latest page they are on");
-    assert!(!live[0].authenticated, "an anonymous visitor (tracked by visitor id)");
+    assert_eq!(
+        live.len(),
+        1,
+        "same cookie ⇒ one identity, not two: {live:?}"
+    );
+    assert_eq!(
+        live[0].path, "/reports",
+        "we see the latest page they are on"
+    );
+    assert!(
+        !live[0].authenticated,
+        "an anonymous visitor (tracked by visitor id)"
+    );
 
     stop.trigger();
     server.join().unwrap().unwrap();

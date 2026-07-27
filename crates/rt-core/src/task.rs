@@ -265,7 +265,10 @@ mod tests {
         let shared = shared();
         waker_for(MAIN_TASK, Arc::clone(&shared)).wake();
         assert!(drained(&shared).is_empty(), "MAIN_TASK has no slab slot");
-        assert!(shared.take_main_woken(), "the wake must still be observable");
+        assert!(
+            shared.take_main_woken(),
+            "the wake must still be observable"
+        );
         assert!(!shared.take_main_woken(), "and it is consumed exactly once");
     }
 
@@ -291,7 +294,10 @@ mod tests {
             0,
             shared,
         );
-        assert!(task.poll(), "an immediately-ready future completes on poll 1");
+        assert!(
+            task.poll(),
+            "an immediately-ready future completes on poll 1"
+        );
         assert!(task.poll(), "a finished task stays finished");
         assert_eq!(polls.load(Ordering::SeqCst), 1, "future must not run twice");
     }

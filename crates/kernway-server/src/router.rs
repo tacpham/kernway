@@ -31,7 +31,8 @@ use kernway_core::{request::Request, response::Response};
 ///
 /// [KEP-0005]: https://github.com/tacpham/kernway/blob/main/docs/kep/0005-request-scoped-beans.md
 /// [KEP-0006]: https://github.com/tacpham/kernway/blob/main/docs/kep/0006-async-handlers.md
-pub type Handler = Arc<dyn Fn(Request, &RequestScope) -> BoxFuture<'static, Response> + Send + Sync>;
+pub type Handler =
+    Arc<dyn Fn(Request, &RequestScope) -> BoxFuture<'static, Response> + Send + Sync>;
 
 /// Turn a handler closure into a boxed [`Handler`].
 ///
@@ -72,7 +73,11 @@ impl Hasher for FnvHasher {
     }
     fn write(&mut self, bytes: &[u8]) {
         // The offset basis; folded in lazily so `Default` can stay derived at 0.
-        let mut h = if self.0 == 0 { 0xcbf2_9ce4_8422_2325 } else { self.0 };
+        let mut h = if self.0 == 0 {
+            0xcbf2_9ce4_8422_2325
+        } else {
+            self.0
+        };
         for &b in bytes {
             h ^= u64::from(b);
             h = h.wrapping_mul(0x0000_0100_0000_01b3);
@@ -123,7 +128,9 @@ pub struct Router {
 impl Router {
     /// Create an empty router.
     pub fn new() -> Self {
-        Self { root: Node::default() }
+        Self {
+            root: Node::default(),
+        }
     }
 
     /// Add a route.
@@ -139,7 +146,10 @@ impl Router {
                     // Descend into (or create) the parameter child, keeping the
                     // first name registered at this position.
                     let child = node.param.get_or_insert_with(|| {
-                        Box::new(ParamChild { name: name.to_string(), node: Node::default() })
+                        Box::new(ParamChild {
+                            name: name.to_string(),
+                            node: Node::default(),
+                        })
                     });
                     &mut child.node
                 }
@@ -245,11 +255,16 @@ mod tests {
         let mut router = Router::new();
         for (method, pattern, label) in routes {
             let label = *label;
-            router.add(method, pattern, Arc::new(move |_req: Request, _scope: &RequestScope| {
-                Box::pin(async move {
-                    Response::new(kernway_core::error::StatusCode::OK).body(label.as_bytes().to_vec())
-                }) as BoxFuture<'static, Response>
-            }));
+            router.add(
+                method,
+                pattern,
+                Arc::new(move |_req: Request, _scope: &RequestScope| {
+                    Box::pin(async move {
+                        Response::new(kernway_core::error::StatusCode::OK)
+                            .body(label.as_bytes().to_vec())
+                    }) as BoxFuture<'static, Response>
+                }),
+            );
         }
         router
     }
@@ -261,7 +276,10 @@ mod tests {
         let scope = RequestScope::new(&app);
         let fut = handler(Request::new(method, path), &scope);
         let resp = rt_core::Executor::new().unwrap().block_on(fut).unwrap();
-        Some((String::from_utf8(resp.body_bytes().to_vec()).unwrap(), params))
+        Some((
+            String::from_utf8(resp.body_bytes().to_vec()).unwrap(),
+            params,
+        ))
     }
 
     #[test]
@@ -350,19 +368,13 @@ mod tests {
 
     #[test]
     fn among_dynamic_routes_the_first_registered_still_wins() {
-        let router = labelled(&[
-            ("GET", "/a/{x}", "first"),
-            ("GET", "/a/{y}", "second"),
-        ]);
+        let router = labelled(&[("GET", "/a/{x}", "first"), ("GET", "/a/{y}", "second")]);
         assert_eq!(hit(&router, "GET", "/a/1").unwrap().0, "first");
     }
 
     #[test]
     fn among_identical_static_routes_the_first_registered_still_wins() {
-        let router = labelled(&[
-            ("GET", "/dup", "first"),
-            ("GET", "/dup", "second"),
-        ]);
+        let router = labelled(&[("GET", "/dup", "first"), ("GET", "/dup", "second")]);
         assert_eq!(hit(&router, "GET", "/dup").unwrap().0, "first");
     }
 
@@ -398,10 +410,14 @@ mod tests {
     #[test]
     fn find_returns_none_for_unregistered() {
         let mut router = Router::new();
-        router.add("GET", "/ping", Arc::new(|_req: Request, _scope: &RequestScope| {
-            Box::pin(async { Response::new(kernway_core::error::StatusCode::OK) })
-                as BoxFuture<'static, Response>
-        }));
+        router.add(
+            "GET",
+            "/ping",
+            Arc::new(|_req: Request, _scope: &RequestScope| {
+                Box::pin(async { Response::new(kernway_core::error::StatusCode::OK) })
+                    as BoxFuture<'static, Response>
+            }),
+        );
         assert!(router.find("GET", "/ping").is_some());
         assert!(router.find("POST", "/ping").is_none());
         assert!(router.find("GET", "/other").is_none());

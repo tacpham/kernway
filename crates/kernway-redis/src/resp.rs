@@ -65,7 +65,9 @@ pub fn encode(args: &[&[u8]], out: &mut Vec<u8>) {
 /// - `Err(RedisError::Server)` — the reply was a `-` error.
 /// - `Err(RedisError::Protocol)` — the bytes are not valid RESP.
 pub fn parse(b: &[u8]) -> Result<Option<(Value, usize)>, RedisError> {
-    let Some(crlf) = find_crlf(b) else { return Ok(None) };
+    let Some(crlf) = find_crlf(b) else {
+        return Ok(None);
+    };
     let line = &b[1..crlf]; // content between the type byte and the CRLF
     let after = crlf + 2; // index just past the CRLF
 
@@ -138,16 +140,25 @@ mod tests {
 
     #[test]
     fn parses_each_reply_type() {
-        assert_eq!(parse(b"+OK\r\n").unwrap(), Some((Value::Simple("OK".into()), 5)));
+        assert_eq!(
+            parse(b"+OK\r\n").unwrap(),
+            Some((Value::Simple("OK".into()), 5))
+        );
         assert_eq!(parse(b":42\r\n").unwrap(), Some((Value::Int(42), 5)));
-        assert_eq!(parse(b"$3\r\nfoo\r\n").unwrap(), Some((Value::Bulk(b"foo".to_vec()), 9)));
+        assert_eq!(
+            parse(b"$3\r\nfoo\r\n").unwrap(),
+            Some((Value::Bulk(b"foo".to_vec()), 9))
+        );
         assert_eq!(parse(b"$-1\r\n").unwrap(), Some((Value::Nil, 5)));
     }
 
     #[test]
     fn parses_a_nested_array() {
         let (value, used) = parse(b"*2\r\n$3\r\nfoo\r\n:7\r\n").unwrap().unwrap();
-        assert_eq!(value, Value::Array(vec![Value::Bulk(b"foo".to_vec()), Value::Int(7)]));
+        assert_eq!(
+            value,
+            Value::Array(vec![Value::Bulk(b"foo".to_vec()), Value::Int(7)])
+        );
         assert_eq!(used, 17);
     }
 

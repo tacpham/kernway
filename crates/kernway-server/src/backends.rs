@@ -173,9 +173,15 @@ impl BanBackend {
                 Ok(())
             }
             #[cfg(feature = "persist")]
-            Self::File(store) => store.ban_user_agent_containing(phrase).await.map_err(BackendError::from),
+            Self::File(store) => store
+                .ban_user_agent_containing(phrase)
+                .await
+                .map_err(BackendError::from),
             #[cfg(feature = "redis")]
-            Self::Redis(store) => store.ban_user_agent_containing(phrase).await.map_err(BackendError::from),
+            Self::Redis(store) => store
+                .ban_user_agent_containing(phrase)
+                .await
+                .map_err(BackendError::from),
         }
     }
 
@@ -187,9 +193,15 @@ impl BanBackend {
                 Ok(())
             }
             #[cfg(feature = "persist")]
-            Self::File(store) => store.unban_user_agent_containing(phrase).await.map_err(BackendError::from),
+            Self::File(store) => store
+                .unban_user_agent_containing(phrase)
+                .await
+                .map_err(BackendError::from),
             #[cfg(feature = "redis")]
-            Self::Redis(store) => store.unban_user_agent_containing(phrase).await.map_err(BackendError::from),
+            Self::Redis(store) => store
+                .unban_user_agent_containing(phrase)
+                .await
+                .map_err(BackendError::from),
         }
     }
 }
@@ -206,8 +218,12 @@ pub fn session_store_from_config(config: &Config) -> io::Result<Box<dyn SessionS
         )?)),
         #[cfg(feature = "redis")]
         "redis" => {
-            let ttl = std::time::Duration::from_secs(config.get_or("kernway.session.ttl-secs", 3600u64));
-            Ok(Box::new(kernway_security::RedisSessionStore::new(redis_address(config)?, ttl)))
+            let ttl =
+                std::time::Duration::from_secs(config.get_or("kernway.session.ttl-secs", 3600u64));
+            Ok(Box::new(kernway_security::RedisSessionStore::new(
+                redis_address(config)?,
+                ttl,
+            )))
         }
         other => Err(unavailable("kernway.session.store", other)),
     }
@@ -217,18 +233,28 @@ pub fn session_store_from_config(config: &Config) -> io::Result<Box<dyn SessionS
 /// `kernway.activity.store` (default `memory`). The window is
 /// `kernway.activity.window-secs` (default 300).
 #[cfg(feature = "presence")]
-pub fn activity_from_config(config: &Config) -> io::Result<std::sync::Arc<dyn kernway_security::Activity>> {
-    let window = std::time::Duration::from_secs(config.get_or("kernway.activity.window-secs", 300u64));
+pub fn activity_from_config(
+    config: &Config,
+) -> io::Result<std::sync::Arc<dyn kernway_security::Activity>> {
+    let window =
+        std::time::Duration::from_secs(config.get_or("kernway.activity.window-secs", 300u64));
     match config.get_str("kernway.activity.store").unwrap_or("memory") {
-        "memory" => Ok(std::sync::Arc::new(kernway_security::InMemoryActivity::new(window))),
+        "memory" => Ok(std::sync::Arc::new(
+            kernway_security::InMemoryActivity::new(window),
+        )),
         #[cfg(feature = "persist")]
-        "file" => Ok(std::sync::Arc::new(kernway_security::FileBackedActivity::open(
-            persist_path(config, "activity"),
-            window,
-            fsync_policy(config),
-        )?)),
+        "file" => Ok(std::sync::Arc::new(
+            kernway_security::FileBackedActivity::open(
+                persist_path(config, "activity"),
+                window,
+                fsync_policy(config),
+            )?,
+        )),
         #[cfg(feature = "redis")]
-        "redis" => Ok(std::sync::Arc::new(kernway_security::RedisActivity::new(redis_address(config)?, window))),
+        "redis" => Ok(std::sync::Arc::new(kernway_security::RedisActivity::new(
+            redis_address(config)?,
+            window,
+        ))),
         other => Err(unavailable("kernway.activity.store", other)),
     }
 }
@@ -252,7 +278,10 @@ fn persist_path(config: &Config, store: &str) -> std::path::PathBuf {
 /// The `fsync` policy from `kernway.persist.fsync` (default `every-write`).
 #[cfg(feature = "persist")]
 fn fsync_policy(config: &Config) -> kernway_security::Fsync {
-    match config.get_str("kernway.persist.fsync").unwrap_or("every-write") {
+    match config
+        .get_str("kernway.persist.fsync")
+        .unwrap_or("every-write")
+    {
         "batched" => {
             let ms = config.get_or("kernway.persist.fsync-interval-ms", 1000u64);
             kernway_security::Fsync::Batched(std::time::Duration::from_millis(ms))
@@ -278,13 +307,18 @@ mod tests {
 
     /// A config built from inline `key=value` lines (the properties the loader parses).
     fn config(props: &str) -> Config {
-        kernway_config::ConfigBuilder::default().parse(props).build()
+        kernway_config::ConfigBuilder::default()
+            .parse(props)
+            .build()
     }
 
     #[test]
     fn defaults_to_pure_in_memory() {
         let c = config("");
-        assert!(matches!(BanBackend::from_config(&c).unwrap(), BanBackend::Memory(_)));
+        assert!(matches!(
+            BanBackend::from_config(&c).unwrap(),
+            BanBackend::Memory(_)
+        ));
         // The Box<dyn> ones just need to build; memory is the default.
         assert!(session_store_from_config(&c).is_ok());
     }
@@ -292,7 +326,10 @@ mod tests {
     #[test]
     fn an_explicit_memory_choice_is_honoured() {
         let c = config("kernway.bans.store=memory\nkernway.session.store=memory");
-        assert!(matches!(BanBackend::from_config(&c).unwrap(), BanBackend::Memory(_)));
+        assert!(matches!(
+            BanBackend::from_config(&c).unwrap(),
+            BanBackend::Memory(_)
+        ));
         assert!(session_store_from_config(&c).is_ok());
     }
 
@@ -304,14 +341,20 @@ mod tests {
             Ok(_) => panic!("an unknown backend must not build"),
             Err(e) => e.to_string(),
         };
-        assert!(err.contains("postgres") && err.contains("memory"), "helpful message: {err}");
+        assert!(
+            err.contains("postgres") && err.contains("memory"),
+            "helpful message: {err}"
+        );
     }
 
     #[cfg(not(feature = "persist"))]
     #[test]
     fn asking_for_file_without_the_feature_errors_not_silently_memory() {
         let c = config("kernway.session.store=file");
-        assert!(session_store_from_config(&c).is_err(), "must not silently fall back to memory");
+        assert!(
+            session_store_from_config(&c).is_err(),
+            "must not silently fall back to memory"
+        );
     }
 
     #[cfg(feature = "persist")]
@@ -319,20 +362,34 @@ mod tests {
     fn a_file_backend_is_built_and_is_durable() {
         let dir = std::env::temp_dir().join("kernway-backends-cfg");
         let _ = std::fs::remove_dir_all(&dir);
-        let props = format!("kernway.bans.store=file\nkernway.persist.dir={}", dir.display());
+        let props = format!(
+            "kernway.bans.store=file\nkernway.persist.dir={}",
+            dir.display()
+        );
         let backend = BanBackend::from_config(&config(&props)).unwrap();
         assert!(matches!(backend, BanBackend::File(_)));
-        assert!(dir.join("bans").exists(), "the store's directory was created");
+        assert!(
+            dir.join("bans").exists(),
+            "the store's directory was created"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(feature = "persist")]
     #[test]
     fn fsync_policy_parses() {
-        assert!(matches!(fsync_policy(&config("")), kernway_security::Fsync::EveryWrite));
-        assert!(matches!(fsync_policy(&config("kernway.persist.fsync=never")), kernway_security::Fsync::Never));
         assert!(matches!(
-            fsync_policy(&config("kernway.persist.fsync=batched\nkernway.persist.fsync-interval-ms=500")),
+            fsync_policy(&config("")),
+            kernway_security::Fsync::EveryWrite
+        ));
+        assert!(matches!(
+            fsync_policy(&config("kernway.persist.fsync=never")),
+            kernway_security::Fsync::Never
+        ));
+        assert!(matches!(
+            fsync_policy(&config(
+                "kernway.persist.fsync=batched\nkernway.persist.fsync-interval-ms=500"
+            )),
             kernway_security::Fsync::Batched(_)
         ));
     }

@@ -236,9 +236,11 @@ impl Handle {
         F: Future<Output = ()> + 'static,
     {
         let shared = Arc::clone(&self.inner.shared);
-        let id = self.inner.tasks.borrow_mut().insert(|id| {
-            Rc::new(Task::new(Box::pin(future), id, Arc::clone(&shared)))
-        });
+        let id = self
+            .inner
+            .tasks
+            .borrow_mut()
+            .insert(|id| Rc::new(Task::new(Box::pin(future), id, Arc::clone(&shared))));
         // Queue it for the first poll rather than polling inline: spawning from
         // inside a task would otherwise nest polls and re-enter the slab.
         self.inner.shared.schedule(id);
@@ -407,7 +409,11 @@ where
 
 /// The current thread's executor handle, if one is running.
 pub fn try_handle() -> Option<Handle> {
-    CURRENT.with(|c| c.borrow().as_ref().map(|inner| Handle { inner: Rc::clone(inner) }))
+    CURRENT.with(|c| {
+        c.borrow().as_ref().map(|inner| Handle {
+            inner: Rc::clone(inner),
+        })
+    })
 }
 
 /// Run `f` against the current thread's reactor — the seam `rt-net` registers
@@ -634,7 +640,10 @@ mod tests {
         let at_wake = Rc::clone(&observed);
         let seen = Rc::clone(&spins);
         ex.block_on(async move {
-            Readable { source: Some(server) }.await;
+            Readable {
+                source: Some(server),
+            }
+            .await;
             at_wake.set(seen.get());
         })
         .unwrap();
@@ -678,7 +687,11 @@ mod tests {
         let ex = Executor::new().unwrap();
         let hits = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&hits);
-        ex.block_on(RemoteWake { armed: false, hits: counted }).unwrap();
+        ex.block_on(RemoteWake {
+            armed: false,
+            hits: counted,
+        })
+        .unwrap();
         assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
@@ -686,10 +699,11 @@ mod tests {
     fn spawn_outside_an_executor_panics_with_a_useful_message() {
         assert!(try_handle().is_none());
         let err = std::panic::catch_unwind(|| spawn(async {})).unwrap_err();
-        let msg = err
-            .downcast_ref::<String>()
-            .cloned()
-            .unwrap_or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()).unwrap_or_default());
+        let msg = err.downcast_ref::<String>().cloned().unwrap_or_else(|| {
+            err.downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+        });
         assert!(msg.contains("outside an executor"), "got {msg:?}");
     }
 

@@ -4,13 +4,13 @@
 #[derive(Debug, Clone)]
 pub struct Page<T> {
     /// Rows on this page. Shorter than `size` on the final page.
-    pub items:       Vec<T>,
+    pub items: Vec<T>,
     /// Total rows matching the query, ignoring pagination.
-    pub total:       u64,
+    pub total: u64,
     /// This page's index, 0-based.
-    pub page:        u64,
+    pub page: u64,
     /// Rows requested per page.
-    pub size:        u64,
+    pub size: u64,
     /// `ceil(total / size)`, or 0 when `size` is 0.
     pub total_pages: u64,
 }
@@ -18,11 +18,7 @@ pub struct Page<T> {
 impl<T> Page<T> {
     /// Build a page, deriving `total_pages` from `total` and `size`.
     pub fn new(items: Vec<T>, total: u64, page: u64, size: u64) -> Self {
-        let total_pages = if size == 0 {
-            0
-        } else {
-            total.div_ceil(size)
-        };
+        let total_pages = if size == 0 { 0 } else { total.div_ceil(size) };
         Self {
             items,
             total,

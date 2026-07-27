@@ -155,7 +155,10 @@ impl Config {
             .iter()
             .filter_map(|(k, v)| k.strip_prefix(&dotted).map(|s| (s.to_string(), v.clone())))
             .collect();
-        Config { map, profile: self.profile.clone() }
+        Config {
+            map,
+            profile: self.profile.clone(),
+        }
     }
 
     /// The active profile, if one was resolved (`prod`, `dev`, …).
@@ -232,7 +235,10 @@ impl ConfigBuilder {
     /// Finish.
     #[must_use]
     pub fn build(self) -> Config {
-        Config { map: self.map, profile: self.profile }
+        Config {
+            map: self.map,
+            profile: self.profile,
+        }
     }
 }
 
@@ -280,7 +286,13 @@ fn parse_yaml(contents: &str, map: &mut HashMap<String, String>) {
 #[cfg(feature = "yaml")]
 fn flatten_yaml(node: &yaml_rust2::Yaml, prefix: &str, map: &mut HashMap<String, String>) {
     use yaml_rust2::Yaml;
-    let joined = |key: &str| if prefix.is_empty() { key.to_string() } else { format!("{prefix}.{key}") };
+    let joined = |key: &str| {
+        if prefix.is_empty() {
+            key.to_string()
+        } else {
+            format!("{prefix}.{key}")
+        }
+    };
     match node {
         Yaml::Hash(hash) => {
             for (key, value) in hash {
@@ -327,7 +339,11 @@ fn read_yaml_into(path: &str, map: &mut HashMap<String, String>) {
 /// Map `PREFIX`-prefixed env vars into `map`: strip the prefix, lowercase, and turn
 /// `__` into `.` (a single `_` stays, since keys contain them). Pure over the var
 /// iterator, so it is testable without touching the process environment.
-fn map_env(prefix: &str, vars: impl Iterator<Item = (String, String)>, map: &mut HashMap<String, String>) {
+fn map_env(
+    prefix: &str,
+    vars: impl Iterator<Item = (String, String)>,
+    map: &mut HashMap<String, String>,
+) {
     for (name, value) in vars {
         if let Some(rest) = name.strip_prefix(prefix) {
             let key = rest.to_ascii_lowercase().replace("__", ".");
@@ -397,7 +413,9 @@ mod tests {
 
     #[test]
     fn sub_reparents_a_section() {
-        let c = Config::builder().parse("server.port = 8080\nserver.host = 0.0.0.0\nother = x").build();
+        let c = Config::builder()
+            .parse("server.port = 8080\nserver.host = 0.0.0.0\nother = x")
+            .build();
         let server = c.sub("server");
         assert_eq!(server.get_str("port"), Some("8080"));
         assert_eq!(server.get_str("host"), Some("0.0.0.0"));
@@ -422,14 +440,22 @@ mod tests {
             .build();
         assert_eq!(
             ServerConfig::from_config(&c),
-            ServerConfig { port: 9090, host: "0.0.0.0".into(), keep_alive_secs: Some(30) }
+            ServerConfig {
+                port: 9090,
+                host: "0.0.0.0".into(),
+                keep_alive_secs: Some(30)
+            }
         );
 
         // Missing keys: non-Option falls back to Default, Option is None.
         let c2 = Config::builder().parse("server.port = 80").build();
         assert_eq!(
             ServerConfig::from_config(&c2),
-            ServerConfig { port: 80, host: String::new(), keep_alive_secs: None }
+            ServerConfig {
+                port: 80,
+                host: String::new(),
+                keep_alive_secs: None
+            }
         );
     }
 
@@ -467,21 +493,34 @@ mod tests {
             .yaml("server:\n  port: 8080")
             .parse("server.port = 9090")
             .build();
-        assert_eq!(c.get_or("server.port", 0u16), 9090, "properties wins over yaml");
+        assert_eq!(
+            c.get_or("server.port", 0u16),
+            9090,
+            "properties wins over yaml"
+        );
     }
 
     #[test]
     fn env_binding_maps_prefix_and_double_underscore() {
         let vars = vec![
             ("KW_SERVER__PORT".to_string(), "9090".to_string()),
-            ("KW_LOGGING__LEVEL__KERNWAY_REDIS".to_string(), "trace".to_string()),
+            (
+                "KW_LOGGING__LEVEL__KERNWAY_REDIS".to_string(),
+                "trace".to_string(),
+            ),
             ("PATH".to_string(), "/usr/bin".to_string()), // not prefixed → ignored
         ];
         let mut map = HashMap::new();
         map_env(ENV_PREFIX, vars.into_iter(), &mut map);
         assert_eq!(map.get("server.port").map(String::as_str), Some("9090"));
         // __ is the separator; the single _ inside the module name stays.
-        assert_eq!(map.get("logging.level.kernway_redis").map(String::as_str), Some("trace"));
-        assert!(!map.contains_key("path"), "only KW_-prefixed vars are config");
+        assert_eq!(
+            map.get("logging.level.kernway_redis").map(String::as_str),
+            Some("trace")
+        );
+        assert!(
+            !map.contains_key("path"),
+            "only KW_-prefixed vars are config"
+        );
     }
 }

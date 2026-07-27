@@ -69,7 +69,9 @@ fn comparison(c: &mut Criterion) {
         // --- param hit: /users/7/posts/42 ---
         let mut g = c.benchmark_group(format!("param_hit/{total}"));
         g.bench_function("kernway", |b| {
-            b.iter(|| black_box(kw.find(black_box("GET"), black_box("/users/7/posts/42"))).is_some())
+            b.iter(|| {
+                black_box(kw.find(black_box("GET"), black_box("/users/7/posts/42"))).is_some()
+            })
         });
         g.bench_function("matchit", |b| {
             b.iter(|| black_box(mi.at(black_box("/users/7/posts/42"))).is_ok())

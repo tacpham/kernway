@@ -29,7 +29,11 @@ impl Connection {
     pub async fn connect(addr: SocketAddr) -> Result<Self, RedisError> {
         let stream = AsyncTcpStream::connect(addr).await?;
         stream.set_nodelay(true).ok();
-        Ok(Self { stream, buf: Vec::with_capacity(4096), pos: 0 })
+        Ok(Self {
+            stream,
+            buf: Vec::with_capacity(4096),
+            pos: 0,
+        })
     }
 
     /// Send one command (RESP array of bulk strings) and read one reply. A `-`
@@ -78,7 +82,10 @@ impl Connection {
     /// connection right after connect (the [`Pool`](crate::Pool) does this).
     pub async fn auth(&mut self, user: Option<&str>, password: &str) -> Result<(), RedisError> {
         match user {
-            Some(user) => self.command(&[b"AUTH", user.as_bytes(), password.as_bytes()]).await?,
+            Some(user) => {
+                self.command(&[b"AUTH", user.as_bytes(), password.as_bytes()])
+                    .await?
+            }
             None => self.command(&[b"AUTH", password.as_bytes()]).await?,
         };
         Ok(())
@@ -94,9 +101,15 @@ impl Connection {
     }
 
     /// `SET key value EX ttl` — store with an expiry (seconds).
-    pub async fn set_ex(&mut self, key: &str, value: &[u8], ttl_secs: u64) -> Result<(), RedisError> {
+    pub async fn set_ex(
+        &mut self,
+        key: &str,
+        value: &[u8],
+        ttl_secs: u64,
+    ) -> Result<(), RedisError> {
         let ttl = ttl_secs.to_string();
-        self.command(&[b"SET", key.as_bytes(), value, b"EX", ttl.as_bytes()]).await?;
+        self.command(&[b"SET", key.as_bytes(), value, b"EX", ttl.as_bytes()])
+            .await?;
         Ok(())
     }
 
@@ -110,13 +123,15 @@ impl Connection {
 
     /// `SADD key member` — add to a set (used to index a user's sessions).
     pub async fn sadd(&mut self, key: &str, member: &str) -> Result<(), RedisError> {
-        self.command(&[b"SADD", key.as_bytes(), member.as_bytes()]).await?;
+        self.command(&[b"SADD", key.as_bytes(), member.as_bytes()])
+            .await?;
         Ok(())
     }
 
     /// `SREM key member` — remove from a set.
     pub async fn srem(&mut self, key: &str, member: &str) -> Result<(), RedisError> {
-        self.command(&[b"SREM", key.as_bytes(), member.as_bytes()]).await?;
+        self.command(&[b"SREM", key.as_bytes(), member.as_bytes()])
+            .await?;
         Ok(())
     }
 
@@ -138,13 +153,18 @@ impl Connection {
     /// `EXPIRE key ttl` — (re)set a key's TTL in seconds.
     pub async fn expire(&mut self, key: &str, ttl_secs: u64) -> Result<(), RedisError> {
         let ttl = ttl_secs.to_string();
-        self.command(&[b"EXPIRE", key.as_bytes(), ttl.as_bytes()]).await?;
+        self.command(&[b"EXPIRE", key.as_bytes(), ttl.as_bytes()])
+            .await?;
         Ok(())
     }
 
     /// `SCARD key` → the number of members in a set (0 for a missing key).
     pub async fn scard(&mut self, key: &str) -> Result<i64, RedisError> {
-        Ok(self.command(&[b"SCARD", key.as_bytes()]).await?.as_int().unwrap_or(0))
+        Ok(self
+            .command(&[b"SCARD", key.as_bytes()])
+            .await?
+            .as_int()
+            .unwrap_or(0))
     }
 
     // --- sorted sets (for presence: score = last-heartbeat timestamp) -------
@@ -152,14 +172,20 @@ impl Connection {
     /// `ZADD key score member` — add or update a member's score.
     pub async fn zadd(&mut self, key: &str, score: i64, member: &str) -> Result<(), RedisError> {
         let score = score.to_string();
-        self.command(&[b"ZADD", key.as_bytes(), score.as_bytes(), member.as_bytes()]).await?;
+        self.command(&[b"ZADD", key.as_bytes(), score.as_bytes(), member.as_bytes()])
+            .await?;
         Ok(())
     }
 
     /// `ZSCORE key member` → the member's score, or `None` if it is not present.
     pub async fn zscore(&mut self, key: &str, member: &str) -> Result<Option<i64>, RedisError> {
-        match self.command(&[b"ZSCORE", key.as_bytes(), member.as_bytes()]).await? {
-            Value::Bulk(bytes) => Ok(std::str::from_utf8(&bytes).ok().and_then(|s| s.parse().ok())),
+        match self
+            .command(&[b"ZSCORE", key.as_bytes(), member.as_bytes()])
+            .await?
+        {
+            Value::Bulk(bytes) => Ok(std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|s| s.parse().ok())),
             Value::Nil => Ok(None),
             other => Err(RedisError::unexpected("ZSCORE", &other)),
         }
@@ -168,8 +194,21 @@ impl Connection {
     /// `ZRANGEBYSCORE key min max` → members whose score is in `[min, max]`, as
     /// strings. `min`/`max` are the raw Redis bounds (`"-inf"`, `"+inf"`, a number,
     /// or `"(1700"` for exclusive).
-    pub async fn zrangebyscore(&mut self, key: &str, min: &str, max: &str) -> Result<Vec<String>, RedisError> {
-        match self.command(&[b"ZRANGEBYSCORE", key.as_bytes(), min.as_bytes(), max.as_bytes()]).await? {
+    pub async fn zrangebyscore(
+        &mut self,
+        key: &str,
+        min: &str,
+        max: &str,
+    ) -> Result<Vec<String>, RedisError> {
+        match self
+            .command(&[
+                b"ZRANGEBYSCORE",
+                key.as_bytes(),
+                min.as_bytes(),
+                max.as_bytes(),
+            ])
+            .await?
+        {
             Value::Array(items) => Ok(items
                 .into_iter()
                 .filter_map(|v| match v {
@@ -193,9 +232,19 @@ impl Connection {
 
     /// `ZREMRANGEBYSCORE key min max` → drop members scoring within `[min, max]`
     /// (prunes stale heartbeats). Returns how many were removed.
-    pub async fn zremrangebyscore(&mut self, key: &str, min: &str, max: &str) -> Result<i64, RedisError> {
+    pub async fn zremrangebyscore(
+        &mut self,
+        key: &str,
+        min: &str,
+        max: &str,
+    ) -> Result<i64, RedisError> {
         Ok(self
-            .command(&[b"ZREMRANGEBYSCORE", key.as_bytes(), min.as_bytes(), max.as_bytes()])
+            .command(&[
+                b"ZREMRANGEBYSCORE",
+                key.as_bytes(),
+                min.as_bytes(),
+                max.as_bytes(),
+            ])
             .await?
             .as_int()
             .unwrap_or(0))

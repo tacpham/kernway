@@ -94,7 +94,10 @@ pub fn parse_bytes(buf: &[u8]) -> Result<Parsed, ParseError> {
         return Ok(Parsed::Incomplete);
     }
     request.body = buf[head_end..total].to_vec();
-    Ok(Parsed::Complete { request, consumed: total })
+    Ok(Parsed::Complete {
+        request,
+        consumed: total,
+    })
 }
 
 /// Parse only the head (request line + headers), WITHOUT requiring the body. Returns the
@@ -104,9 +107,11 @@ pub fn parse_bytes(buf: &[u8]) -> Result<Parsed, ParseError> {
 /// the server enforces its own `max_upload_size`.
 pub fn parse_head(buf: &[u8]) -> Result<ParsedHead, ParseError> {
     match parse_head_inner(buf)? {
-        Some((request, head_end, content_length)) => {
-            Ok(ParsedHead::Complete { request, head_end, content_length })
-        }
+        Some((request, head_end, content_length)) => Ok(ParsedHead::Complete {
+            request,
+            head_end,
+            content_length,
+        }),
         None => Ok(ParsedHead::Incomplete),
     }
 }
@@ -241,7 +246,6 @@ pub fn parse_request(stream: &TcpStream) -> Result<Request, ParseError> {
 
 /// Parse an HTTP/1.1 request from any `BufRead` — useful for testing.
 pub fn parse_from_reader<R: BufRead>(mut reader: R) -> Result<Request, ParseError> {
-
     // --- Request line: "GET /path?query HTTP/1.1\r\n" ---
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
@@ -251,9 +255,9 @@ pub fn parse_from_reader<R: BufRead>(mut reader: R) -> Result<Request, ParseErro
     if parts.len() < 2 {
         return Err(ParseError::BadRequestLine(request_line.to_string()));
     }
-    let method    = parts[0].to_uppercase();
+    let method = parts[0].to_uppercase();
     let full_path = parts[1];
-    let version   = match parts.get(2).map(|v| v.trim()) {
+    let version = match parts.get(2).map(|v| v.trim()) {
         Some("HTTP/1.0") | None => HttpVersion::Http10,
         _ => HttpVersion::Http11,
     };
@@ -261,7 +265,7 @@ pub fn parse_from_reader<R: BufRead>(mut reader: R) -> Result<Request, ParseErro
     // Split the path and query string
     let (path, query_str) = match full_path.find('?') {
         Some(q) => (&full_path[..q], &full_path[q + 1..]),
-        None    => (full_path, ""),
+        None => (full_path, ""),
     };
 
     let query = parse_query_string(query_str);
@@ -272,7 +276,9 @@ pub fn parse_from_reader<R: BufRead>(mut reader: R) -> Result<Request, ParseErro
         let mut line = String::new();
         reader.read_line(&mut line)?;
         let trimmed = line.trim();
-        if trimmed.is_empty() { break; }
+        if trimmed.is_empty() {
+            break;
+        }
         if let Some((name, value)) = split_header(trimmed) {
             headers.append(name, value);
         }
@@ -316,7 +322,9 @@ fn parse_query_string(query: &str) -> QueryParams {
     // An empty query allocates nothing — `Vec::with_capacity(0)` does not.
     let mut params = QueryParams::with_capacity(query.len(), estimated_params(query));
     for pair in query.split('&') {
-        if pair.is_empty() { continue; }
+        if pair.is_empty() {
+            continue;
+        }
         let (key, val) = match pair.find('=') {
             Some(eq) => (&pair[..eq], &pair[eq + 1..]),
             None => (pair, ""),
@@ -378,7 +386,9 @@ mod tests {
 
     #[test]
     fn parse_headers_lowercased() {
-        let req = parse("GET / HTTP/1.1\r\nAuthorization: Bearer token123\r\nX-Custom: value\r\n\r\n").unwrap();
+        let req =
+            parse("GET / HTTP/1.1\r\nAuthorization: Bearer token123\r\nX-Custom: value\r\n\r\n")
+                .unwrap();
         assert_eq!(req.headers.get("authorization").unwrap(), "Bearer token123");
         assert_eq!(req.headers.get("x-custom").unwrap(), "value");
     }
@@ -420,7 +430,11 @@ mod byte_parser_tests {
         assert_eq!(req.method, "GET");
         assert_eq!(req.path, "/health");
         assert_eq!(req.headers.get("host"), Some("localhost"));
-        assert_eq!(consumed, raw.len(), "a bodyless request consumes exactly its head");
+        assert_eq!(
+            consumed,
+            raw.len(),
+            "a bodyless request consumes exactly its head"
+        );
     }
 
     #[test]
@@ -429,10 +443,17 @@ mod byte_parser_tests {
         // parse_bytes is still Incomplete (it waits for the whole body).
         let buf = b"POST /up HTTP/1.1\r\ncontent-length: 100\r\n\r\n";
         match parse_head(buf).unwrap() {
-            ParsedHead::Complete { request, head_end, content_length } => {
+            ParsedHead::Complete {
+                request,
+                head_end,
+                content_length,
+            } => {
                 assert_eq!(content_length, 100);
                 assert_eq!(head_end, buf.len());
-                assert!(request.body.is_empty(), "the head-only request carries no body");
+                assert!(
+                    request.body.is_empty(),
+                    "the head-only request carries no body"
+                );
             }
             ParsedHead::Incomplete => panic!("the head is complete"),
         }
@@ -500,7 +521,10 @@ mod byte_parser_tests {
             "POST /upload HTTP/1.1\r\ncontent-length: {}\r\n\r\n",
             MAX_BODY_BYTES + 1
         );
-        assert!(matches!(parse_bytes(raw.as_bytes()), Err(ParseError::TooLarge)));
+        assert!(matches!(
+            parse_bytes(raw.as_bytes()),
+            Err(ParseError::TooLarge)
+        ));
     }
 
     #[test]

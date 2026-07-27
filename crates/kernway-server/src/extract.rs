@@ -65,7 +65,10 @@ where
 impl Extract for SecurityContext {
     fn extract(_req: &Request, scope: &RequestScope, _param: &str) -> Result<Self, Response> {
         // The context the auth middleware set (KEP-0005); anonymous if none.
-        Ok(scope.get::<SecurityContext>().map(|ctx| (*ctx).clone()).unwrap_or_default())
+        Ok(scope
+            .get::<SecurityContext>()
+            .map(|ctx| (*ctx).clone())
+            .unwrap_or_default())
     }
 }
 

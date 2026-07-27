@@ -28,21 +28,21 @@ pub enum ColumnType {
 #[derive(Debug, Clone)]
 pub struct ColumnDef {
     /// Column name in the database.
-    pub name:        &'static str,
+    pub name: &'static str,
     /// Rust field name it maps to. Differs from `name` under
     /// `#[column(name = "...")]`.
-    pub field:       &'static str,
+    pub field: &'static str,
     /// Inferred column type.
-    pub col_type:    ColumnType,
+    pub col_type: ColumnType,
     /// Whether the column accepts NULL — true for `Option<T>` fields.
-    pub nullable:    bool,
+    pub nullable: bool,
     /// Whether this is the primary key (`#[id]`).
     pub primary_key: bool,
     /// Whether a UNIQUE constraint applies.
-    pub unique:      bool,
+    pub unique: bool,
     /// Whether the database supplies the value — auto-increment keys and
     /// managed timestamps. Such columns are omitted from INSERT statements.
-    pub auto:        bool,
+    pub auto: bool,
 }
 
 /// Marker trait for ORM-managed structs.

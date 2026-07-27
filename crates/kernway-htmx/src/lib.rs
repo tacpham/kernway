@@ -348,7 +348,8 @@ impl IntoResponse for HtmxResponse {
             // Append to any existing Vary rather than clobbering it.
             match resp.headers.get("vary").map(str::to_string) {
                 Some(existing) if !existing.to_ascii_lowercase().contains("hx-request") => {
-                    resp.headers.insert("vary", &format!("{existing}, HX-Request"));
+                    resp.headers
+                        .insert("vary", &format!("{existing}, HX-Request"));
                 }
                 Some(_) => {} // already varies on HX-Request
                 None => resp.headers.insert("vary", "HX-Request"),
@@ -430,7 +431,10 @@ mod tests {
 
     #[test]
     fn a_history_restore_gets_the_full_page_even_though_it_is_an_htmx_request() {
-        let req = req_with(&[("hx-request", "true"), ("hx-history-restore-request", "true")]);
+        let req = req_with(&[
+            ("hx-request", "true"),
+            ("hx-history-restore-request", "true"),
+        ]);
         let resp = Htmx::from(&req)
             .respond(|| "FRAGMENT".to_string(), || "PAGE".to_string())
             .into_response();
@@ -451,17 +455,28 @@ mod tests {
         assert_eq!(resp.headers.get("HX-Retarget"), Some("#status"));
         assert_eq!(resp.headers.get("HX-Reswap"), Some("innerHTML"));
         assert_eq!(resp.headers.get("HX-Push-Url"), Some("/users/1"));
-        assert_eq!(resp.headers.get("content-type"), Some("text/html; charset=utf-8"));
+        assert_eq!(
+            resp.headers.get("content-type"),
+            Some("text/html; charset=utf-8")
+        );
     }
 
     #[test]
     fn redirect_and_refresh() {
         assert_eq!(
-            HtmxResponse::new("").redirect("/login").into_response().headers.get("HX-Redirect"),
+            HtmxResponse::new("")
+                .redirect("/login")
+                .into_response()
+                .headers
+                .get("HX-Redirect"),
             Some("/login")
         );
         assert_eq!(
-            HtmxResponse::new("").refresh().into_response().headers.get("HX-Refresh"),
+            HtmxResponse::new("")
+                .refresh()
+                .into_response()
+                .headers
+                .get("HX-Refresh"),
             Some("true")
         );
     }
@@ -481,6 +496,9 @@ mod tests {
         let resp = HtmxResponse::from_response(with_encoding)
             .vary_on_request()
             .into_response();
-        assert_eq!(resp.headers.get("vary"), Some("Accept-Encoding, HX-Request"));
+        assert_eq!(
+            resp.headers.get("vary"),
+            Some("Accept-Encoding, HX-Request")
+        );
     }
 }

@@ -15,7 +15,9 @@ use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
-use di_core::{AppContext, BeanEntry, BeanOrigin, Buildable, Container, DiError, RegistersComponent};
+use di_core::{
+    AppContext, BeanEntry, BeanOrigin, Buildable, Container, DiError, RegistersComponent,
+};
 
 // A spread of distinct types, so lookups exercise a populated map rather than a
 // single-entry one that lives entirely in cache.
@@ -142,15 +144,28 @@ impl std::hash::Hasher for TypeIdHasher {
     }
 }
 
-type FastMap = HashMap<TypeId, Vec<(BeanEntry, Arc<dyn Any + Send + Sync>)>, BuildHasherDefault<TypeIdHasher>>;
+type FastMap =
+    HashMap<TypeId, Vec<(BeanEntry, Arc<dyn Any + Send + Sync>)>, BuildHasherDefault<TypeIdHasher>>;
 
 fn fill_keys() -> Vec<TypeId> {
     vec![
         TypeId::of::<Repo>(),
-        TypeId::of::<T00>(), TypeId::of::<T01>(), TypeId::of::<T02>(), TypeId::of::<T03>(),
-        TypeId::of::<T04>(), TypeId::of::<T05>(), TypeId::of::<T06>(), TypeId::of::<T07>(),
-        TypeId::of::<T08>(), TypeId::of::<T09>(), TypeId::of::<T10>(), TypeId::of::<T11>(),
-        TypeId::of::<T12>(), TypeId::of::<T13>(), TypeId::of::<T14>(), TypeId::of::<T15>(),
+        TypeId::of::<T00>(),
+        TypeId::of::<T01>(),
+        TypeId::of::<T02>(),
+        TypeId::of::<T03>(),
+        TypeId::of::<T04>(),
+        TypeId::of::<T05>(),
+        TypeId::of::<T06>(),
+        TypeId::of::<T07>(),
+        TypeId::of::<T08>(),
+        TypeId::of::<T09>(),
+        TypeId::of::<T10>(),
+        TypeId::of::<T11>(),
+        TypeId::of::<T12>(),
+        TypeId::of::<T13>(),
+        TypeId::of::<T14>(),
+        TypeId::of::<T15>(),
     ]
 }
 

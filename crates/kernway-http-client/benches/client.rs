@@ -9,8 +9,8 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use kernway_http_client::{
-    bench_chunk_decoder_incremental, bench_decode_chunked, bench_encode_request, bench_parse_head, percent_encode,
-    Method, Request, Url,
+    bench_chunk_decoder_incremental, bench_decode_chunked, bench_encode_request, bench_parse_head,
+    percent_encode, Method, Request, Url,
 };
 
 /// A response head with a realistic set of headers.
@@ -28,13 +28,24 @@ fn client(c: &mut Criterion) {
 
     // URL parsing — done once per request.
     group.bench_function("url_parse", |b| {
-        b.iter(|| Url::parse(black_box("https://oauth2.googleapis.com/token?foo=bar&baz=qux")).unwrap());
+        b.iter(|| {
+            Url::parse(black_box(
+                "https://oauth2.googleapis.com/token?foo=bar&baz=qux",
+            ))
+            .unwrap()
+        });
     });
 
     // Request encoding — build the wire bytes for a POST with a form body + headers.
-    let req = Request::new(Method::Post, Url::parse("https://oauth2.googleapis.com/token").unwrap())
-        .body("application/x-www-form-urlencoded", b"grant_type=authorization_code&code=abc123&client_id=xyz".to_vec())
-        .header("accept", "application/json");
+    let req = Request::new(
+        Method::Post,
+        Url::parse("https://oauth2.googleapis.com/token").unwrap(),
+    )
+    .body(
+        "application/x-www-form-urlencoded",
+        b"grant_type=authorization_code&code=abc123&client_id=xyz".to_vec(),
+    )
+    .header("accept", "application/json");
     group.bench_function("encode_request", |b| {
         b.iter(|| black_box(bench_encode_request(black_box(&req))));
     });
@@ -56,9 +67,13 @@ fn client(c: &mut Criterion) {
     // Chunked decoding at a couple of body sizes (chunks of 256 bytes).
     for chunks in [1usize, 16] {
         let body = make_chunked(chunks, 256);
-        group.bench_with_input(BenchmarkId::new("decode_chunked", chunks * 256), &body, |b, body| {
-            b.iter(|| black_box(bench_decode_chunked(black_box(body))));
-        });
+        group.bench_with_input(
+            BenchmarkId::new("decode_chunked", chunks * 256),
+            &body,
+            |b, body| {
+                b.iter(|| black_box(bench_decode_chunked(black_box(body))));
+            },
+        );
     }
 
     // Streaming (incremental) vs whole-buffer chunked decoding on a larger body: the
@@ -66,17 +81,29 @@ fn client(c: &mut Criterion) {
     // progressively), the incremental one is O(consumed). Fed whole here for parity.
     for chunks in [64usize, 256] {
         let body = make_chunked(chunks, 256);
-        group.bench_with_input(BenchmarkId::new("decode_chunked/whole", chunks * 256), &body, |b, body| {
-            b.iter(|| black_box(bench_decode_chunked(black_box(body))));
-        });
-        group.bench_with_input(BenchmarkId::new("decode_chunked/incremental", chunks * 256), &body, |b, body| {
-            b.iter(|| black_box(bench_chunk_decoder_incremental(black_box(body))));
-        });
+        group.bench_with_input(
+            BenchmarkId::new("decode_chunked/whole", chunks * 256),
+            &body,
+            |b, body| {
+                b.iter(|| black_box(bench_decode_chunked(black_box(body))));
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("decode_chunked/incremental", chunks * 256),
+            &body,
+            |b, body| {
+                b.iter(|| black_box(bench_chunk_decoder_incremental(black_box(body))));
+            },
+        );
     }
 
     // Form percent-encoding — a token-request value.
     group.bench_function("percent_encode", |b| {
-        b.iter(|| black_box(percent_encode(black_box("a value/with?reserved&chars=to encode"))));
+        b.iter(|| {
+            black_box(percent_encode(black_box(
+                "a value/with?reserved&chars=to encode",
+            )))
+        });
     });
 
     group.finish();

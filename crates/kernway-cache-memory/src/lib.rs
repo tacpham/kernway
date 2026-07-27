@@ -77,7 +77,9 @@ where
     K: Eq + Hash + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
 {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<K, V> Cache<K, V> for InMemoryCache<K, V>
@@ -171,12 +173,15 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    fn make_cache() -> InMemoryCache<String, String> { InMemoryCache::new() }
+    fn make_cache() -> InMemoryCache<String, String> {
+        InMemoryCache::new()
+    }
 
     #[test]
     fn put_and_get_hit() {
         let c = make_cache();
-        c.put("k".to_string(), "v".to_string(), Ttl::Forever).unwrap();
+        c.put("k".to_string(), "v".to_string(), Ttl::Forever)
+            .unwrap();
         assert_eq!(c.get(&"k".to_string()).unwrap(), Some("v".to_string()));
     }
 
@@ -189,7 +194,8 @@ mod tests {
     #[test]
     fn ttl_expiry() {
         let c = make_cache();
-        c.put("k".to_string(), "v".to_string(), Ttl::Seconds(0)).unwrap();
+        c.put("k".to_string(), "v".to_string(), Ttl::Seconds(0))
+            .unwrap();
         thread::sleep(Duration::from_millis(1));
         assert_eq!(c.get(&"k".to_string()).unwrap(), None);
     }
@@ -197,7 +203,8 @@ mod tests {
     #[test]
     fn evict_removes_entry() {
         let c = make_cache();
-        c.put("k".to_string(), "v".to_string(), Ttl::Forever).unwrap();
+        c.put("k".to_string(), "v".to_string(), Ttl::Forever)
+            .unwrap();
         c.evict(&"k".to_string()).unwrap();
         assert_eq!(c.get(&"k".to_string()).unwrap(), None);
     }
@@ -205,8 +212,10 @@ mod tests {
     #[test]
     fn clear_empties_cache() {
         let c = make_cache();
-        c.put("a".to_string(), "1".to_string(), Ttl::Forever).unwrap();
-        c.put("b".to_string(), "2".to_string(), Ttl::Forever).unwrap();
+        c.put("a".to_string(), "1".to_string(), Ttl::Forever)
+            .unwrap();
+        c.put("b".to_string(), "2".to_string(), Ttl::Forever)
+            .unwrap();
         c.clear().unwrap();
         assert_eq!(c.size().unwrap(), 0);
     }
@@ -214,9 +223,13 @@ mod tests {
     #[test]
     fn put_if_absent_only_inserts_once() {
         let c = make_cache();
-        let inserted = c.put_if_absent("k".to_string(), "first".to_string(), Ttl::Forever).unwrap();
+        let inserted = c
+            .put_if_absent("k".to_string(), "first".to_string(), Ttl::Forever)
+            .unwrap();
         assert!(inserted);
-        let inserted2 = c.put_if_absent("k".to_string(), "second".to_string(), Ttl::Forever).unwrap();
+        let inserted2 = c
+            .put_if_absent("k".to_string(), "second".to_string(), Ttl::Forever)
+            .unwrap();
         assert!(!inserted2);
         assert_eq!(c.get(&"k".to_string()).unwrap(), Some("first".to_string()));
     }
@@ -224,7 +237,8 @@ mod tests {
     #[test]
     fn contains_returns_false_for_expired() {
         let c = make_cache();
-        c.put("k".to_string(), "v".to_string(), Ttl::Seconds(0)).unwrap();
+        c.put("k".to_string(), "v".to_string(), Ttl::Seconds(0))
+            .unwrap();
         thread::sleep(Duration::from_millis(1));
         assert!(!c.contains(&"k".to_string()).unwrap());
     }
@@ -232,7 +246,8 @@ mod tests {
     #[test]
     fn stats_tracks_hits_and_misses() {
         let c = make_cache();
-        c.put("k".to_string(), "v".to_string(), Ttl::Forever).unwrap();
+        c.put("k".to_string(), "v".to_string(), Ttl::Forever)
+            .unwrap();
         c.get(&"k".to_string()).unwrap();
         c.get(&"k".to_string()).unwrap();
         c.get(&"nope".to_string()).unwrap();
@@ -243,7 +258,11 @@ mod tests {
 
     #[test]
     fn hit_ratio_calculation() {
-        let s = kernway_cache_core::stats::CacheStats { hits: 3, misses: 1, entries: 0 };
+        let s = kernway_cache_core::stats::CacheStats {
+            hits: 3,
+            misses: 1,
+            entries: 0,
+        };
         assert!((s.hit_ratio() - 0.75).abs() < 1e-9);
     }
 
@@ -257,16 +276,20 @@ mod tests {
     fn get_or_load_caches_result() {
         let c = make_cache();
         let mut call_count = 0usize;
-        let v = c.get_or_load("k".to_string(), Ttl::Forever, || {
-            call_count += 1;
-            Ok("loaded".to_string())
-        }).unwrap();
+        let v = c
+            .get_or_load("k".to_string(), Ttl::Forever, || {
+                call_count += 1;
+                Ok("loaded".to_string())
+            })
+            .unwrap();
         assert_eq!(v, "loaded");
 
-        let v2 = c.get_or_load("k".to_string(), Ttl::Forever, || {
-            call_count += 1;
-            Ok("loaded-again".to_string())
-        }).unwrap();
+        let v2 = c
+            .get_or_load("k".to_string(), Ttl::Forever, || {
+                call_count += 1;
+                Ok("loaded-again".to_string())
+            })
+            .unwrap();
         assert_eq!(v2, "loaded");
         assert_eq!(call_count, 1);
     }

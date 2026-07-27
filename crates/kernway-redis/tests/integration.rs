@@ -30,7 +30,9 @@ fn set_get_del_round_trip() {
 
             // Clean slate, then set with a 60s TTL and read it back.
             pool.with(async |c| c.del(&[key]).await).await.unwrap();
-            pool.with(async |c| c.set_ex(key, b"hello-kernway", 60).await).await.unwrap();
+            pool.with(async |c| c.set_ex(key, b"hello-kernway", 60).await)
+                .await
+                .unwrap();
             let got = pool.with(async |c| c.get(key).await).await.unwrap();
             assert_eq!(got, Some(b"hello-kernway".to_vec()));
 

@@ -80,7 +80,10 @@ impl Cors {
     pub fn permissive() -> Self {
         Self {
             origins: Origins::Any,
-            methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"].iter().map(|s| (*s).into()).collect(),
+            methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
             headers: AllowHeaders::MirrorRequest,
             exposed: Vec::new(),
             credentials: false,
@@ -174,9 +177,11 @@ impl Cors {
 
     /// Stamp the response headers common to preflight and actual responses.
     fn stamp_common(&self, resp: &mut Response, allow_origin: &str) {
-        resp.headers.insert("access-control-allow-origin", allow_origin);
+        resp.headers
+            .insert("access-control-allow-origin", allow_origin);
         if self.credentials {
-            resp.headers.insert("access-control-allow-credentials", "true");
+            resp.headers
+                .insert("access-control-allow-credentials", "true");
         }
         // The response varies by Origin, so caches must key on it.
         resp.headers.insert("vary", "Origin");
@@ -186,18 +191,24 @@ impl Cors {
     fn preflight(&self, req: &Request, allow_origin: &str) -> Response {
         let mut resp = Response::new(StatusCode::NO_CONTENT);
         self.stamp_common(&mut resp, allow_origin);
-        resp.headers.insert("access-control-allow-methods", &self.methods.join(", "));
+        resp.headers
+            .insert("access-control-allow-methods", &self.methods.join(", "));
 
         let allow_headers = match &self.headers {
             AllowHeaders::List(list) => list.join(", "),
             // Echo the requested headers (what the browser asked to send).
-            AllowHeaders::MirrorRequest => req.header("access-control-request-headers").unwrap_or("").to_string(),
+            AllowHeaders::MirrorRequest => req
+                .header("access-control-request-headers")
+                .unwrap_or("")
+                .to_string(),
         };
         if !allow_headers.is_empty() {
-            resp.headers.insert("access-control-allow-headers", &allow_headers);
+            resp.headers
+                .insert("access-control-allow-headers", &allow_headers);
         }
         if let Some(secs) = self.max_age {
-            resp.headers.insert("access-control-max-age", &secs.to_string());
+            resp.headers
+                .insert("access-control-max-age", &secs.to_string());
         }
         resp
     }
@@ -214,9 +225,16 @@ impl Middleware for Cors {
         "Cors"
     }
 
-    fn handle<'a>(&'a self, req: Request, scope: &'a RequestScope, next: Next<'a>) -> BoxFuture<'a, Response> {
+    fn handle<'a>(
+        &'a self,
+        req: Request,
+        scope: &'a RequestScope,
+        next: Next<'a>,
+    ) -> BoxFuture<'a, Response> {
         // Resolve the origin decision synchronously (borrows req).
-        let allow_origin = req.header("origin").and_then(|o| self.allow_origin_value(o));
+        let allow_origin = req
+            .header("origin")
+            .and_then(|o| self.allow_origin_value(o));
         let is_preflight = req.method.eq_ignore_ascii_case("OPTIONS")
             && req.header("access-control-request-method").is_some();
 
@@ -237,7 +255,9 @@ impl Middleware for Cors {
             if let Some(origin) = allow_origin {
                 self.stamp_common(&mut response, &origin);
                 if let Some(exposed) = exposed {
-                    response.headers.insert("access-control-expose-headers", &exposed);
+                    response
+                        .headers
+                        .insert("access-control-expose-headers", &exposed);
                 }
             }
             response
@@ -272,16 +292,27 @@ mod tests {
         let app = AppContext::new();
         let scope = RequestScope::new(&app);
         let terminal: &Terminal = &|_req, _scope| {
-            Box::pin(async { Response::new(StatusCode::OK).body(b"ok".to_vec()) }) as BoxFuture<'static, Response>
+            Box::pin(async { Response::new(StatusCode::OK).body(b"ok".to_vec()) })
+                as BoxFuture<'static, Response>
         };
-        block(cors.handle(req, &scope, Next { rest: &[], terminal }))
+        block(cors.handle(
+            req,
+            &scope,
+            Next {
+                rest: &[],
+                terminal,
+            },
+        ))
     }
 
     #[test]
     fn an_allowed_origin_gets_the_allow_header() {
         let cors = Cors::new().allow_origin("https://app.example");
         let resp = run(&cors, "GET", &[("origin", "https://app.example")]);
-        assert_eq!(resp.headers.get("access-control-allow-origin"), Some("https://app.example"));
+        assert_eq!(
+            resp.headers.get("access-control-allow-origin"),
+            Some("https://app.example")
+        );
         assert_eq!(resp.headers.get("vary"), Some("Origin"));
     }
 
@@ -289,7 +320,11 @@ mod tests {
     fn a_disallowed_origin_gets_no_cors_headers() {
         let cors = Cors::new().allow_origin("https://app.example");
         let resp = run(&cors, "GET", &[("origin", "https://evil.example")]);
-        assert_eq!(resp.headers.get("access-control-allow-origin"), None, "not allow-listed");
+        assert_eq!(
+            resp.headers.get("access-control-allow-origin"),
+            None,
+            "not allow-listed"
+        );
         // The request still ran (CORS is a browser policy, not server enforcement).
         assert_eq!(resp.status, StatusCode::OK);
     }
@@ -304,12 +339,24 @@ mod tests {
         let resp = run(
             &cors,
             "OPTIONS",
-            &[("origin", "https://app.example"), ("access-control-request-method", "DELETE")],
+            &[
+                ("origin", "https://app.example"),
+                ("access-control-request-method", "DELETE"),
+            ],
         );
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
-        assert_eq!(resp.headers.get("access-control-allow-origin"), Some("https://app.example"));
-        assert_eq!(resp.headers.get("access-control-allow-methods"), Some("GET, POST, DELETE"));
-        assert_eq!(resp.headers.get("access-control-allow-headers"), Some("content-type, authorization"));
+        assert_eq!(
+            resp.headers.get("access-control-allow-origin"),
+            Some("https://app.example")
+        );
+        assert_eq!(
+            resp.headers.get("access-control-allow-methods"),
+            Some("GET, POST, DELETE")
+        );
+        assert_eq!(
+            resp.headers.get("access-control-allow-headers"),
+            Some("content-type, authorization")
+        );
         assert_eq!(resp.headers.get("access-control-max-age"), Some("600"));
     }
 
@@ -322,7 +369,10 @@ mod tests {
             Some("https://app.example"),
             "with credentials the origin is echoed, not *"
         );
-        assert_eq!(resp.headers.get("access-control-allow-credentials"), Some("true"));
+        assert_eq!(
+            resp.headers.get("access-control-allow-credentials"),
+            Some("true")
+        );
     }
 
     #[test]
@@ -338,8 +388,15 @@ mod tests {
         let resp = run(
             &cors,
             "OPTIONS",
-            &[("origin", "https://x.example"), ("access-control-request-method", "PUT"), ("access-control-request-headers", "x-custom, content-type")],
+            &[
+                ("origin", "https://x.example"),
+                ("access-control-request-method", "PUT"),
+                ("access-control-request-headers", "x-custom, content-type"),
+            ],
         );
-        assert_eq!(resp.headers.get("access-control-allow-headers"), Some("x-custom, content-type"));
+        assert_eq!(
+            resp.headers.get("access-control-allow-headers"),
+            Some("x-custom, content-type")
+        );
     }
 }

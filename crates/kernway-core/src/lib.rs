@@ -104,22 +104,22 @@
 
 #![forbid(unsafe_code)]
 
+pub mod db;
 pub mod error;
 pub mod fields;
+pub mod layer;
+pub mod plugin;
 pub mod request;
 pub mod response;
-pub mod layer;
-pub mod db;
-pub mod template;
-pub mod plugin;
 pub mod security;
+pub mod template;
 
 /// Re-export all traits for use with: `use kernway_core::prelude::*`
 pub mod prelude {
+    pub use crate::db::DbPool;
     pub use crate::error::KernwayError;
     pub use crate::layer::BoxFuture;
-    pub use crate::response::IntoResponse;
-    pub use crate::db::DbPool;
-    pub use crate::template::{TemplateEngine, ToValue, Value};
     pub use crate::plugin::KernwayPlugin;
+    pub use crate::response::IntoResponse;
+    pub use crate::template::{TemplateEngine, ToValue, Value};
 }

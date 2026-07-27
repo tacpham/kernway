@@ -43,7 +43,9 @@ pub fn pin_current_thread_to_core(core: usize) -> io::Result<()> {
 /// Falls back to 1 when the OS cannot report it (containers with no cgroup
 /// quota exposed, exotic targets).
 pub fn default_shard_count() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
 }
 
 /// The error the unsupported platforms return.

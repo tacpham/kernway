@@ -46,14 +46,18 @@ trait AuditSink: Send + Sync {
 #[provides(dyn AuditSink)]
 pub struct ConsoleAudit;
 impl AuditSink for ConsoleAudit {
-    fn name(&self) -> &'static str { "console" }
+    fn name(&self) -> &'static str {
+        "console"
+    }
 }
 
 #[derive(Component)]
 #[provides(dyn AuditSink)]
 pub struct MetricsAudit;
 impl AuditSink for MetricsAudit {
-    fn name(&self) -> &'static str { "metrics" }
+    fn name(&self) -> &'static str {
+        "metrics"
+    }
 }
 
 // --- Service: interface + qualifier + collection + optional -----------
@@ -83,7 +87,11 @@ impl UserService {
         println!(
             "🔔 post_construct: UserService ready — sinks={:?}, feature_flags={}",
             sinks,
-            if self.feature_flag.is_some() { "on" } else { "absent" }
+            if self.feature_flag.is_some() {
+                "on"
+            } else {
+                "absent"
+            }
         );
         Ok(())
     }
@@ -134,8 +142,16 @@ fn main() {
     }
 
     println!("\n--- Collection & interface resolution ---");
-    println!("get_all_as::<dyn AuditSink>() → {} sinks", ctx.get_all_as::<dyn AuditSink>().len());
-    println!("get_as::<dyn UserRepo>() → find(1) = {:?}", ctx.get_as::<dyn UserRepo>().unwrap().find(1));
+    println!(
+        "get_all_as::<dyn AuditSink>() → {} sinks",
+        ctx.get_all_as::<dyn AuditSink>().len()
+    );
+    println!(
+        "get_as::<dyn UserRepo>() → find(1) = {:?}",
+        ctx.get_as::<dyn UserRepo>().unwrap().find(1)
+    );
 
-    println!("\n✅ Auto-ordering + interface + qualifier + collection + optional + post_construct.");
+    println!(
+        "\n✅ Auto-ordering + interface + qualifier + collection + optional + post_construct."
+    );
 }

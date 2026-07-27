@@ -16,7 +16,11 @@ pub struct CacheEntry<V> {
 impl<V> CacheEntry<V> {
     /// Wrap a value, stamping it with the current time.
     pub fn new(value: V, ttl: Ttl) -> Self {
-        Self { value, created_at: Instant::now(), ttl }
+        Self {
+            value,
+            created_at: Instant::now(),
+            ttl,
+        }
     }
 
     /// Returns true if this entry has expired.

@@ -101,7 +101,9 @@ pub fn decode(data: &[u8], encoding: Encoding) -> Result<Vec<u8>, CompressError>
 
 fn read_all(mut reader: impl Read, what: &str) -> Result<Vec<u8>, CompressError> {
     let mut out = Vec::new();
-    reader.read_to_end(&mut out).map_err(|e| CompressError(format!("{what}: {e}")))?;
+    reader
+        .read_to_end(&mut out)
+        .map_err(|e| CompressError(format!("{what}: {e}")))?;
     Ok(out)
 }
 
@@ -110,7 +112,11 @@ fn read_all(mut reader: impl Read, what: &str) -> Result<Vec<u8>, CompressError>
 /// compressing them just burns CPU. A `; charset=…` parameter is ignored.
 #[must_use]
 pub fn is_compressible(content_type: &str) -> bool {
-    let base = content_type.split(';').next().unwrap_or(content_type).trim();
+    let base = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim();
     if base.starts_with("text/") {
         return true;
     }
@@ -185,10 +191,18 @@ mod tests {
     #[test]
     fn every_codec_round_trips() {
         let data = b"the quick brown fox jumps over the lazy dog, repeatedly. ".repeat(20);
-        for enc in [Encoding::Gzip, Encoding::Deflate, Encoding::Br, Encoding::Identity] {
+        for enc in [
+            Encoding::Gzip,
+            Encoding::Deflate,
+            Encoding::Br,
+            Encoding::Identity,
+        ] {
             let encoded = encode(&data, enc);
             if enc != Encoding::Identity {
-                assert!(encoded.len() < data.len(), "{enc:?} compressed a repetitive payload");
+                assert!(
+                    encoded.len() < data.len(),
+                    "{enc:?} compressed a repetitive payload"
+                );
             }
             assert_eq!(decode(&encoded, enc).unwrap(), data, "{enc:?} round-trips");
         }

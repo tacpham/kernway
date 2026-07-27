@@ -77,12 +77,12 @@
 pub mod cache;
 /// The error type shared by every backend.
 pub mod error;
-/// Entry lifetimes.
-pub mod ttl;
 /// Hit/miss accounting.
 pub mod stats;
+/// Entry lifetimes.
+pub mod ttl;
 
 pub use cache::{Cache, CacheEntry, CacheManager};
 pub use error::CacheError;
-pub use ttl::Ttl;
 pub use stats::CacheStats;
+pub use ttl::Ttl;

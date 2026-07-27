@@ -108,7 +108,9 @@ where
 
 impl<T> std::ops::Deref for Path<T> {
     type Target = T;
-    fn deref(&self) -> &T { &self.0 }
+    fn deref(&self) -> &T {
+        &self.0
+    }
 }
 
 // ============================================================
@@ -131,7 +133,12 @@ impl<T: DeserializeOwned> Query<T> {
         let map: serde_json::Map<String, serde_json::Value> = req
             .query
             .iter()
-            .map(|(name, value)| (name.to_string(), serde_json::Value::String(value.to_string())))
+            .map(|(name, value)| {
+                (
+                    name.to_string(),
+                    serde_json::Value::String(value.to_string()),
+                )
+            })
             .collect();
         serde_json::from_value(serde_json::Value::Object(map))
             .map(Query)
@@ -147,11 +154,11 @@ impl<T: DeserializeOwned> Query<T> {
 #[derive(Serialize)]
 pub struct ProblemDetail {
     /// HTTP status code, repeated in the body as RFC 7807 §3.1 allows.
-    pub status:  u16,
+    pub status: u16,
     /// Short, human-readable summary — stable for a given status.
-    pub title:   &'static str,
+    pub title: &'static str,
     /// Explanation specific to this occurrence.
-    pub detail:  String,
+    pub detail: String,
 }
 
 impl ProblemDetail {
@@ -159,7 +166,7 @@ impl ProblemDetail {
     pub fn not_found(detail: impl Into<String>) -> Response {
         let mut r = Json(ProblemDetail {
             status: 404,
-            title:  "Not Found",
+            title: "Not Found",
             detail: detail.into(),
         })
         .into_response();
@@ -171,7 +178,7 @@ impl ProblemDetail {
     pub fn bad_request(detail: impl Into<String>) -> Response {
         let mut r = Json(ProblemDetail {
             status: 400,
-            title:  "Bad Request",
+            title: "Bad Request",
             detail: detail.into(),
         })
         .into_response();
@@ -185,7 +192,7 @@ impl ProblemDetail {
     pub fn internal_error(detail: impl Into<String>) -> Response {
         let mut r = Json(ProblemDetail {
             status: 500,
-            title:  "Internal Server Error",
+            title: "Internal Server Error",
             detail: detail.into(),
         })
         .into_response();
@@ -265,7 +272,10 @@ fn validation_response(errors: &ValidationErrors) -> Response {
         errors: errors
             .errors()
             .iter()
-            .map(|e| FieldProblem { field: &e.field, message: &e.message })
+            .map(|e| FieldProblem {
+                field: &e.field,
+                message: &e.message,
+            })
             .collect(),
     };
     let mut response = Json(problem).into_response();
@@ -282,11 +292,18 @@ mod tests {
     // --- Json<T> ---
 
     #[derive(Serialize, Deserialize, PartialEq, Debug)]
-    struct User { id: u64, name: String }
+    struct User {
+        id: u64,
+        name: String,
+    }
 
     #[test]
     fn json_into_response_sets_content_type() {
-        let resp = Json(User { id: 1, name: "Alice".into() }).into_response();
+        let resp = Json(User {
+            id: 1,
+            name: "Alice".into(),
+        })
+        .into_response();
         assert_eq!(resp.status.0, 200);
         assert_eq!(
             resp.headers.get("content-type").unwrap(),
@@ -296,9 +313,19 @@ mod tests {
 
     #[test]
     fn json_into_response_body_is_valid_json() {
-        let resp = Json(User { id: 2, name: "Bob".into() }).into_response();
+        let resp = Json(User {
+            id: 2,
+            name: "Bob".into(),
+        })
+        .into_response();
         let parsed: User = serde_json::from_slice(resp.body_bytes()).unwrap();
-        assert_eq!(parsed, User { id: 2, name: "Bob".into() });
+        assert_eq!(
+            parsed,
+            User {
+                id: 2,
+                name: "Bob".into()
+            }
+        );
     }
 
     #[test]
@@ -353,14 +380,23 @@ mod tests {
         assert_eq!(resp.status, StatusCode::BAD_REQUEST);
         let body = String::from_utf8_lossy(resp.body_bytes());
         assert!(body.contains("Validation Failed"), "body: {body}");
-        assert!(body.contains(r#""field":"name""#), "name error present: {body}");
-        assert!(body.contains(r#""field":"email""#), "email error present: {body}");
+        assert!(
+            body.contains(r#""field":"name""#),
+            "name error present: {body}"
+        );
+        assert!(
+            body.contains(r#""field":"email""#),
+            "email error present: {body}"
+        );
 
         // A malformed body is a plain 400 problem.
         let mut malformed = Request::new("POST", "/users");
         malformed.body = b"not json".to_vec();
         assert_eq!(
-            Validated::<NewUser>::from_request(&malformed).err().unwrap().status,
+            Validated::<NewUser>::from_request(&malformed)
+                .err()
+                .unwrap()
+                .status,
             StatusCode::BAD_REQUEST
         );
     }

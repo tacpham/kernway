@@ -7,7 +7,11 @@ use std::net::{TcpListener, TcpStream};
 use hello_controller::build_app;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn connect(port: u16) -> TcpStream {
@@ -52,19 +56,31 @@ fn the_public_route_is_open() {
 #[test]
 fn the_admin_route_allows_an_admin() {
     let resp = with_server(|port| request(port, "DELETE", "/users/42", Some("ADMIN")));
-    assert!(resp.starts_with("HTTP/1.1 200"), "ADMIN DELETE → 200: {resp}");
-    assert!(resp.contains(r#""deleted":"42""#), "performs the delete: {resp}");
+    assert!(
+        resp.starts_with("HTTP/1.1 200"),
+        "ADMIN DELETE → 200: {resp}"
+    );
+    assert!(
+        resp.contains(r#""deleted":"42""#),
+        "performs the delete: {resp}"
+    );
 }
 
 #[test]
 fn the_admin_route_forbids_a_non_admin() {
     let resp = with_server(|port| request(port, "DELETE", "/users/42", Some("USER")));
-    assert!(resp.starts_with("HTTP/1.1 403"), "USER DELETE → 403: {resp}");
+    assert!(
+        resp.starts_with("HTTP/1.1 403"),
+        "USER DELETE → 403: {resp}"
+    );
     assert!(resp.contains("Forbidden"), "RFC 7807 forbidden: {resp}");
 }
 
 #[test]
 fn the_admin_route_forbids_anonymous() {
     let resp = with_server(|port| request(port, "DELETE", "/users/42", None));
-    assert!(resp.starts_with("HTTP/1.1 403"), "anonymous DELETE → 403: {resp}");
+    assert!(
+        resp.starts_with("HTTP/1.1 403"),
+        "anonymous DELETE → 403: {resp}"
+    );
 }

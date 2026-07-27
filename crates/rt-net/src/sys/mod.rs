@@ -65,7 +65,8 @@ mod tests {
         }
         let first = bind_listener("127.0.0.1:0".parse().unwrap(), 128, true).unwrap();
         let addr = first.local_addr().unwrap();
-        let second = bind_listener(addr, 128, true).expect("SO_REUSEPORT must allow the second bind");
+        let second =
+            bind_listener(addr, 128, true).expect("SO_REUSEPORT must allow the second bind");
         assert_eq!(second.local_addr().unwrap(), addr);
     }
 

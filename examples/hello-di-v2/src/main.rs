@@ -64,8 +64,8 @@ fn main() {
     // Auto-wiring: ctx.build::<T>() calls T::build(ctx) automatically
     // Order: dependencies first, dependents afterward
     ctx.build::<UserRepository>().unwrap();
-    ctx.build::<UserService>().unwrap();      // automatically gets UserRepository from ctx
-    ctx.build::<UserController>().unwrap();   // automatically gets UserService from ctx
+    ctx.build::<UserService>().unwrap(); // automatically gets UserRepository from ctx
+    ctx.build::<UserController>().unwrap(); // automatically gets UserService from ctx
 
     println!("✅ {} beans registered (auto-wired)\n", ctx.bean_count());
 

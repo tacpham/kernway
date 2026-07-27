@@ -35,7 +35,8 @@ fn request(port: u16, extra_headers: &str) -> String {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let mut stream = stream.expect("server never came up");
-    let req = format!("GET /htmx/greet HTTP/1.1\r\nHost: x\r\nConnection: close\r\n{extra_headers}\r\n");
+    let req =
+        format!("GET /htmx/greet HTTP/1.1\r\nHost: x\r\nConnection: close\r\n{extra_headers}\r\n");
     stream.write_all(req.as_bytes()).unwrap();
     let mut got = String::new();
     stream.read_to_string(&mut got).unwrap();
@@ -48,15 +49,18 @@ fn htmx_endpoint_serves_fragment_vs_page_over_a_socket() {
 
     let app = KernwayApp::builder()
         .bind(&format!("127.0.0.1:{port}"))
-        .get("/htmx/greet", |req: Request, _ctx: &RequestScope| async move {
-            Htmx::from(&req)
-                .respond(
-                    || "<div id=\"greeting\">FRAGMENT</div>".to_string(),
-                    || "<!doctype html><div id=\"greeting\">PAGE</div>".to_string(),
-                )
-                .trigger("greeted")
-                .into_response()
-        })
+        .get(
+            "/htmx/greet",
+            |req: Request, _ctx: &RequestScope| async move {
+                Htmx::from(&req)
+                    .respond(
+                        || "<div id=\"greeting\">FRAGMENT</div>".to_string(),
+                        || "<!doctype html><div id=\"greeting\">PAGE</div>".to_string(),
+                    )
+                    .trigger("greeted")
+                    .into_response()
+            },
+        )
         .build();
 
     let stop = app.shutdown_handle();
@@ -64,15 +68,33 @@ fn htmx_endpoint_serves_fragment_vs_page_over_a_socket() {
 
     // htmx request → the fragment, with the HX-* headers intact.
     let htmx = request(port, "HX-Request: true\r\n");
-    assert!(htmx.starts_with("HTTP/1.1 200 OK\r\n"), "status line: {htmx:?}");
-    assert!(htmx.contains("hx-trigger: greeted\r\n"), "missing HX-Trigger: {htmx:?}");
-    assert!(htmx.contains("vary: HX-Request\r\n"), "missing Vary: {htmx:?}");
-    assert!(htmx.ends_with("<div id=\"greeting\">FRAGMENT</div>"), "body: {htmx:?}");
+    assert!(
+        htmx.starts_with("HTTP/1.1 200 OK\r\n"),
+        "status line: {htmx:?}"
+    );
+    assert!(
+        htmx.contains("hx-trigger: greeted\r\n"),
+        "missing HX-Trigger: {htmx:?}"
+    );
+    assert!(
+        htmx.contains("vary: HX-Request\r\n"),
+        "missing Vary: {htmx:?}"
+    );
+    assert!(
+        htmx.ends_with("<div id=\"greeting\">FRAGMENT</div>"),
+        "body: {htmx:?}"
+    );
 
     // Plain browser request → the full page, same URL, still Vary-marked.
     let page = request(port, "");
-    assert!(page.contains("vary: HX-Request\r\n"), "missing Vary: {page:?}");
-    assert!(page.ends_with("<!doctype html><div id=\"greeting\">PAGE</div>"), "body: {page:?}");
+    assert!(
+        page.contains("vary: HX-Request\r\n"),
+        "missing Vary: {page:?}"
+    );
+    assert!(
+        page.ends_with("<!doctype html><div id=\"greeting\">PAGE</div>"),
+        "body: {page:?}"
+    );
 
     stop.trigger();
     server.join().unwrap().unwrap();

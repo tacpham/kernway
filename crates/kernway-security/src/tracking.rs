@@ -73,7 +73,11 @@ pub fn visitor_from_cookie(cookie_header: &str) -> Option<&str> {
 ///   left-hand entries are shadowed by the real hops on the right). If every entry
 ///   is trusted (or there is none), fall back to the peer.
 #[must_use]
-pub fn client_ip(remote_addr: Option<SocketAddr>, forwarded_for: Option<&str>, trusted: &[IpAddr]) -> Option<IpAddr> {
+pub fn client_ip(
+    remote_addr: Option<SocketAddr>,
+    forwarded_for: Option<&str>,
+    trusted: &[IpAddr],
+) -> Option<IpAddr> {
     let peer = remote_addr?.ip();
     if !trusted.contains(&peer) {
         return Some(peer);
@@ -217,7 +221,8 @@ impl BanList {
 
     /// Remove a User-Agent-contains ban (unban).
     pub fn remove_user_agent_containing(&mut self, phrase: &str) {
-        self.rules.retain(|r| *r != BanRule::UserAgentContains(phrase.to_ascii_lowercase()));
+        self.rules
+            .retain(|r| *r != BanRule::UserAgentContains(phrase.to_ascii_lowercase()));
     }
 
     /// Drop every rule.
@@ -252,7 +257,9 @@ impl BanList {
             .iter()
             .map(|rule| match rule {
                 BanRule::Ip(ip) => BanRuleView::Ip(*ip),
-                BanRule::Subnet(cidr) => BanRuleView::Subnet(format!("{}/{}", cidr.network, cidr.prefix)),
+                BanRule::Subnet(cidr) => {
+                    BanRuleView::Subnet(format!("{}/{}", cidr.network, cidr.prefix))
+                }
                 BanRule::UserAgentExact(ua) => BanRuleView::UserAgentExact(ua.clone()),
                 BanRule::UserAgentContains(p) => BanRuleView::UserAgentContains(p.clone()),
             })
@@ -370,11 +377,19 @@ fn parse_cidr(spec: &str) -> Option<Cidr> {
 fn cidr_contains(cidr: &Cidr, ip: IpAddr) -> bool {
     match (cidr.network, ip) {
         (IpAddr::V4(net), IpAddr::V4(ip)) => {
-            let mask = if cidr.prefix == 0 { 0 } else { u32::MAX << (32 - cidr.prefix) };
+            let mask = if cidr.prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - cidr.prefix)
+            };
             (u32::from(net) & mask) == (u32::from(ip) & mask)
         }
         (IpAddr::V6(net), IpAddr::V6(ip)) => {
-            let mask = if cidr.prefix == 0 { 0 } else { u128::MAX << (128 - cidr.prefix) };
+            let mask = if cidr.prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - cidr.prefix)
+            };
             (u128::from(net) & mask) == (u128::from(ip) & mask)
         }
         _ => false, // different address families never match
@@ -397,14 +412,22 @@ mod tests {
         // Nobody trusted → the request came straight to us; X-Forwarded-For is
         // attacker-controlled and must be ignored.
         let resolved = client_ip(Some(sa("1.2.3.4:5000")), Some("8.8.8.8"), &[]);
-        assert_eq!(resolved, Some(ip("1.2.3.4")), "spoofed forwarded header ignored");
+        assert_eq!(
+            resolved,
+            Some(ip("1.2.3.4")),
+            "spoofed forwarded header ignored"
+        );
     }
 
     #[test]
     fn behind_a_trusted_proxy_uses_the_forwarded_client() {
         let trusted = [ip("10.0.0.1")];
         let resolved = client_ip(Some(sa("10.0.0.1:5000")), Some("1.2.3.4"), &trusted);
-        assert_eq!(resolved, Some(ip("1.2.3.4")), "the real client from the proxy");
+        assert_eq!(
+            resolved,
+            Some(ip("1.2.3.4")),
+            "the real client from the proxy"
+        );
     }
 
     #[test]
@@ -413,14 +436,25 @@ mod tests {
         // Walking right-to-left: proxy1 trusted (skip), then the real client — never
         // the spoofed 6.6.6.6 further left.
         let trusted = [ip("10.0.0.1"), ip("10.0.0.2")];
-        let resolved = client_ip(Some(sa("10.0.0.2:5000")), Some("6.6.6.6, 1.2.3.4, 10.0.0.1"), &trusted);
-        assert_eq!(resolved, Some(ip("1.2.3.4")), "the spoofed entry is shadowed by the real hops");
+        let resolved = client_ip(
+            Some(sa("10.0.0.2:5000")),
+            Some("6.6.6.6, 1.2.3.4, 10.0.0.1"),
+            &trusted,
+        );
+        assert_eq!(
+            resolved,
+            Some(ip("1.2.3.4")),
+            "the spoofed entry is shadowed by the real hops"
+        );
     }
 
     #[test]
     fn a_trusted_peer_with_no_forwarded_header_uses_the_peer() {
         let trusted = [ip("10.0.0.1")];
-        assert_eq!(client_ip(Some(sa("10.0.0.1:5000")), None, &trusted), Some(ip("10.0.0.1")));
+        assert_eq!(
+            client_ip(Some(sa("10.0.0.1:5000")), None, &trusted),
+            Some(ip("10.0.0.1"))
+        );
     }
 
     #[test]
@@ -433,7 +467,10 @@ mod tests {
         let cookie = visitor_cookie("abc123");
         assert!(cookie.starts_with("kw_visitor=abc123;"));
         assert!(cookie.contains("HttpOnly"));
-        assert_eq!(visitor_from_cookie("other=x; kw_visitor=abc123; more=y"), Some("abc123"));
+        assert_eq!(
+            visitor_from_cookie("other=x; kw_visitor=abc123; more=y"),
+            Some("abc123")
+        );
         assert_eq!(visitor_from_cookie("nothing=here"), None);
     }
 
@@ -450,19 +487,33 @@ mod tests {
         assert!(bans.is_banned(Some(ip("1.2.3.4")), None));
         assert!(!bans.is_banned(Some(ip("1.2.3.5")), None));
         // Subnets.
-        assert!(bans.is_banned(Some(ip("10.99.1.1")), None), "/8 covers 10.*");
+        assert!(
+            bans.is_banned(Some(ip("10.99.1.1")), None),
+            "/8 covers 10.*"
+        );
         assert!(!bans.is_banned(Some(ip("11.0.0.1")), None));
-        assert!(bans.is_banned(Some(ip("192.168.1.50")), None), "/24 covers .1.*");
-        assert!(!bans.is_banned(Some(ip("192.168.2.50")), None), "/24 excludes .2.*");
+        assert!(
+            bans.is_banned(Some(ip("192.168.1.50")), None),
+            "/24 covers .1.*"
+        );
+        assert!(
+            !bans.is_banned(Some(ip("192.168.2.50")), None),
+            "/24 excludes .2.*"
+        );
         // User-Agent exact and contains (case-insensitive).
         assert!(bans.is_banned(None, Some("BadBot/1.0")));
         assert!(!bans.is_banned(None, Some("BadBot/2.0")));
-        assert!(bans.is_banned(None, Some("Evil SCRAPER 3.0")), "contains is case-insensitive");
+        assert!(
+            bans.is_banned(None, Some("Evil SCRAPER 3.0")),
+            "contains is case-insensitive"
+        );
         // A clean request.
         assert!(!bans.is_banned(Some(ip("8.8.8.8")), Some("Mozilla/5.0")));
         // An empty list bans nobody, and a malformed subnet is ignored.
         assert!(!BanList::new().is_banned(Some(ip("1.2.3.4")), Some("BadBot/1.0")));
-        assert!(!BanList::new().subnet("not-a-cidr").is_banned(Some(ip("1.2.3.4")), None));
+        assert!(!BanList::new()
+            .subnet("not-a-cidr")
+            .is_banned(Some(ip("1.2.3.4")), None));
     }
 
     #[test]

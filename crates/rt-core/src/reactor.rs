@@ -80,7 +80,11 @@ impl Reactor {
     ///
     /// The token is not recycled — `next_token` only moves forward, so a stale
     /// event can never be delivered to a later source that reused the number.
-    pub fn deregister<S: Source + ?Sized>(&mut self, source: &mut S, token: Token) -> io::Result<()> {
+    pub fn deregister<S: Source + ?Sized>(
+        &mut self,
+        source: &mut S,
+        token: Token,
+    ) -> io::Result<()> {
         self.parked.remove(&token);
         self.poll.registry().deregister(source)
     }
@@ -214,13 +218,28 @@ mod tests {
         let waker = counting_waker(Arc::clone(&first));
         reactor.park(token, Direction::Read, waker.clone());
         reactor.park(token, Direction::Read, waker.clone());
-        assert!(reactor.parked[&token].read.as_ref().unwrap().will_wake(&waker));
+        assert!(reactor.parked[&token]
+            .read
+            .as_ref()
+            .unwrap()
+            .will_wake(&waker));
 
         // A different waker replaces it: the task re-polled, and only the most
         // recent poll's waker may be woken.
         reactor.park(token, Direction::Read, counting_waker(Arc::clone(&second)));
-        reactor.parked.get_mut(&token).unwrap().read.take().unwrap().wake();
-        assert_eq!(first.load(Ordering::SeqCst), 0, "the stale waker must not fire");
+        reactor
+            .parked
+            .get_mut(&token)
+            .unwrap()
+            .read
+            .take()
+            .unwrap()
+            .wake();
+        assert_eq!(
+            first.load(Ordering::SeqCst),
+            0,
+            "the stale waker must not fire"
+        );
         assert_eq!(second.load(Ordering::SeqCst), 1);
     }
 
@@ -261,7 +280,11 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(hits.load(Ordering::SeqCst), 1, "incoming data must wake the reader");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "incoming data must wake the reader"
+        );
     }
 
     #[test]

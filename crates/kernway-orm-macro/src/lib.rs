@@ -41,14 +41,18 @@ pub fn entity(args: TokenStream, input: TokenStream) -> TokenStream {
     let args = parse_macro_input!(args with Punctuated::<Meta, Token![,]>::parse_terminated);
     let mut item = parse_macro_input!(input as ItemStruct);
     let struct_name = item.ident.clone();
-    let table_name = extract_table_name(&args).unwrap_or_else(|| to_snake_case(&struct_name.to_string()));
+    let table_name =
+        extract_table_name(&args).unwrap_or_else(|| to_snake_case(&struct_name.to_string()));
 
     let fields = match &mut item.fields {
         Fields::Named(fields) => &mut fields.named,
         _ => {
-            return syn::Error::new_spanned(&item, "#[entity] only supports structs with named fields")
-                .to_compile_error()
-                .into();
+            return syn::Error::new_spanned(
+                &item,
+                "#[entity] only supports structs with named fields",
+            )
+            .to_compile_error()
+            .into();
         }
     };
 
@@ -100,9 +104,12 @@ pub fn entity(args: TokenStream, input: TokenStream) -> TokenStream {
 
         if is_id {
             if id_field.is_some() {
-                return syn::Error::new_spanned(&field_ident, "#[entity] requires exactly one #[id] field")
-                    .to_compile_error()
-                    .into();
+                return syn::Error::new_spanned(
+                    &field_ident,
+                    "#[entity] requires exactly one #[id] field",
+                )
+                .to_compile_error()
+                .into();
             }
             id_field = Some(field_ident.clone());
             id_type = Some(field_ty.clone());
@@ -164,7 +171,10 @@ fn extract_table_name(args: &Punctuated<Meta, Token![,]>) -> Option<String> {
     for arg in args {
         if let Meta::NameValue(MetaNameValue { path, value, .. }) = arg {
             if path.is_ident("table") {
-                if let Expr::Lit(ExprLit { lit: Lit::Str(lit), .. }) = value {
+                if let Expr::Lit(ExprLit {
+                    lit: Lit::Str(lit), ..
+                }) = value
+                {
                     return Some(lit.value());
                 }
             }
@@ -238,7 +248,11 @@ fn column_type_tokens(ty: &Type) -> proc_macro2::TokenStream {
 
 fn rust_type_name(ty: &Type) -> Option<String> {
     match ty {
-        Type::Path(type_path) => type_path.path.segments.last().map(|segment| segment.ident.to_string()),
+        Type::Path(type_path) => type_path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string()),
         Type::Reference(reference) => rust_type_name(&reference.elem),
         _ => None,
     }

@@ -41,7 +41,12 @@ impl Middleware for SecurityHeaders {
         "SecurityHeaders"
     }
 
-    fn handle<'a>(&'a self, req: Request, scope: &'a RequestScope, next: Next<'a>) -> BoxFuture<'a, Response> {
+    fn handle<'a>(
+        &'a self,
+        req: Request,
+        scope: &'a RequestScope,
+        next: Next<'a>,
+    ) -> BoxFuture<'a, Response> {
         Box::pin(async move {
             let mut response = next.run(req, scope).await;
             self.apply(&mut response);
@@ -82,7 +87,10 @@ impl HttpSecurity {
     /// unlisted path needs a login until you say otherwise).
     #[must_use]
     pub fn new() -> Self {
-        Self { rules: Vec::new(), default: Access::Authenticated }
+        Self {
+            rules: Vec::new(),
+            default: Access::Authenticated,
+        }
     }
 
     /// Open a path pattern to everyone (any method).
@@ -106,7 +114,11 @@ impl HttpSecurity {
     /// Require any of `roles` on a pattern (any method).
     #[must_use]
     pub fn has_any_role(self, pattern: &str, roles: &[&str]) -> Self {
-        self.rule(None, pattern, Access::HasAnyRole(roles.iter().map(|r| (*r).to_string()).collect()))
+        self.rule(
+            None,
+            pattern,
+            Access::HasAnyRole(roles.iter().map(|r| (*r).to_string()).collect()),
+        )
     }
 
     /// Deny a pattern outright (any method).
@@ -140,7 +152,10 @@ impl HttpSecurity {
     /// Finish into the enforcing middleware — add it with `app.layer(...)`.
     #[must_use]
     pub fn build(self) -> SecurityLayer {
-        SecurityLayer { rules: Arc::new(self.rules), default: self.default }
+        SecurityLayer {
+            rules: Arc::new(self.rules),
+            default: self.default,
+        }
     }
 }
 
@@ -183,10 +198,18 @@ impl Middleware for SecurityLayer {
         "Security"
     }
 
-    fn handle<'a>(&'a self, req: Request, scope: &'a RequestScope, next: Next<'a>) -> BoxFuture<'a, Response> {
+    fn handle<'a>(
+        &'a self,
+        req: Request,
+        scope: &'a RequestScope,
+        next: Next<'a>,
+    ) -> BoxFuture<'a, Response> {
         let anonymous = SecurityContext::anonymous();
         let context = scope.get::<SecurityContext>().ok();
-        let decision = decide(self.access_for(&req.method, &req.path), context.as_deref().unwrap_or(&anonymous));
+        let decision = decide(
+            self.access_for(&req.method, &req.path),
+            context.as_deref().unwrap_or(&anonymous),
+        );
         match decision {
             Decision::Allow => next.run(req, scope),
             Decision::Unauthenticated => Box::pin(async { unauthorized() }),
@@ -265,9 +288,13 @@ mod tests {
         let app = AppContext::new();
         let scope = RequestScope::new(&app);
         scope.set(ctx);
-        let terminal: &Terminal =
-            &|_req, _scope| Box::pin(async { Response::new(StatusCode::OK) }) as BoxFuture<'static, Response>;
-        let next = Next { rest: &[], terminal };
+        let terminal: &Terminal = &|_req, _scope| {
+            Box::pin(async { Response::new(StatusCode::OK) }) as BoxFuture<'static, Response>
+        };
+        let next = Next {
+            rest: &[],
+            terminal,
+        };
         block_on(layer.handle(Request::new("GET", path), &scope, next)).status
     }
 
@@ -297,10 +324,19 @@ mod tests {
             .authenticated("/api/**")
             .any_request(Access::PermitAll)
             .build();
-        assert!(matches!(layer.access_for("GET", "/public/x"), Access::PermitAll));
+        assert!(matches!(
+            layer.access_for("GET", "/public/x"),
+            Access::PermitAll
+        ));
         assert!(matches!(layer.access_for("GET", "/admin/x"), Access::HasRole(r) if r == "ADMIN"));
-        assert!(matches!(layer.access_for("GET", "/api/x"), Access::Authenticated));
-        assert!(matches!(layer.access_for("GET", "/other"), Access::PermitAll), "falls to any_request");
+        assert!(matches!(
+            layer.access_for("GET", "/api/x"),
+            Access::Authenticated
+        ));
+        assert!(
+            matches!(layer.access_for("GET", "/other"), Access::PermitAll),
+            "falls to any_request"
+        );
     }
 
     #[test]
@@ -312,11 +348,21 @@ mod tests {
             .permit_all("/articles/**") // any other method (GET) is open
             .any_request(Access::Authenticated)
             .build();
-        assert!(matches!(layer.access_for("GET", "/articles/1"), Access::PermitAll), "GET open");
-        assert!(matches!(layer.access_for("POST", "/articles"), Access::HasRole(r) if r == "ADMIN"));
-        assert!(matches!(layer.access_for("DELETE", "/articles/1"), Access::HasRole(r) if r == "ADMIN"));
+        assert!(
+            matches!(layer.access_for("GET", "/articles/1"), Access::PermitAll),
+            "GET open"
+        );
+        assert!(
+            matches!(layer.access_for("POST", "/articles"), Access::HasRole(r) if r == "ADMIN")
+        );
+        assert!(
+            matches!(layer.access_for("DELETE", "/articles/1"), Access::HasRole(r) if r == "ADMIN")
+        );
         // A method-specific rule does not catch other methods.
-        assert!(matches!(layer.access_for("PUT", "/articles/1"), Access::PermitAll), "PUT falls to the open rule");
+        assert!(
+            matches!(layer.access_for("PUT", "/articles/1"), Access::PermitAll),
+            "PUT falls to the open rule"
+        );
     }
 
     #[test]
@@ -326,23 +372,50 @@ mod tests {
         let anon = SecurityContext::anonymous();
 
         assert!(matches!(decide(&Access::PermitAll, &anon), Decision::Allow));
-        assert!(matches!(decide(&Access::Authenticated, &anon), Decision::Unauthenticated));
-        assert!(matches!(decide(&Access::Authenticated, &user), Decision::Allow));
-        assert!(matches!(decide(&Access::HasRole("ADMIN".into()), &anon), Decision::Unauthenticated));
-        assert!(matches!(decide(&Access::HasRole("ADMIN".into()), &user), Decision::Forbidden));
-        assert!(matches!(decide(&Access::HasRole("ADMIN".into()), &admin), Decision::Allow));
         assert!(matches!(
-            decide(&Access::HasAnyRole(vec!["ADMIN".into(), "STAFF".into()]), &admin),
+            decide(&Access::Authenticated, &anon),
+            Decision::Unauthenticated
+        ));
+        assert!(matches!(
+            decide(&Access::Authenticated, &user),
             Decision::Allow
         ));
-        assert!(matches!(decide(&Access::DenyAll, &admin), Decision::Forbidden));
-        assert!(matches!(decide(&Access::DenyAll, &anon), Decision::Unauthenticated));
+        assert!(matches!(
+            decide(&Access::HasRole("ADMIN".into()), &anon),
+            Decision::Unauthenticated
+        ));
+        assert!(matches!(
+            decide(&Access::HasRole("ADMIN".into()), &user),
+            Decision::Forbidden
+        ));
+        assert!(matches!(
+            decide(&Access::HasRole("ADMIN".into()), &admin),
+            Decision::Allow
+        ));
+        assert!(matches!(
+            decide(
+                &Access::HasAnyRole(vec!["ADMIN".into(), "STAFF".into()]),
+                &admin
+            ),
+            Decision::Allow
+        ));
+        assert!(matches!(
+            decide(&Access::DenyAll, &admin),
+            Decision::Forbidden
+        ));
+        assert!(matches!(
+            decide(&Access::DenyAll, &anon),
+            Decision::Unauthenticated
+        ));
     }
 
     #[test]
     fn more_pattern_edge_cases() {
         // A `/**` prefix must not leak past a segment boundary.
-        assert!(!path_matches("/a/**", "/ab/c"), "/a is not a prefix segment of /ab");
+        assert!(
+            !path_matches("/a/**", "/ab/c"),
+            "/a is not a prefix segment of /ab"
+        );
         assert!(path_matches("/a/**", "/a/b/c"));
         // Root and catch-all.
         assert!(path_matches("/**", "/"));
@@ -366,14 +439,23 @@ mod tests {
         let user = || SecurityContext::authenticated("u", ["USER"]);
 
         // Public — anyone reaches the handler.
-        assert_eq!(enforce(&layer, "/public/x", SecurityContext::anonymous()), StatusCode::OK);
+        assert_eq!(
+            enforce(&layer, "/public/x", SecurityContext::anonymous()),
+            StatusCode::OK
+        );
         // Admin path — role gate.
         assert_eq!(enforce(&layer, "/admin/x", admin()), StatusCode::OK);
         assert_eq!(enforce(&layer, "/admin/x", user()), StatusCode::FORBIDDEN);
-        assert_eq!(enforce(&layer, "/admin/x", SecurityContext::anonymous()), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            enforce(&layer, "/admin/x", SecurityContext::anonymous()),
+            StatusCode::UNAUTHORIZED
+        );
         // Default (authenticated) — login required.
         assert_eq!(enforce(&layer, "/anything", user()), StatusCode::OK);
-        assert_eq!(enforce(&layer, "/anything", SecurityContext::anonymous()), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            enforce(&layer, "/anything", SecurityContext::anonymous()),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[test]
@@ -381,28 +463,53 @@ mod tests {
         let headers = SecurityHeaders::strict();
         let app = AppContext::new();
         let scope = RequestScope::new(&app);
-        let terminal: &Terminal =
-            &|_req, _scope| Box::pin(async { Response::new(StatusCode::OK) }) as BoxFuture<'static, Response>;
+        let terminal: &Terminal = &|_req, _scope| {
+            Box::pin(async { Response::new(StatusCode::OK) }) as BoxFuture<'static, Response>
+        };
         let response = block_on(Middleware::handle(
             &headers,
             Request::new("GET", "/"),
             &scope,
-            Next { rest: &[], terminal },
+            Next {
+                rest: &[],
+                terminal,
+            },
         ));
-        assert_eq!(response.headers.get("x-frame-options"), Some("DENY"), "headers applied");
-        assert!(response.headers.get("content-security-policy").is_some(), "CSP applied");
+        assert_eq!(
+            response.headers.get("x-frame-options"),
+            Some("DENY"),
+            "headers applied"
+        );
+        assert!(
+            response.headers.get("content-security-policy").is_some(),
+            "CSP applied"
+        );
     }
 
     #[test]
     fn a_missing_security_context_is_anonymous() {
         // No auth middleware set a context → the layer must treat it as anonymous.
-        let layer = HttpSecurity::new().any_request(Access::Authenticated).build();
+        let layer = HttpSecurity::new()
+            .any_request(Access::Authenticated)
+            .build();
         let app = AppContext::new();
         let scope = RequestScope::new(&app); // nothing set
-        let terminal: &Terminal =
-            &|_req, _scope| Box::pin(async { Response::new(StatusCode::OK) }) as BoxFuture<'static, Response>;
-        let response = block_on(layer.handle(Request::new("GET", "/x"), &scope, Next { rest: &[], terminal }));
-        assert_eq!(response.status, StatusCode::UNAUTHORIZED, "no context → 401");
+        let terminal: &Terminal = &|_req, _scope| {
+            Box::pin(async { Response::new(StatusCode::OK) }) as BoxFuture<'static, Response>
+        };
+        let response = block_on(layer.handle(
+            Request::new("GET", "/x"),
+            &scope,
+            Next {
+                rest: &[],
+                terminal,
+            },
+        ));
+        assert_eq!(
+            response.status,
+            StatusCode::UNAUTHORIZED,
+            "no context → 401"
+        );
     }
 
     #[test]
@@ -413,12 +520,22 @@ mod tests {
             .any_request(Access::PermitAll)
             .build();
         // permit_all → 200 for anyone.
-        assert_eq!(enforce(&layer, "/open/x", SecurityContext::anonymous()), StatusCode::OK);
+        assert_eq!(
+            enforce(&layer, "/open/x", SecurityContext::anonymous()),
+            StatusCode::OK
+        );
         // deny_all → 403 even for an admin, 401 for anonymous.
         assert_eq!(
-            enforce(&layer, "/blocked/x", SecurityContext::authenticated("a", ["ADMIN"])),
+            enforce(
+                &layer,
+                "/blocked/x",
+                SecurityContext::authenticated("a", ["ADMIN"])
+            ),
             StatusCode::FORBIDDEN
         );
-        assert_eq!(enforce(&layer, "/blocked/x", SecurityContext::anonymous()), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            enforce(&layer, "/blocked/x", SecurityContext::anonymous()),
+            StatusCode::UNAUTHORIZED
+        );
     }
 }
