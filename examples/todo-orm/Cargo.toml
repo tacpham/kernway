@@ -16,5 +16,6 @@ kernway-web        = { path = "../../crates/kernway-web" }
 kernway-orm-core   = { path = "../../crates/kernway-orm-core" }
 kernway-orm-macro  = { path = "../../crates/kernway-orm-macro" }
 kernway-orm-memory = { path = "../../crates/kernway-orm-memory" }
+rt-core            = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }

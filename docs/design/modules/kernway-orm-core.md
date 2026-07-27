@@ -16,8 +16,8 @@ What is actually built vs what this document describes as planned:
 | Item | Built | Notes |
 |---|---|---|
 | `Entity` trait | ✅ | `table_name`, `id`, `columns` — sync, as specified |
-| `Repository<T>` trait | ✅ | **All methods are synchronous** — the async API below is planned only |
-| `QueryBuilder<T>` trait | ✅ | Named filter methods (`filter_eq`, `filter_ne`, …) — **not** `filter(predicate)` |
+| `Repository<T>` trait | ✅ | Async via `BoxFuture`; repository methods now return boxed futures |
+| `QueryBuilder<T>` trait | ✅ | Chaining stays sync; terminal methods are async via `BoxFuture` |
 | `OrmError` | ✅ | All variants — as specified |
 | `Page<T>` | ✅ | As specified |
 | `OrmTransaction` trait | ❌ not started | Planned |
@@ -26,14 +26,14 @@ What is actually built vs what this document describes as planned:
 | `#[column(default)` / `#[column(auto)]` | ❌ not started | Planned |
 | `#[one_to_many]` / `#[many_to_one]` / `#[many_to_many]` | ❌ not started | Planned |
 | `#[repository]` derive | ❌ not started | Planned |
-| `kernway-orm-sqlite` driver | ✅ | rusqlite, sync — see `kernway-orm-sqlite.md` |
-| `kernway-orm-memory` driver | ✅ | HashMap, sync — see `kernway-orm-memory.md` |
+| `kernway-orm-sqlite` driver | ✅ | rusqlite + `spawn_blocking` — see `kernway-orm-sqlite.md` |
+| `kernway-orm-memory` driver | ✅ | HashMap wrapped in async futures — see `kernway-orm-memory.md` |
 | `kernway-orm-diesel` | ❌ not started | Charter exists; no code |
 | `kernway-orm-sqlx` | ❌ not started | Planned |
 
-> **Important**: The trait definitions below show the **current synchronous API**.
-> A future async version (when Rust's `async fn` in traits stabilises) is noted
-> inline. Do not write drivers expecting `async fn` — they will not compile.
+> **Important**: The async migration is now complete. `Repository<T>` methods return
+> `BoxFuture<'a, ...>`, query-builder chaining stays synchronous, and terminal
+> `QueryBuilder<T>` operations return `BoxFuture<'static, ...>`.
 
 ## Standards
 

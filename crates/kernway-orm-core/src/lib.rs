@@ -2,6 +2,7 @@
 //!
 //! The ORM spec: traits and metadata types, no driver. Roughly what JPA
 //! (JSR-338) is to Hibernate.
+
 //!
 //! ## The idea
 //!
@@ -62,12 +63,12 @@
 //! [`QueryBuilder::with`]: query::QueryBuilder::with
 //! [`Repository<T>`]: repository::Repository
 //!
-//! ## Everything is synchronous
+//! ## Async trait surface
 //!
-//! Every method blocks. In Kernway's thread-per-core model, a blocking database
-//! call belongs on a blocking pool (`spawn_blocking`), not smeared across the
-//! executor — so the trait stays sync and the caller decides where it runs.
-//! This also keeps the spec free of any runtime dependency.
+//! Repository methods return boxed futures, while backends decide how to run
+//! their work: purely in-memory implementations can resolve immediately and
+//! blocking drivers can hop to a blocking pool. The spec stays runtime-agnostic
+//! by exposing only [`BoxFuture`].
 //!
 //! ## Module map
 //!
@@ -77,19 +78,26 @@
 //! - [`page`] — [`Page`]: a page of results with its counts
 //! - [`error`] — [`OrmError`]: the failure vocabulary every backend maps onto
 
+use std::future::Future;
+use std::pin::Pin;
+
+/// Async future alias used by all ORM traits.
+/// `'a` is the lifetime of the borrowed receiver.
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
 /// Entity mapping metadata: what a struct is called in the database.
 pub mod entity;
-/// The CRUD contract a backend implements per entity type.
-pub mod repository;
-/// The fluent query builder contract.
-pub mod query;
 /// The error type shared by every backend.
 pub mod error;
 /// Paginated results.
 pub mod page;
+/// The fluent query builder contract.
+pub mod query;
+/// The CRUD contract a backend implements per entity type.
+pub mod repository;
 
 pub use entity::{ColumnDef, ColumnType, Entity};
-pub use repository::Repository;
-pub use query::QueryBuilder;
 pub use error::OrmError;
 pub use page::Page;
+pub use query::QueryBuilder;
+pub use repository::Repository;

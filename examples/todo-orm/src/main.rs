@@ -11,7 +11,12 @@ use kernway_server::{
 };
 use kernway_web::{Json, Path, ProblemDetail};
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::sync::Arc;
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    rt_core::Executor::new().unwrap().block_on(future).unwrap()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[entity(table = "todos")]
@@ -27,7 +32,9 @@ pub struct TodoRepository {
 }
 
 impl Default for TodoRepository {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TodoRepository {
@@ -38,19 +45,19 @@ impl TodoRepository {
     }
 
     pub fn find_all(&self) -> Vec<Todo> {
-        self.inner.find_all().unwrap_or_default()
+        block_on(self.inner.find_all()).unwrap_or_default()
     }
 
     pub fn find_by_id(&self, id: u64) -> Option<Todo> {
-        self.inner.find_by_id(&id).unwrap_or(None)
+        block_on(self.inner.find_by_id(&id)).unwrap_or(None)
     }
 
     pub fn save(&self, todo: Todo) -> Todo {
-        self.inner.save(todo).unwrap()
+        block_on(self.inner.save(todo)).unwrap()
     }
 
     pub fn delete_by_id(&self, id: u64) {
-        let _ = self.inner.delete_by_id(&id);
+        let _ = block_on(self.inner.delete_by_id(&id));
     }
 }
 
@@ -136,19 +143,22 @@ fn main() {
                 Json(svc.create(body.title)).into_response()
             }
         })
-        .put("/todos/{id}/complete", |req: Request, ctx: &RequestScope| {
-            let svc = ctx.get::<TodoService>().unwrap();
-            async move {
-                let id = match Path::<u64>::from_request(&req, "id") {
-                    Ok(path) => *path,
-                    Err(err) => return ProblemDetail::bad_request(err),
-                };
-                match svc.complete(id) {
-                    Some(todo) => Json(todo).into_response(),
-                    None => ProblemDetail::not_found(format!("todo {} not found", id)),
+        .put(
+            "/todos/{id}/complete",
+            |req: Request, ctx: &RequestScope| {
+                let svc = ctx.get::<TodoService>().unwrap();
+                async move {
+                    let id = match Path::<u64>::from_request(&req, "id") {
+                        Ok(path) => *path,
+                        Err(err) => return ProblemDetail::bad_request(err),
+                    };
+                    match svc.complete(id) {
+                        Some(todo) => Json(todo).into_response(),
+                        None => ProblemDetail::not_found(format!("todo {} not found", id)),
+                    }
                 }
-            }
-        })
+            },
+        )
         .delete("/todos/{id}", |req: Request, ctx: &RequestScope| {
             let svc = ctx.get::<TodoService>().unwrap();
             async move {

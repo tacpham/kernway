@@ -8,16 +8,15 @@ in the ORM stack: actual data survives process restarts (file mode), DDL is
 generated automatically from `Entity` metadata, and the full CRUD + query
 surface is available.
 
-**Not** an async driver. All operations block on the calling thread. In
-Kernway's thread-per-core model the caller decides where that blocking belongs
-(typically `spawn_blocking`) — the driver itself stays dependency-free of any
-runtime.
+This crate now exposes an async ORM surface while keeping rusqlite on the
+blocking pool. Public `Repository<T>` and terminal `QueryBuilder<T>` methods
+return boxed futures; the actual SQLite work runs via `rt_core::spawn_blocking`.
 
 ## Status
 
 | Area | State | Notes |
 |---|---|---|
-| `Repository<T>` — all 9 CRUD methods | ✅ done | full impl |
+| `Repository<T>` — all 9 CRUD methods | ✅ done | async trait methods backed by `spawn_blocking` |
 | Auto-DDL (`CREATE TABLE IF NOT EXISTS`) | ✅ done | generated from `Entity::columns()` at construction |
 | `#[id(strategy = "auto")]` | ✅ done | `AUTOINCREMENT`; returns entity with DB-assigned id after insert |
 | WAL mode + foreign keys | ✅ done | `PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;` on open |
@@ -26,7 +25,7 @@ runtime.
 | `execute_raw(sql)` | ✅ done | escape hatch for fixtures / schema tweaks |
 | `QueryBuilder<T>` — all 5 filters | ✅ done | compiled to parameterised `WHERE` clause |
 | `QueryBuilder<T>` — ordering | ✅ done | `ORDER BY … ASC/DESC`; last `order_by_*` wins (single key) |
-| `QueryBuilder<T>` — pagination | ✅ done | `LIMIT` / `OFFSET` / `fetch_page` |
+| `QueryBuilder<T>` — pagination | ✅ done | sync builder chaining; terminal methods async via `spawn_blocking` |
 | `QueryBuilder::with` (eager load) | 🚧 no-op | accepted but silently ignored |
 | `UniqueViolation` / `ForeignKeyViolation` error mapping | ✅ done | rusqlite codes → `OrmError` variants |
 | Migrations | ❌ not started | no schema versioning; DDL is append-only CREATE IF NOT EXISTS |
@@ -36,7 +35,7 @@ runtime.
 
 **Today**: a working SQLite backend — open a file (or `:memory:`), call CRUD
 and query methods, get back typed `T`. Suitable for single-process applications.
-**Not yet**: connection pooling, migrations, multi-sort, eager relations, async.
+**Not yet**: connection pooling, migrations, multi-sort, eager relations.
 
 ## Standards
 
@@ -46,8 +45,8 @@ No formal spec. Compliance goals:
 |---|---|---|
 | SQLite WAL mode | concurrency model | enabled on every connection |
 | SQLite foreign key enforcement | referential integrity | enabled on every connection (`PRAGMA foreign_keys=ON`) |
-| `kernway-orm-core` `Repository<T>` contract | CRUD semantics | full — all 9 methods implemented |
-| `kernway-orm-core` `QueryBuilder<T>` contract | filter / order / page | full — all methods; `.with()` no-op |
+| `kernway-orm-core` `Repository<T>` contract | CRUD semantics | full — all 9 async methods implemented |
+| `kernway-orm-core` `QueryBuilder<T>` contract | filter / order / page | full — sync chaining + async terminal methods; `.with()` no-op |
 
 ## Architecture
 
@@ -181,7 +180,7 @@ deserialisation. One `Vec<T>` per query result. No zero-copy path.
 | Next | Multi-key ordering | small change; low priority |
 | Later | Schema migration (versioned ALTER TABLE) | needs a migration DSL or SQL file runner; separate sub-crate? |
 | Later | `.with()` eager-load via JOIN or secondary SELECT | needs the relation model in `kernway-orm-core` first |
-| Not planned | Async surface | sync stays sync; async callers use `spawn_blocking` |
+| Done | Async surface | public async API implemented with `BoxFuture` + `spawn_blocking` |
 
 **Out of scope**: Postgres, MySQL, MongoDB. Those are separate driver crates
 (`kernway-orm-sqlx` for async PG/MySQL; community for Mongo). The sqlite driver

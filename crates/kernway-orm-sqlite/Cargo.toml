@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 kernway-orm-core = { workspace = true }
+rt-core          = { path = "../rt-core" }
 rusqlite         = { version = "0.31", features = ["bundled"] }
 serde            = { workspace = true }
 serde_json       = { workspace = true }

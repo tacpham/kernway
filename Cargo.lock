@@ -812,6 +812,7 @@ version = "0.1.0"
 dependencies = [
  "kernway-orm-core",
  "kernway-orm-macro",
+ "rt-core",
  "serde",
  "serde_json",
 ]
@@ -822,6 +823,7 @@ version = "0.1.0"
 dependencies = [
  "kernway-orm-core",
  "kernway-orm-macro",
+ "rt-core",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1318,6 +1320,7 @@ dependencies = [
  "kernway-server",
  "kernway-sse",
  "kernway-web",
+ "rt-core",
  "serde",
  "serde_json",
 ]
@@ -1334,6 +1337,7 @@ dependencies = [
  "kernway-orm-memory",
  "kernway-server",
  "kernway-web",
+ "rt-core",
  "serde",
  "serde_json",
 ]
@@ -1349,6 +1353,7 @@ dependencies = [
  "kernway-orm-sqlite",
  "kernway-server",
  "kernway-web",
+ "rt-core",
  "serde",
  "serde_json",
 ]
