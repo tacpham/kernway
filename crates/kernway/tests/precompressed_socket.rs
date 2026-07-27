@@ -30,12 +30,12 @@ fn temp_root() -> PathBuf {
 
 fn request(port: u16, extra_headers: &str) -> String {
     let mut stream = None;
-    for _ in 0..100 {
+    for _ in 0..300 {
         if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
             stream = Some(s);
             break;
         }
-        std::thread::yield_now();
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let mut stream = stream.expect("server never came up");
     let req = format!("GET /style.css HTTP/1.1\r\nHost: x\r\nConnection: close\r\n{extra_headers}\r\n");

@@ -18,11 +18,11 @@ fn free_port() -> u16 {
 }
 
 fn connect(port: u16) -> TcpStream {
-    for _ in 0..100 {
+    for _ in 0..300 {
         if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
             return s;
         }
-        std::thread::yield_now();
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
     panic!("server never came up");
 }

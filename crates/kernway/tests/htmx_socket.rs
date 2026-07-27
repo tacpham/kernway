@@ -27,12 +27,12 @@ fn free_port() -> u16 {
 fn request(port: u16, extra_headers: &str) -> String {
     // Retry the connect: the server thread may not have bound yet.
     let mut stream = None;
-    for _ in 0..100 {
+    for _ in 0..300 {
         if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
             stream = Some(s);
             break;
         }
-        std::thread::yield_now();
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let mut stream = stream.expect("server never came up");
     let req = format!("GET /htmx/greet HTTP/1.1\r\nHost: x\r\nConnection: close\r\n{extra_headers}\r\n");
