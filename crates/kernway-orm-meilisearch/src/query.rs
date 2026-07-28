@@ -24,7 +24,43 @@
 //! | `filter_like("_", "rust web")` | full-text `q = "rust web"` |
 
 use crate::MeilisearchConfig;
-use kernway_orm_core::{entity::Entity, error::OrmError, page::Page, query::QueryBuilder, BoxFuture};
+use kernway_orm_core::{
+    entity::Entity, error::OrmError, page::Page, query::QueryBuilder, spec::Spec, BoxFuture,
+};
+
+/// Render a [`Spec`] tree into a Meilisearch filter expression (which supports
+/// `AND` / `OR` / `NOT` and parentheses natively).
+///
+/// `Like` maps to `CONTAINS`, which needs Meilisearch >= 1.10; the other
+/// operators work on any recent version.
+fn spec_to_meili(spec: &Spec) -> String {
+    fn q(v: &str) -> String {
+        if v.parse::<f64>().is_ok() {
+            v.to_string()
+        } else {
+            format!("\"{}\"", v.replace('"', "\\\""))
+        }
+    }
+    match spec {
+        Spec::Eq(f, v) => format!("{} = {}", f, q(v)),
+        Spec::Ne(f, v) => format!("{} != {}", f, q(v)),
+        Spec::Gt(f, v) => format!("{} > {}", f, q(v)),
+        Spec::Lt(f, v) => format!("{} < {}", f, q(v)),
+        Spec::Gte(f, v) => format!("{} >= {}", f, q(v)),
+        Spec::Lte(f, v) => format!("{} <= {}", f, q(v)),
+        Spec::Like(f, v) => format!("{} CONTAINS {}", f, q(v)),
+        Spec::In(f, vs) => {
+            let list = vs.iter().map(|v| q(v)).collect::<Vec<_>>().join(", ");
+            format!("{} IN [{}]", f, list)
+        }
+        Spec::Between(f, lo, hi) => format!("{} {} TO {}", f, lo, hi),
+        Spec::IsNull(f) => format!("{} IS NULL", f),
+        Spec::IsNotNull(f) => format!("{} IS NOT NULL", f),
+        Spec::And(a, b) => format!("({} AND {})", spec_to_meili(a), spec_to_meili(b)),
+        Spec::Or(a, b) => format!("({} OR {})", spec_to_meili(a), spec_to_meili(b)),
+        Spec::Not(s) => format!("NOT ({})", spec_to_meili(s)),
+    }
+}
 use serde::{de::DeserializeOwned, Serialize};
 use std::marker::PhantomData;
 
@@ -160,6 +196,11 @@ impl<T: Entity + Serialize + DeserializeOwned + Send + 'static> QueryBuilder<T> 
     }
     fn filter_is_not_null(mut self: Box<Self>, field: &'static str) -> Box<dyn QueryBuilder<T>> {
         self.push_is_not_null(field);
+        self
+    }
+
+    fn filter_spec(mut self: Box<Self>, spec: Spec) -> Box<dyn QueryBuilder<T>> {
+        self.filters.push(spec_to_meili(&spec));
         self
     }
 
@@ -307,6 +348,23 @@ impl<T: Entity + Serialize + DeserializeOwned + Send + 'static> QueryBuilder<T> 
 mod tests {
     use super::*;
     use kernway_orm_core::entity::ColumnDef;
+    use kernway_orm_core::spec::Spec;
+
+    #[test]
+    fn spec_renders_to_a_parenthesised_meili_filter() {
+        let spec = Spec::eq("role", "ADMIN")
+            .and(Spec::gt("age", "18").or(Spec::eq("tier", "gold")));
+        assert_eq!(
+            spec_to_meili(&spec),
+            r#"(role = "ADMIN" AND (age > 18 OR tier = "gold"))"#
+        );
+        // NOT and IN render too.
+        assert_eq!(spec_to_meili(&Spec::eq("x", "1").not()), "NOT (x = 1)");
+        assert_eq!(
+            spec_to_meili(&Spec::in_("tag", ["a".into(), "b".into()])),
+            r#"tag IN ["a", "b"]"#
+        );
+    }
 
     /// A minimal entity for testing — no macro, manual impl.
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

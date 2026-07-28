@@ -44,6 +44,7 @@ impl<T: Entity + Send + 'static> QueryBuilder<T> for MySqlQueryBuilder<T> {
     fn filter_between(self: Box<Self>, _field: &'static str, _from: &str, _to: &str) -> Box<dyn QueryBuilder<T>> { self }
     fn filter_is_null(self: Box<Self>, _field: &'static str) -> Box<dyn QueryBuilder<T>> { self }
     fn filter_is_not_null(self: Box<Self>, _field: &'static str) -> Box<dyn QueryBuilder<T>> { self }
+    fn filter_spec(self: Box<Self>, _spec: kernway_orm_core::spec::Spec) -> Box<dyn QueryBuilder<T>> { self }
     fn order_by_asc(self: Box<Self>, _field: &'static str) -> Box<dyn QueryBuilder<T>> { self }
     fn order_by_desc(self: Box<Self>, _field: &'static str) -> Box<dyn QueryBuilder<T>> { self }
     fn limit(self: Box<Self>, _n: u64) -> Box<dyn QueryBuilder<T>> { self }

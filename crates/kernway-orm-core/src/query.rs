@@ -1,4 +1,4 @@
-use crate::{entity::Entity, error::OrmError, page::Page, BoxFuture};
+use crate::{entity::Entity, error::OrmError, page::Page, spec::Spec, BoxFuture};
 
 /// Fluent, chainable query builder.
 /// Equivalent to CriteriaBuilder + TypedQuery in JPA.
@@ -6,8 +6,9 @@ use crate::{entity::Entity, error::OrmError, page::Page, BoxFuture};
 /// Chaining methods stay synchronous; terminal methods return boxed futures.
 pub trait QueryBuilder<T: Entity>: Send {
     // --- Filters ---
-    // Every filter narrows the result; they combine with AND. There is no OR —
-    // reach for a raw query when you need one.
+    // Every fluent filter narrows the result; they combine with AND. For OR and
+    // nested boolean logic, use [`filter_spec`](Self::filter_spec) with a
+    // composable [`Spec`].
 
     /// `field = value`.
     fn filter_eq(self: Box<Self>, field: &'static str, value: &str) -> Box<dyn QueryBuilder<T>>;
@@ -37,6 +38,18 @@ pub trait QueryBuilder<T: Entity>: Send {
     fn filter_is_null(self: Box<Self>, field: &'static str) -> Box<dyn QueryBuilder<T>>;
     /// `field IS NOT NULL`.
     fn filter_is_not_null(self: Box<Self>, field: &'static str) -> Box<dyn QueryBuilder<T>>;
+
+    /// Filter by a composable [`Spec`] — the way to express
+    /// `OR` and nested boolean logic. It combines with any fluent filters (which
+    /// stay `AND`-ed) with `AND`.
+    ///
+    /// ```ignore
+    /// repo.query()
+    ///     .filter_spec(Spec::eq("role", "ADMIN")
+    ///         .and(Spec::gt("age", "18").or(Spec::eq("vip", "true"))))
+    ///     .fetch_all().await?;
+    /// ```
+    fn filter_spec(self: Box<Self>, spec: Spec) -> Box<dyn QueryBuilder<T>>;
 
     // --- Ordering ---
 

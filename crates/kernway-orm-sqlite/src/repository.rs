@@ -809,6 +809,53 @@ mod tests {
         (w.to_string(), s.to_string())
     }
 
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[entity(table = "people")]
+    struct Person {
+        #[id(strategy = "auto")]
+        id: u64,
+        role: String,
+        age: i64,
+        tier: String,
+    }
+
+    #[test]
+    fn test_filter_spec_or_and_not() {
+        use kernway_orm_core::spec::Spec;
+        let repo = SqliteRepository::<Person>::in_memory().unwrap();
+        for (role, age, tier) in [
+            ("ADMIN", 30, "silver"),
+            ("ADMIN", 15, "gold"),
+            ("ADMIN", 15, "silver"),
+            ("USER", 40, "gold"),
+        ] {
+            block_on(repo.save(Person { id: 0, role: role.into(), age, tier: tier.into() })).unwrap();
+        }
+
+        // role = ADMIN AND (age > 18 OR tier = gold) → rows 1 and 2.
+        let spec = Spec::eq("role", "ADMIN").and(Spec::gt("age", "18").or(Spec::eq("tier", "gold")));
+        let mut got: Vec<(i64, String)> = block_on(repo.query().filter_spec(spec).fetch_all())
+            .unwrap()
+            .iter()
+            .map(|p| (p.age, p.tier.clone()))
+            .collect();
+        got.sort();
+        assert_eq!(got, vec![(15, "gold".into()), (30, "silver".into())]);
+
+        // count via the spec.
+        let n = block_on(
+            repo.query()
+                .filter_spec(Spec::eq("tier", "gold").or(Spec::gt("age", "35")))
+                .fetch_count(),
+        )
+        .unwrap();
+        assert_eq!(n, 2); // the two gold + the age-40 user (age-40 is also gold) → rows 2 and 4
+
+        // Unknown field in a spec is a query error, not a silent match.
+        let err = block_on(repo.query().filter_spec(Spec::eq("nope", "x")).fetch_all());
+        assert!(err.is_err());
+    }
+
     #[test]
     fn test_composite_primary_key() {
         let repo = SqliteRepository::<Stock>::in_memory().unwrap();
