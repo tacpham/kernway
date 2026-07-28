@@ -928,6 +928,38 @@ mod tests {
         assert!(!block_on(users.exists_by_email("nope")).unwrap());
     }
 
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[entity(table = "posts")]
+    struct Post {
+        #[id(strategy = "auto")]
+        id: u64,
+        #[many_to_one(entity = "users")]
+        user_id: u64,
+        title: String,
+    }
+
+    #[test]
+    fn many_to_one_relation_metadata() {
+        use kernway_orm_core::RelationKind;
+        // The #[many_to_one] field is recorded as a relation...
+        let rels = Post::relations();
+        assert_eq!(rels.len(), 1);
+        assert_eq!(rels[0].field, "user_id");
+        assert_eq!(rels[0].kind, RelationKind::ManyToOne);
+        assert_eq!(rels[0].target_table, "users");
+        assert_eq!(rels[0].foreign_key, "user_id");
+        // ...and it is still a normal column (the FK).
+        assert!(Post::columns().iter().any(|c| c.name == "user_id"));
+        // An entity with no relations declares none (the default).
+        assert!(User::relations().is_empty());
+
+        // Loading stays explicit: a derived finder over the FK column.
+        let repo: Box<dyn Repository<Post>> = Box::new(InMemoryRepository::<Post>::new());
+        block_on(repo.save(Post { id: 0, user_id: 7, title: "hi".into() })).unwrap();
+        let by_user = block_on(repo.query().filter_eq("user_id", "7").fetch_all()).unwrap();
+        assert_eq!(by_user.len(), 1);
+    }
+
     #[test]
     fn memory_composite_primary_key() {
         let repo = InMemoryRepository::<Stock>::new();

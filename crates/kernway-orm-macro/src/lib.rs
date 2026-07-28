@@ -60,6 +60,7 @@ pub fn entity(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut id_fields = Vec::new();
     let mut id_types = Vec::new();
     let mut columns = Vec::new();
+    let mut relations = Vec::new();
 
     for field in fields.iter_mut() {
         let field_ident = match &field.ident {
@@ -94,6 +95,24 @@ pub fn entity(args: TokenStream, input: TokenStream) -> TokenStream {
             } else if attr.path().is_ident("column") {
                 match parse_column_attr(&attr, &mut column_name, &mut nullable, &mut unique) {
                     Ok(()) => {}
+                    Err(err) => return err.to_compile_error().into(),
+                }
+            } else if attr.path().is_ident("many_to_one") {
+                // The field is (and stays) the foreign-key column; record the
+                // association as metadata for relational drivers to act on.
+                match parse_relation_attr(&attr) {
+                    Ok((target, col)) => {
+                        let fk = col.unwrap_or_else(|| field_name.clone());
+                        relations.push(quote! {
+                            ::kernway_orm_core::RelationDef {
+                                field: #field_name,
+                                kind: ::kernway_orm_core::RelationKind::ManyToOne,
+                                target_table: #target,
+                                foreign_key: #fk,
+                                join_table: ::core::option::Option::None,
+                            }
+                        });
+                    }
                     Err(err) => return err.to_compile_error().into(),
                 }
             } else {
@@ -162,6 +181,12 @@ pub fn entity(args: TokenStream, input: TokenStream) -> TokenStream {
                 static COLS: ::std::sync::OnceLock<::std::vec::Vec<::kernway_orm_core::ColumnDef>> =
                     ::std::sync::OnceLock::new();
                 COLS.get_or_init(|| vec![#(#columns),*]).as_slice()
+            }
+
+            fn relations() -> &'static [::kernway_orm_core::RelationDef] {
+                static RELS: ::std::sync::OnceLock<::std::vec::Vec<::kernway_orm_core::RelationDef>> =
+                    ::std::sync::OnceLock::new();
+                RELS.get_or_init(|| vec![#(#relations),*]).as_slice()
             }
         }
     };
@@ -465,4 +490,26 @@ fn returns_option(output: &ReturnType) -> bool {
         Some(GenericArgument::Type(Type::Path(ok)))
             if ok.path.segments.last().is_some_and(|s| s.ident == "Option")
     )
+}
+
+/// Parse a relation attribute like `#[many_to_one(entity = "users", column = "user_id")]`,
+/// returning `(target_table, column)`.
+fn parse_relation_attr(attr: &Attribute) -> syn::Result<(String, Option<String>)> {
+    let mut entity = None;
+    let mut column = None;
+    attr.parse_nested_meta(|meta| {
+        if meta.path.is_ident("entity") {
+            entity = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+            return Ok(());
+        }
+        if meta.path.is_ident("column") {
+            column = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+            return Ok(());
+        }
+        Err(meta.error("unsupported relation option (expected `entity` or `column`)"))
+    })?;
+    let entity = entity.ok_or_else(|| {
+        syn::Error::new_spanned(attr, "relation requires `entity = \"table\"`")
+    })?;
+    Ok((entity, column))
 }
