@@ -164,7 +164,7 @@ where
             let task: crate::api::TaskEnqueued =
                 crate::api::post(&url, &self.config.api_key, &[&entity]).await?;
             crate::api::wait_for_task(&self.config.url, &self.config.api_key, task.task_uid).await?;
-            let id_str = id_to_string(entity.id())?;
+            let id_str = id_to_string(&entity.id())?;
             let get_url = format!("{}/indexes/{}/documents/{}", self.config.url, index, id_str);
             crate::api::get_optional::<T>(&get_url, &self.config.api_key).await?.ok_or(OrmError::NotFound)
         })
@@ -182,7 +182,7 @@ where
             // Fetch each saved document back by id via GET (no filterable-PK
             // requirement, and preserves input order).
             let id_strings: Result<Vec<String>, OrmError> =
-                entities.iter().map(|e| id_to_string(e.id())).collect();
+                entities.iter().map(|e| id_to_string(&e.id())).collect();
             let id_strings = id_strings?;
             let mut saved = Vec::with_capacity(id_strings.len());
             for id in &id_strings {

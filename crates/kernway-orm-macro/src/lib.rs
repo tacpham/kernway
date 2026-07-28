@@ -56,8 +56,8 @@ pub fn entity(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
-    let mut id_field = None;
-    let mut id_type = None;
+    let mut id_fields = Vec::new();
+    let mut id_types = Vec::new();
     let mut columns = Vec::new();
 
     for field in fields.iter_mut() {
@@ -103,16 +103,9 @@ pub fn entity(args: TokenStream, input: TokenStream) -> TokenStream {
         field.attrs = kept_attrs;
 
         if is_id {
-            if id_field.is_some() {
-                return syn::Error::new_spanned(
-                    &field_ident,
-                    "#[entity] requires exactly one #[id] field",
-                )
-                .to_compile_error()
-                .into();
-            }
-            id_field = Some(field_ident.clone());
-            id_type = Some(field_ty.clone());
+            // Multiple #[id] fields are allowed — they form a composite key.
+            id_fields.push(field_ident.clone());
+            id_types.push(field_ty.clone());
         }
 
         let col_type = column_type_tokens(&field_ty);
@@ -132,15 +125,23 @@ pub fn entity(args: TokenStream, input: TokenStream) -> TokenStream {
         });
     }
 
-    let id_field = match id_field {
-        Some(field) => field,
-        None => {
-            return syn::Error::new_spanned(&item, "#[entity] requires exactly one #[id] field")
-                .to_compile_error()
-                .into();
-        }
+    if id_fields.is_empty() {
+        return syn::Error::new_spanned(&item, "#[entity] requires at least one #[id] field")
+            .to_compile_error()
+            .into();
+    }
+    // One #[id] → that field's type and value; several → a tuple of them, in
+    // declaration order (a composite key). `Id: Clone` makes `id()` cheap.
+    let (id_type, id_expr) = if id_fields.len() == 1 {
+        let field = &id_fields[0];
+        let ty = &id_types[0];
+        (quote! { #ty }, quote! { self.#field.clone() })
+    } else {
+        (
+            quote! { ( #(#id_types),* ) },
+            quote! { ( #(self.#id_fields.clone()),* ) },
+        )
     };
-    let id_type = id_type.expect("id type should exist when id field exists");
 
     let expanded = quote! {
         #item
@@ -152,8 +153,8 @@ pub fn entity(args: TokenStream, input: TokenStream) -> TokenStream {
                 #table_name
             }
 
-            fn id(&self) -> &Self::Id {
-                &self.#id_field
+            fn id(&self) -> Self::Id {
+                #id_expr
             }
 
             fn columns() -> &'static [::kernway_orm_core::ColumnDef] {
