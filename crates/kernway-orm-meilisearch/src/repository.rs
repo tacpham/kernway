@@ -66,19 +66,55 @@ where
 // Compiled only when the `meilisearch` feature is ON.
 // Uses kernway-http-client for all HTTP calls — no blocking thread pool.
 
+/// The Meilisearch primary-key field name for `T`.
+///
+/// One `#[id]` → that column. Several (a composite key) → the synthetic `_pk`
+/// field we inject into each document, since Meilisearch has only one PK field.
 #[cfg(feature = "meilisearch")]
 fn pk_field<T: Entity>() -> &'static str {
-    T::columns().iter().find(|c| c.primary_key).map(|c| c.name).unwrap_or("id")
+    let mut pks = T::columns().iter().filter(|c| c.primary_key).map(|c| c.name);
+    match (pks.next(), pks.next()) {
+        (Some(single), None) => single,
+        (Some(_), Some(_)) => "_pk", // composite → synthesized single-string key
+        _ => "id",
+    }
 }
 
+/// Render an id value as a Meilisearch primary-key string.
+///
+/// A composite key (a tuple) serialises to a JSON array; its parts are joined
+/// with `-` into one `[A-Za-z0-9_-]`-safe key (e.g. `("WH1", 42)` → `WH1-42`).
 #[cfg(feature = "meilisearch")]
 fn id_to_string<Id: Serialize>(id: &Id) -> Result<String, OrmError> {
     let v = serde_json::to_value(id).map_err(|e| OrmError::TypeConversion(e.to_string()))?;
-    Ok(match v {
+    Ok(value_to_key(&v))
+}
+
+#[cfg(feature = "meilisearch")]
+fn value_to_key(v: &serde_json::Value) -> String {
+    match v {
         serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => s,
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(parts) => {
+            parts.iter().map(value_to_key).collect::<Vec<_>>().join("-")
+        }
         other => other.to_string(),
-    })
+    }
+}
+
+/// Serialise `entity` to a Meilisearch document, injecting the synthetic `_pk`
+/// field when the entity has a composite key (single-key entities are posted
+/// as-is, so `_pk` never appears for them).
+#[cfg(feature = "meilisearch")]
+fn to_document<T: Entity + Serialize>(entity: &T) -> Result<serde_json::Value, OrmError> {
+    let mut doc = serde_json::to_value(entity).map_err(|e| OrmError::TypeConversion(e.to_string()))?;
+    if pk_field::<T>() == "_pk" {
+        let key = id_to_string(&entity.id())?;
+        if let serde_json::Value::Object(map) = &mut doc {
+            map.insert("_pk".to_string(), serde_json::Value::String(key));
+        }
+    }
+    Ok(doc)
 }
 
 #[cfg(feature = "meilisearch")]
@@ -161,8 +197,9 @@ where
             let index = T::table_name();
             crate::api::ensure_index(&self.config.url, &self.config.api_key, index, pk).await?;
             let url = format!("{}/indexes/{}/documents?primaryKey={}", self.config.url, index, pk);
+            let doc = to_document(&entity)?;
             let task: crate::api::TaskEnqueued =
-                crate::api::post(&url, &self.config.api_key, &[&entity]).await?;
+                crate::api::post(&url, &self.config.api_key, &[doc]).await?;
             crate::api::wait_for_task(&self.config.url, &self.config.api_key, task.task_uid).await?;
             let id_str = id_to_string(&entity.id())?;
             let get_url = format!("{}/indexes/{}/documents/{}", self.config.url, index, id_str);
@@ -176,8 +213,9 @@ where
             let index = T::table_name();
             crate::api::ensure_index(&self.config.url, &self.config.api_key, index, pk).await?;
             let url = format!("{}/indexes/{}/documents?primaryKey={}", self.config.url, index, pk);
+            let docs = entities.iter().map(to_document).collect::<Result<Vec<_>, _>>()?;
             let task: crate::api::TaskEnqueued =
-                crate::api::post(&url, &self.config.api_key, &entities).await?;
+                crate::api::post(&url, &self.config.api_key, &docs).await?;
             crate::api::wait_for_task(&self.config.url, &self.config.api_key, task.task_uid).await?;
             // Fetch each saved document back by id via GET (no filterable-PK
             // requirement, and preserves input order).
