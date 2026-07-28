@@ -21,8 +21,8 @@
 //!   truncation). This is the security-sensitive layer and is unit-testable
 //!   without a server.
 //! - [`system`] — `/etc/resolv.conf` and `/etc/hosts` parsing.
-//! - [`resolver`] — the async [`Resolver`](resolver::Resolver): send a query over
-//!   UDP, validate (random id + source port), parse the reply.
+//! - [`resolver`] — the async [`Resolver`]: send a query over UDP, validate
+//!   (random id + source port), parse the reply.
 //! - [`cache`] — a per-shard, TTL-honouring cache (positive + negative).
 #![deny(unsafe_op_in_unsafe_fn)]
 

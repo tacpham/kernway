@@ -4,7 +4,7 @@
 //!
 //! [`AsyncUdpSocket`] is the datagram counterpart to `rt_net::AsyncTcpStream`:
 //! one `mio::net::UdpSocket` registered with the current shard's reactor, driven
-//! by the same readiness loop. It exists to power [`kernway-dns`] — a pure-async
+//! by the same readiness loop. It exists to power `kernway-dns` — a pure-async
 //! DNS resolver — so `kernway-http-client` can drop its
 //! `spawn_blocking(getaddrinfo)` call.
 //!

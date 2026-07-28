@@ -57,9 +57,9 @@ pub trait SqlDialect: Send + Sync + 'static {
 
     /// Build a `CREATE TABLE IF NOT EXISTS` statement.
     ///
-    /// Default implementation uses [`quote_identifier`], [`col_type_ddl`], and
-    /// [`auto_increment_keyword`] — override only when the dialect needs
-    /// something special (e.g. PostgreSQL `SERIAL`).
+    /// Default implementation uses [`Self::quote_identifier`],
+    /// [`Self::col_type_ddl`], and [`Self::auto_increment_keyword`] — override
+    /// only when the dialect needs something special (e.g. PostgreSQL `SERIAL`).
     fn create_table_sql(&self, table: &str, cols: &[ColumnDef]) -> String {
         let mut parts = Vec::new();
         for col in cols {
