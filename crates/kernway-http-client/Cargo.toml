@@ -17,12 +17,23 @@ webpki-roots = { workspace = true }
 # Shared compression layer — decode gzip/deflate/br responses (the server side of the
 # same crate compresses).
 kernway-compress = { workspace = true }
+# Pure-async DNS (no getaddrinfo thread). getaddrinfo stays as a last-resort
+# fallback behind the `getaddrinfo-fallback` feature (default on).
+kernway-dns = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
 # Benchmark-only: the response parser hyper/reqwest use, as the incumbent to measure
 # our own response-head parsing against (KEP-0000 §2). Never a real dependency.
 httparse  = "1"
+
+[features]
+default = ["getaddrinfo-fallback"]
+# Keep the OS `getaddrinfo` (on the blocking pool) as a last-resort resolver for
+# what the pure-async stub deliberately doesn't cover: search domains, mDNS
+# (`.local`), and macOS / systemd-resolved split-DNS. On by default; disable for
+# a strictly-async build that resolves only via UDP DNS + /etc/hosts.
+getaddrinfo-fallback = []
 
 [[bench]]
 name    = "client"

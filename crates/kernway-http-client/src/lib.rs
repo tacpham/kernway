@@ -26,13 +26,12 @@ mod tls;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::ErrorKind;
-use std::net::ToSocketAddrs;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use rt_net::AsyncTcpStream;
-use rt_core;
 
 /// Default cap on establishing a connection (TCP connect + TLS handshake).
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -712,30 +711,84 @@ impl Default for HttpClient {
     }
 }
 
-/// Resolve `host:port` to a socket address.
+/// The process-wide async DNS resolver, built once from `/etc/resolv.conf`.
+fn dns_resolver() -> &'static kernway_dns::Resolver {
+    static R: OnceLock<kernway_dns::Resolver> = OnceLock::new();
+    R.get_or_init(kernway_dns::Resolver::from_system)
+}
+
+/// The process-wide `/etc/hosts` table, parsed once.
+fn hosts_table() -> &'static HashMap<String, Vec<IpAddr>> {
+    static H: OnceLock<HashMap<String, Vec<IpAddr>>> = OnceLock::new();
+    H.get_or_init(kernway_dns::system::load_hosts)
+}
+
+/// Resolve `host:port` to a socket address, **without ever blocking the executor
+/// on `getaddrinfo`** for the common cases.
 ///
-/// Uses [`rt_core::spawn_blocking`] to offload the blocking `getaddrinfo` system call
-/// so the async executor thread is never stalled. For `localhost` / bare IP addresses
-/// the OS returns immediately without a real DNS query, so the overhead is negligible.
-///
-/// # Future work
-/// Replace with a pure-async DNS resolver once `kernway-udp` lands:
-/// - Add `AsyncUdpSocket` to `kernway-udp` (backed by `rt-net`'s reactor)
-/// - Implement DNS wire format (RFC 1035): A/AAAA/CNAME, TTL cache, TCP fallback
-/// - Read `/etc/resolv.conf` for the upstream resolver
-/// - Tracked in: `crates/kernway-udp/` (skeleton) and `crates/kernway-dns/` (TODO)
-async fn resolve(host: &str, port: u16) -> Result<std::net::SocketAddr, HttpError> {
-    let host = host.to_owned();
-    let p = port;
-    rt_core::spawn_blocking(move || {
-        (host.as_str(), p)
+/// Resolution order:
+/// 1. **IP literal** (`127.0.0.1`, `::1`) — parsed directly, no lookup.
+/// 2. **`/etc/hosts`** (and a `localhost` safety net) — a cached file read.
+/// 3. **Async UDP DNS** ([`kernway_dns`]) against the system nameservers — bounded
+///    by the resolver's own per-query timeout, so a slow DNS server cannot hang
+///    the request the way the old unbounded `getaddrinfo` call could.
+/// 4. **`getaddrinfo` fallback** (feature `getaddrinfo-fallback`, default on) — on
+///    the blocking pool, for what the stub deliberately skips (search domains,
+///    mDNS, split-DNS). Bounded by a 5 s timeout so a wedged lookup can't hang the
+///    caller (the pool thread may linger, but the request proceeds).
+async fn resolve(host: &str, port: u16) -> Result<SocketAddr, HttpError> {
+    let host = host.strip_suffix('.').unwrap_or(host);
+
+    // 1. IP literal — no lookup at all.
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(SocketAddr::new(ip, port));
+    }
+
+    // 2. /etc/hosts, then a localhost fallback if the file didn't list it.
+    let key = host.to_ascii_lowercase();
+    if let Some(ip) = hosts_table().get(&key).and_then(|ips| ips.first()).copied() {
+        return Ok(SocketAddr::new(ip, port));
+    }
+    if key == "localhost" {
+        return Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port));
+    }
+
+    // 3. Async UDP DNS (A preferred, AAAA fallback; honours search domains).
+    let dns_err = match dns_resolver().lookup(host).await {
+        Ok(addrs) => match addrs.first() {
+            Some(&ip) => return Ok(SocketAddr::new(ip, port)),
+            None => "no A/AAAA records".to_owned(),
+        },
+        Err(e) => e.to_string(),
+    };
+
+    // 4. Last resort.
+    resolve_fallback(host, port, &dns_err).await
+}
+
+/// getaddrinfo on the blocking pool, bounded so an uncancellable lookup can't
+/// hang the caller. Present when `getaddrinfo-fallback` is enabled.
+#[cfg(feature = "getaddrinfo-fallback")]
+async fn resolve_fallback(host: &str, port: u16, _dns_err: &str) -> Result<SocketAddr, HttpError> {
+    use std::net::ToSocketAddrs;
+    let owned = host.to_owned();
+    let lookup = rt_core::spawn_blocking(move || {
+        (owned.as_str(), port)
             .to_socket_addrs()
-            .map_err(|e| HttpError::Dns(format!("{host}:{p}: {e}")))?
+            .map_err(|e| HttpError::Dns(format!("{owned}:{port}: {e}")))?
             .next()
-            .ok_or_else(|| HttpError::Dns(format!("no address for {host}:{p}")))
-    })
-    .await
-    .unwrap_or(Err(HttpError::Dns("DNS thread panicked".into())))
+            .ok_or_else(|| HttpError::Dns(format!("no address for {owned}:{port}")))
+    });
+    match rt_core::timeout(Duration::from_secs(5), lookup).await {
+        Ok(done) => done.unwrap_or_else(|| Err(HttpError::Dns("DNS thread panicked".into()))),
+        Err(_elapsed) => Err(HttpError::Dns(format!("getaddrinfo timed out for {host}"))),
+    }
+}
+
+/// With the fallback disabled, an async-DNS miss is terminal.
+#[cfg(not(feature = "getaddrinfo-fallback"))]
+async fn resolve_fallback(host: &str, _port: u16, dns_err: &str) -> Result<SocketAddr, HttpError> {
+    Err(HttpError::Dns(format!("could not resolve {host}: {dns_err}")))
 }
 
 /// Write a request and read its full response. Returns the response and whether the
@@ -2088,5 +2141,41 @@ mod tests {
             resp.text().contains("Example Domain"),
             "got the page body over TLS"
         );
+    }
+
+    // ── resolve() routing — no network for these ────────────────────────────
+    // Verify the fast paths short-circuit before any DNS/getaddrinfo call.
+
+    fn resolve_now(host: &str, port: u16) -> Result<SocketAddr, HttpError> {
+        rt_core::Executor::new()
+            .unwrap()
+            .block_on(async move { resolve(host, port).await })
+            .unwrap()
+    }
+
+    #[test]
+    fn ipv4_literal_resolves_without_a_lookup() {
+        let addr = resolve_now("127.0.0.1", 8080).unwrap();
+        assert_eq!(addr, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080));
+    }
+
+    #[test]
+    fn ipv6_literal_resolves_without_a_lookup() {
+        let addr = resolve_now("::1", 443).unwrap();
+        assert!(addr.ip().is_loopback());
+        assert_eq!(addr.port(), 443);
+    }
+
+    #[test]
+    fn localhost_resolves_to_loopback_without_network() {
+        let addr = resolve_now("localhost", 80).unwrap();
+        assert!(addr.ip().is_loopback(), "localhost must be loopback, got {addr}");
+        assert_eq!(addr.port(), 80);
+    }
+
+    #[test]
+    fn a_trailing_dot_is_stripped_before_resolving() {
+        let addr = resolve_now("127.0.0.1.", 1).unwrap();
+        assert_eq!(addr, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1));
     }
 }

@@ -1,0 +1,17 @@
+[package]
+name        = "kernway-dns"
+description = "Pure-async DNS stub resolver for the Kernway runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kernway-udp = { workspace = true }
+rt-net      = { workspace = true }   # TCP fallback when a UDP answer is truncated
+rt-core     = { workspace = true }
+# Cryptographic randomness for the transaction id (anti-spoofing). Already in the
+# tree via ring; 0.2 reuses that copy.
+getrandom   = "0.2"
+
+[lints]
+workspace = true

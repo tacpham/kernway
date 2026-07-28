@@ -11,6 +11,7 @@ license.workspace  = true
 
 [dependencies]
 rt-core = { workspace = true }
+mio     = { workspace = true }   # UDP socket + readiness source (same primitive rt-core uses)
 
 [lints]
 workspace = true
