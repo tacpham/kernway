@@ -143,14 +143,8 @@ fn bcrypt_raw(cost: u32, salt: &[u8; 16], key: &[u8]) -> [u8; 23] {
 
     // 24 bytes big-endian, but bcrypt keeps only the first 23.
     let mut out = [0u8; 23];
-    for i in 0..6 {
-        let b = cdata[i].to_be_bytes();
-        for j in 0..4 {
-            let idx = i * 4 + j;
-            if idx < 23 {
-                out[idx] = b[j];
-            }
-        }
+    for (idx, byte) in cdata.iter().flat_map(|w| w.to_be_bytes()).take(23).enumerate() {
+        out[idx] = byte;
     }
     out
 }
@@ -458,8 +452,8 @@ fn big_add(a: &Big, b: &Big) -> Big {
 fn big_sub(a: &Big, b: &Big) -> Big {
     let mut out = Vec::with_capacity(a.len());
     let mut borrow = 0i64;
-    for i in 0..a.len() {
-        let x = i64::from(a[i]);
+    for (i, &ai) in a.iter().enumerate() {
+        let x = i64::from(ai);
         let y = i64::from(*b.get(i).unwrap_or(&0));
         let mut cur = x - y - borrow;
         if cur < 0 {
