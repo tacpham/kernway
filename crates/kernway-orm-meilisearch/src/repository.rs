@@ -40,13 +40,9 @@ where
     fn find_all<'a>(&'a self) -> BoxFuture<'a, Result<Vec<T>, OrmError>> {
         Box::pin(async { Err(OrmError::Unsupported("enable the `meilisearch` feature".into())) })
     }
-    fn find_all_by_ids<'a>(&'a self, _ids: &'a [T::Id]) -> BoxFuture<'a, Result<Vec<T>, OrmError>> {
-        Box::pin(async { Err(OrmError::Unsupported("enable the `meilisearch` feature".into())) })
-    }
+    // find_all_by_ids and exists_by_id use the trait defaults (built on
+    // find_by_id, which returns Unsupported here).
     fn count<'a>(&'a self) -> BoxFuture<'a, Result<u64, OrmError>> {
-        Box::pin(async { Err(OrmError::Unsupported("enable the `meilisearch` feature".into())) })
-    }
-    fn exists_by_id<'a>(&'a self, _id: &'a T::Id) -> BoxFuture<'a, Result<bool, OrmError>> {
         Box::pin(async { Err(OrmError::Unsupported("enable the `meilisearch` feature".into())) })
     }
     fn save<'a>(&'a self, _entity: T) -> BoxFuture<'a, Result<T, OrmError>> {
@@ -70,19 +66,55 @@ where
 // Compiled only when the `meilisearch` feature is ON.
 // Uses kernway-http-client for all HTTP calls — no blocking thread pool.
 
+/// The Meilisearch primary-key field name for `T`.
+///
+/// One `#[id]` → that column. Several (a composite key) → the synthetic `_pk`
+/// field we inject into each document, since Meilisearch has only one PK field.
 #[cfg(feature = "meilisearch")]
 fn pk_field<T: Entity>() -> &'static str {
-    T::columns().iter().find(|c| c.primary_key).map(|c| c.name).unwrap_or("id")
+    let mut pks = T::columns().iter().filter(|c| c.primary_key).map(|c| c.name);
+    match (pks.next(), pks.next()) {
+        (Some(single), None) => single,
+        (Some(_), Some(_)) => "_pk", // composite → synthesized single-string key
+        _ => "id",
+    }
 }
 
+/// Render an id value as a Meilisearch primary-key string.
+///
+/// A composite key (a tuple) serialises to a JSON array; its parts are joined
+/// with `-` into one `[A-Za-z0-9_-]`-safe key (e.g. `("WH1", 42)` → `WH1-42`).
 #[cfg(feature = "meilisearch")]
 fn id_to_string<Id: Serialize>(id: &Id) -> Result<String, OrmError> {
     let v = serde_json::to_value(id).map_err(|e| OrmError::TypeConversion(e.to_string()))?;
-    Ok(match v {
+    Ok(value_to_key(&v))
+}
+
+#[cfg(feature = "meilisearch")]
+fn value_to_key(v: &serde_json::Value) -> String {
+    match v {
         serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => s,
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(parts) => {
+            parts.iter().map(value_to_key).collect::<Vec<_>>().join("-")
+        }
         other => other.to_string(),
-    })
+    }
+}
+
+/// Serialise `entity` to a Meilisearch document, injecting the synthetic `_pk`
+/// field when the entity has a composite key (single-key entities are posted
+/// as-is, so `_pk` never appears for them).
+#[cfg(feature = "meilisearch")]
+fn to_document<T: Entity + Serialize>(entity: &T) -> Result<serde_json::Value, OrmError> {
+    let mut doc = serde_json::to_value(entity).map_err(|e| OrmError::TypeConversion(e.to_string()))?;
+    if pk_field::<T>() == "_pk" {
+        let key = id_to_string(&entity.id())?;
+        if let serde_json::Value::Object(map) = &mut doc {
+            map.insert("_pk".to_string(), serde_json::Value::String(key));
+        }
+    }
+    Ok(doc)
 }
 
 #[cfg(feature = "meilisearch")]
@@ -135,29 +167,9 @@ where
         })
     }
 
-    fn find_all_by_ids<'a>(&'a self, ids: &'a [T::Id]) -> BoxFuture<'a, Result<Vec<T>, OrmError>> {
-        let id_strings: Result<Vec<String>, OrmError> = ids.iter().map(id_to_string).collect();
-        let id_strings = match id_strings {
-            Ok(v) => v,
-            Err(e) => return Box::pin(async move { Err(e) }),
-        };
-        Box::pin(async move {
-            // Fetch each document by id via GET rather than a `search` filter on
-            // the primary key: the latter would require the PK to be configured
-            // `filterable`, which Meilisearch does not do by default.
-            let index = T::table_name();
-            let mut found = Vec::with_capacity(id_strings.len());
-            for id in &id_strings {
-                let url = format!("{}/indexes/{}/documents/{}", self.config.url, index, id);
-                if let Some(doc) =
-                    crate::api::get_optional::<T>(&url, &self.config.api_key).await?
-                {
-                    found.push(doc);
-                }
-            }
-            Ok(found)
-        })
-    }
+    // find_all_by_ids uses the trait default: one find_by_id (GET /documents/{id})
+    // per id. Meilisearch has no batch get-by-id, and searching by a PK `IN`
+    // filter would need the PK to be `filterable`, so the default is the best path.
 
     fn count<'a>(&'a self) -> BoxFuture<'a, Result<u64, OrmError>> {
         Box::pin(async move {
@@ -176,17 +188,8 @@ where
         })
     }
 
-    fn exists_by_id<'a>(&'a self, id: &'a T::Id) -> BoxFuture<'a, Result<bool, OrmError>> {
-        let id_str = match id_to_string(id) {
-            Ok(s) => s,
-            Err(e) => return Box::pin(async move { Err(e) }),
-        };
-        Box::pin(async move {
-            let url = format!("{}/indexes/{}/documents/{}", self.config.url, T::table_name(), id_str);
-            let found: Option<serde_json::Value> = crate::api::get_optional(&url, &self.config.api_key).await?;
-            Ok(found.is_some())
-        })
-    }
+    // exists_by_id uses the trait default: find_by_id(id).is_some(), which is
+    // exactly the GET /documents/{id} probe we would write by hand.
 
     fn save<'a>(&'a self, entity: T) -> BoxFuture<'a, Result<T, OrmError>> {
         Box::pin(async move {
@@ -194,10 +197,11 @@ where
             let index = T::table_name();
             crate::api::ensure_index(&self.config.url, &self.config.api_key, index, pk).await?;
             let url = format!("{}/indexes/{}/documents?primaryKey={}", self.config.url, index, pk);
+            let doc = to_document(&entity)?;
             let task: crate::api::TaskEnqueued =
-                crate::api::post(&url, &self.config.api_key, &[&entity]).await?;
+                crate::api::post(&url, &self.config.api_key, &[doc]).await?;
             crate::api::wait_for_task(&self.config.url, &self.config.api_key, task.task_uid).await?;
-            let id_str = id_to_string(entity.id())?;
+            let id_str = id_to_string(&entity.id())?;
             let get_url = format!("{}/indexes/{}/documents/{}", self.config.url, index, id_str);
             crate::api::get_optional::<T>(&get_url, &self.config.api_key).await?.ok_or(OrmError::NotFound)
         })
@@ -209,13 +213,14 @@ where
             let index = T::table_name();
             crate::api::ensure_index(&self.config.url, &self.config.api_key, index, pk).await?;
             let url = format!("{}/indexes/{}/documents?primaryKey={}", self.config.url, index, pk);
+            let docs = entities.iter().map(to_document).collect::<Result<Vec<_>, _>>()?;
             let task: crate::api::TaskEnqueued =
-                crate::api::post(&url, &self.config.api_key, &entities).await?;
+                crate::api::post(&url, &self.config.api_key, &docs).await?;
             crate::api::wait_for_task(&self.config.url, &self.config.api_key, task.task_uid).await?;
             // Fetch each saved document back by id via GET (no filterable-PK
             // requirement, and preserves input order).
             let id_strings: Result<Vec<String>, OrmError> =
-                entities.iter().map(|e| id_to_string(e.id())).collect();
+                entities.iter().map(|e| id_to_string(&e.id())).collect();
             let id_strings = id_strings?;
             let mut saved = Vec::with_capacity(id_strings.len());
             for id in &id_strings {
