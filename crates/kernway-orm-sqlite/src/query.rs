@@ -4,6 +4,7 @@ use kernway_orm_core::{
     error::OrmError,
     page::Page,
     query::QueryBuilder,
+    spec::Spec,
     BoxFuture,
 };
 use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
@@ -49,6 +50,7 @@ where
 {
     conn: Arc<Mutex<Connection>>,
     filters: Vec<Filter>,
+    spec: Option<Spec>,
     order: Vec<Sort>,
     lim: Option<u64>,
     off: u64,
@@ -66,11 +68,37 @@ where
         Self {
             conn,
             filters: Vec::new(),
+            spec: None,
             order: Vec::new(),
             lim: None,
             off: 0,
             error: None,
             _marker: PhantomData,
+        }
+    }
+
+    /// Validate every field a spec references, so an unknown field is reported
+    /// (the same way the fluent filters resolve columns as they are added).
+    fn validate_spec(&mut self, spec: &Spec) {
+        match spec {
+            Spec::And(a, b) | Spec::Or(a, b) => {
+                self.validate_spec(a);
+                self.validate_spec(b);
+            }
+            Spec::Not(s) => self.validate_spec(s),
+            Spec::Eq(f, _)
+            | Spec::Ne(f, _)
+            | Spec::Gt(f, _)
+            | Spec::Lt(f, _)
+            | Spec::Gte(f, _)
+            | Spec::Lte(f, _)
+            | Spec::Like(f, _)
+            | Spec::In(f, _)
+            | Spec::Between(f, _, _)
+            | Spec::IsNull(f)
+            | Spec::IsNotNull(f) => {
+                self.resolve_col(f);
+            }
         }
     }
 
@@ -151,6 +179,10 @@ where
                 Filter::IsNull { col } => parts.push(format!("{} IS NULL", col)),
                 Filter::IsNotNull { col } => parts.push(format!("{} IS NOT NULL", col)),
             }
+        }
+
+        if let Some(spec) = &self.spec {
+            parts.push(spec_to_sql::<T>(spec, &mut params));
         }
 
         if parts.is_empty() {
@@ -373,6 +405,12 @@ where
         self
     }
 
+    fn filter_spec(mut self: Box<Self>, spec: Spec) -> Box<dyn QueryBuilder<T>> {
+        self.validate_spec(&spec); // reports unknown fields via self.error
+        self.spec = Some(spec);
+        self
+    }
+
     fn order_by_asc(mut self: Box<Self>, field: &'static str) -> Box<dyn QueryBuilder<T>> {
         if let Some(col) = self.resolve_col(field) {
             self.order.push(Sort {
@@ -441,5 +479,80 @@ where
                 .await
                 .ok_or_else(|| OrmError::Connection("blocking task panicked".to_string()))?
         })
+    }
+}
+
+/// Render a [`Spec`] tree into a parameterised SQL boolean expression, appending
+/// its bound values to `params` in placeholder order. Left-to-right evaluation of
+/// `format!` arguments keeps `?N` numbering correct across AND/OR branches.
+fn spec_to_sql<T>(spec: &Spec, params: &mut Vec<SqlValue>) -> String
+where
+    T: Entity + Serialize + DeserializeOwned,
+    T::Id: Serialize + DeserializeOwned,
+{
+    let col = |field: &str| {
+        column_for_field::<T>(field)
+            .map(|c| c.name.to_string())
+            .unwrap_or_else(|| field.to_string())
+    };
+    match spec {
+        Spec::Eq(f, v) => {
+            params.push(filter_value_for_field::<T>(f, v));
+            format!("{} = ?{}", col(f), params.len())
+        }
+        Spec::Ne(f, v) => {
+            params.push(filter_value_for_field::<T>(f, v));
+            format!("{} != ?{}", col(f), params.len())
+        }
+        Spec::Gt(f, v) => {
+            params.push(filter_value_for_field::<T>(f, v));
+            format!("{} > ?{}", col(f), params.len())
+        }
+        Spec::Lt(f, v) => {
+            params.push(filter_value_for_field::<T>(f, v));
+            format!("{} < ?{}", col(f), params.len())
+        }
+        Spec::Gte(f, v) => {
+            params.push(filter_value_for_field::<T>(f, v));
+            format!("{} >= ?{}", col(f), params.len())
+        }
+        Spec::Lte(f, v) => {
+            params.push(filter_value_for_field::<T>(f, v));
+            format!("{} <= ?{}", col(f), params.len())
+        }
+        Spec::Like(f, v) => {
+            params.push(SqlValue::Text(v.clone()));
+            format!("{} LIKE ?{}", col(f), params.len())
+        }
+        Spec::In(f, vs) => {
+            let ph: Vec<String> = vs
+                .iter()
+                .map(|v| {
+                    params.push(filter_value_for_field::<T>(f, v));
+                    format!("?{}", params.len())
+                })
+                .collect();
+            format!("{} IN ({})", col(f), ph.join(", "))
+        }
+        Spec::Between(f, lo, hi) => {
+            params.push(filter_value_for_field::<T>(f, lo));
+            let a = params.len();
+            params.push(filter_value_for_field::<T>(f, hi));
+            let b = params.len();
+            format!("{} BETWEEN ?{} AND ?{}", col(f), a, b)
+        }
+        Spec::IsNull(f) => format!("{} IS NULL", col(f)),
+        Spec::IsNotNull(f) => format!("{} IS NOT NULL", col(f)),
+        Spec::And(a, b) => format!(
+            "({} AND {})",
+            spec_to_sql::<T>(a, params),
+            spec_to_sql::<T>(b, params)
+        ),
+        Spec::Or(a, b) => format!(
+            "({} OR {})",
+            spec_to_sql::<T>(a, params),
+            spec_to_sql::<T>(b, params)
+        ),
+        Spec::Not(s) => format!("NOT ({})", spec_to_sql::<T>(s, params)),
     }
 }

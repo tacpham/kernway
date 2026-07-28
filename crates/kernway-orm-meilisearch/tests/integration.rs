@@ -19,7 +19,7 @@
 
 #![cfg(feature = "meilisearch")]
 
-use kernway_orm_core::{driver::Driver, repository::Repository};
+use kernway_orm_core::{driver::Driver, repository::Repository, spec::Spec};
 use kernway_orm_meilisearch::{api, driver::MeilisearchDriver};
 use kernway_orm_macro::entity;
 use rt_core::Executor;
@@ -97,6 +97,17 @@ struct Stock {
     #[id()]
     sku: String,
     quantity: u32,
+}
+
+/// For the Specification/OR test.
+#[entity(table = "people_test")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Person {
+    #[id()]
+    id: u64,
+    role: String,
+    age: u32,
+    tier: String,
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -607,6 +618,37 @@ fn test_composite_primary_key() {
         assert!(repo.exists_by_id(&("WH2".to_string(), "SKU42".to_string())).await?);
 
         cleanup("stock_test").await;
+        Ok(())
+    });
+}
+
+/// 22. Specification with OR — Meilisearch renders the tree to a filter expression.
+#[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
+fn test_filter_spec_or() {
+    run!(async {
+        cleanup("people_test").await;
+        let url = meili_url();
+        let key = meili_key();
+        api::ensure_index(&url, &key, "people_test", "id").await?;
+        api::set_filterable_attributes(&url, &key, "people_test", &["role", "age", "tier"]).await?;
+
+        let repo: Box<dyn Repository<Person>> = driver().repository();
+        repo.save_all(vec![
+            Person { id: 1, role: "ADMIN".into(), age: 30, tier: "silver".into() },
+            Person { id: 2, role: "ADMIN".into(), age: 15, tier: "gold".into() },
+            Person { id: 3, role: "ADMIN".into(), age: 15, tier: "silver".into() },
+            Person { id: 4, role: "USER".into(),  age: 40, tier: "gold".into() },
+        ]).await?;
+
+        // role = ADMIN AND (age > 18 OR tier = gold)
+        let spec = Spec::eq("role", "ADMIN").and(Spec::gt("age", "18").or(Spec::eq("tier", "gold")));
+        let mut ids: Vec<u64> = repo.query().filter_spec(spec).fetch_all().await?
+            .iter().map(|p| p.id).collect();
+        ids.sort();
+        assert_eq!(ids, vec![1, 2], "admin over 18 (1) or admin gold (2); 3 and 4 excluded");
+
+        cleanup("people_test").await;
         Ok(())
     });
 }

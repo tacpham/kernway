@@ -118,12 +118,11 @@ fn json_to_sql(v: serde_json::Value, col: &ColumnDef) -> Result<SqlValue, OrmErr
     })
 }
 
-fn id_to_sql<Id: Serialize>(id: &Id) -> Result<SqlValue, OrmError> {
-    let v = serde_json::to_value(id).map_err(map_serde)?;
+fn scalar_to_sql(v: &serde_json::Value) -> Result<SqlValue, OrmError> {
     Ok(match v {
-        serde_json::Value::Number(n) => SqlValue::Integer(number_to_integer(&n, "id")?),
-        serde_json::Value::String(s) => SqlValue::Text(s),
-        serde_json::Value::Bool(b) => SqlValue::Integer(b as i64),
+        serde_json::Value::Number(n) => SqlValue::Integer(number_to_integer(n, "id")?),
+        serde_json::Value::String(s) => SqlValue::Text(s.clone()),
+        serde_json::Value::Bool(b) => SqlValue::Integer(*b as i64),
         serde_json::Value::Null => SqlValue::Null,
         other => {
             return Err(OrmError::TypeConversion(format!(
@@ -133,12 +132,49 @@ fn id_to_sql<Id: Serialize>(id: &Id) -> Result<SqlValue, OrmError> {
     })
 }
 
+fn id_to_sql<Id: Serialize>(id: &Id) -> Result<SqlValue, OrmError> {
+    scalar_to_sql(&serde_json::to_value(id).map_err(map_serde)?)
+}
+
+/// An id's SQL values — one for a scalar key, several for a composite (tuple) key.
+fn id_to_sql_values<Id: Serialize>(id: &Id) -> Result<Vec<SqlValue>, OrmError> {
+    match serde_json::to_value(id).map_err(map_serde)? {
+        serde_json::Value::Array(parts) => parts.iter().map(scalar_to_sql).collect(),
+        scalar => Ok(vec![scalar_to_sql(&scalar)?]),
+    }
+}
+
 fn pk_col_name<T: Entity>() -> &'static str {
     T::columns()
         .iter()
         .find(|c| c.primary_key)
         .map(|c| c.name)
         .unwrap_or("id")
+}
+
+/// The primary-key column names — one for a scalar key, several for a composite.
+fn pk_cols<T: Entity>() -> Vec<&'static str> {
+    let cols: Vec<&'static str> = T::columns()
+        .iter()
+        .filter(|c| c.primary_key)
+        .map(|c| c.name)
+        .collect();
+    if cols.is_empty() {
+        vec!["id"]
+    } else {
+        cols
+    }
+}
+
+/// A `col = ?n [AND col2 = ?n+1 ...]` predicate over the PK columns, with
+/// placeholders numbered from `start`.
+fn pk_where<T: Entity>(start: usize) -> String {
+    pk_cols::<T>()
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("{} = ?{}", c, start + i))
+        .collect::<Vec<_>>()
+        .join(" AND ")
 }
 
 fn is_auto_pk<T: Entity>() -> bool {
@@ -350,17 +386,16 @@ where
             .map(|(i, c)| format!("{} = ?{}", c.name, i + 1))
             .collect();
         let sql = format!(
-            "UPDATE {} SET {} WHERE {} = ?{}",
+            "UPDATE {} SET {} WHERE {}",
             T::table_name(),
             set_clause.join(", "),
-            pk_col_name::<T>(),
-            set_cols.len() + 1
+            pk_where::<T>(set_cols.len() + 1)
         );
         let mut vals: Vec<SqlValue> = set_cols
             .iter()
             .map(|c| json_to_sql(obj.get(c.field).cloned().unwrap_or(serde_json::Value::Null), c))
             .collect::<Result<_, _>>()?;
-        vals.push(id_to_sql(&entity.id())?);
+        vals.extend(id_to_sql_values(&entity.id())?);
 
         self.conn
             .lock()
@@ -374,10 +409,10 @@ where
         let cols = T::columns();
         let col_list: Vec<&str> = cols.iter().map(|c| c.name).collect();
         let sql = format!(
-            "SELECT {} FROM {} WHERE {} = ?1",
+            "SELECT {} FROM {} WHERE {}",
             col_list.join(", "),
             T::table_name(),
-            pk_col_name::<T>()
+            pk_where::<T>(1)
         );
 
         let conn = self
@@ -385,7 +420,8 @@ where
             .lock()
             .map_err(|e| OrmError::Transaction(format!("mutex poisoned: {e}")))?;
         let mut stmt = conn.prepare(&sql).map_err(map_err)?;
-        let mut rows = stmt.query(rusqlite::params![id_to_sql(id)?]).map_err(map_err)?;
+        let id_vals = id_to_sql_values(id)?;
+        let mut rows = stmt.query(params_from_iter(id_vals.iter())).map_err(map_err)?;
         match rows.next().map_err(map_err)? {
             Some(row) => Ok(Some(row_to_entity::<T>(row, cols).map_err(map_err)?)),
             None => Ok(None),
@@ -409,6 +445,18 @@ where
     fn find_all_by_ids_sync(&self, ids: &[T::Id]) -> Result<Vec<T>, OrmError> {
         if ids.is_empty() {
             return Ok(Vec::new());
+        }
+
+        // A composite key has no simple `IN (...)` form — fall back to per-id
+        // lookups (each is a multi-column WHERE).
+        if pk_cols::<T>().len() > 1 {
+            let mut out = Vec::with_capacity(ids.len());
+            for id in ids {
+                if let Some(e) = self.find_by_id_sync(id)? {
+                    out.push(e);
+                }
+            }
+            return Ok(out);
         }
 
         let cols = T::columns();
@@ -467,14 +515,15 @@ where
 
     fn delete_by_id_sync(&self, id: &T::Id) -> Result<(), OrmError> {
         let sql = format!(
-            "DELETE FROM {} WHERE {} = ?1",
+            "DELETE FROM {} WHERE {}",
             T::table_name(),
-            pk_col_name::<T>()
+            pk_where::<T>(1)
         );
+        let id_vals = id_to_sql_values(id)?;
         self.conn
             .lock()
             .map_err(|e| OrmError::Transaction(format!("mutex poisoned: {e}")))?
-            .execute(&sql, rusqlite::params![id_to_sql(id)?])
+            .execute(&sql, params_from_iter(id_vals.iter()))
             .map_err(map_err)?;
         Ok(())
     }
@@ -742,5 +791,93 @@ mod tests {
                 .fetch_all()
         )
         .is_err());
+    }
+
+    /// Composite key `(warehouse, sku)` — two `#[id]` fields → `Id = (String, String)`,
+    /// mapped to a table-level `PRIMARY KEY (warehouse, sku)` and multi-column WHERE.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[entity(table = "stock")]
+    struct Stock {
+        #[id()]
+        warehouse: String,
+        #[id()]
+        sku: String,
+        quantity: i32,
+    }
+
+    fn key(w: &str, s: &str) -> (String, String) {
+        (w.to_string(), s.to_string())
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[entity(table = "people")]
+    struct Person {
+        #[id(strategy = "auto")]
+        id: u64,
+        role: String,
+        age: i64,
+        tier: String,
+    }
+
+    #[test]
+    fn test_filter_spec_or_and_not() {
+        use kernway_orm_core::spec::Spec;
+        let repo = SqliteRepository::<Person>::in_memory().unwrap();
+        for (role, age, tier) in [
+            ("ADMIN", 30, "silver"),
+            ("ADMIN", 15, "gold"),
+            ("ADMIN", 15, "silver"),
+            ("USER", 40, "gold"),
+        ] {
+            block_on(repo.save(Person { id: 0, role: role.into(), age, tier: tier.into() })).unwrap();
+        }
+
+        // role = ADMIN AND (age > 18 OR tier = gold) → rows 1 and 2.
+        let spec = Spec::eq("role", "ADMIN").and(Spec::gt("age", "18").or(Spec::eq("tier", "gold")));
+        let mut got: Vec<(i64, String)> = block_on(repo.query().filter_spec(spec).fetch_all())
+            .unwrap()
+            .iter()
+            .map(|p| (p.age, p.tier.clone()))
+            .collect();
+        got.sort();
+        assert_eq!(got, vec![(15, "gold".into()), (30, "silver".into())]);
+
+        // count via the spec.
+        let n = block_on(
+            repo.query()
+                .filter_spec(Spec::eq("tier", "gold").or(Spec::gt("age", "35")))
+                .fetch_count(),
+        )
+        .unwrap();
+        assert_eq!(n, 2); // the two gold + the age-40 user (age-40 is also gold) → rows 2 and 4
+
+        // Unknown field in a spec is a query error, not a silent match.
+        let err = block_on(repo.query().filter_spec(Spec::eq("nope", "x")).fetch_all());
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_composite_primary_key() {
+        let repo = SqliteRepository::<Stock>::in_memory().unwrap();
+
+        // Same sku in two warehouses → two distinct composite keys.
+        block_on(repo.save(Stock { warehouse: "WH1".into(), sku: "SKU42".into(), quantity: 100 })).unwrap();
+        block_on(repo.save(Stock { warehouse: "WH2".into(), sku: "SKU42".into(), quantity: 5 })).unwrap();
+        assert_eq!(block_on(repo.count()).unwrap(), 2);
+
+        // find_by_id takes the tuple.
+        assert_eq!(block_on(repo.find_by_id(&key("WH1", "SKU42"))).unwrap().unwrap().quantity, 100);
+        assert_eq!(block_on(repo.find_by_id(&key("WH2", "SKU42"))).unwrap().unwrap().quantity, 5);
+        assert!(block_on(repo.find_by_id(&key("WH3", "SKU42"))).unwrap().is_none());
+
+        // Re-saving the same composite key updates in place (do_update path).
+        block_on(repo.save(Stock { warehouse: "WH1".into(), sku: "SKU42".into(), quantity: 250 })).unwrap();
+        assert_eq!(block_on(repo.count()).unwrap(), 2, "update, not a second insert");
+        assert_eq!(block_on(repo.find_by_id(&key("WH1", "SKU42"))).unwrap().unwrap().quantity, 250);
+
+        // Deleting one composite key leaves the other.
+        block_on(repo.delete_by_id(&key("WH1", "SKU42"))).unwrap();
+        assert!(block_on(repo.find_by_id(&key("WH1", "SKU42"))).unwrap().is_none());
+        assert!(block_on(repo.exists_by_id(&key("WH2", "SKU42"))).unwrap());
     }
 }
