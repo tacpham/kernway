@@ -103,9 +103,35 @@ where
 
     fn find_all<'a>(&'a self) -> BoxFuture<'a, Result<Vec<T>, OrmError>> {
         Box::pin(async move {
-            let url = format!("{}/indexes/{}/documents?limit=1000", self.config.url, T::table_name());
-            let r: crate::api::DocumentsResult<T> = crate::api::get(&url, &self.config.api_key).await?;
-            Ok(r.results)
+            // Page through the whole index rather than silently capping at the
+            // first N — `find_all` means all. The GET /documents endpoint is not
+            // subject to the search `maxTotalHits` limit, so offset pagination
+            // reaches every document.
+            const PAGE: u64 = 1000;
+            let index = T::table_name();
+            let mut all: Vec<T> = Vec::new();
+            let mut offset: u64 = 0;
+            loop {
+                let url = format!(
+                    "{}/indexes/{}/documents?limit={}&offset={}",
+                    self.config.url, index, PAGE, offset
+                );
+                let r: crate::api::DocumentsResult<T> =
+                    match crate::api::get(&url, &self.config.api_key).await {
+                        Ok(r) => r,
+                        // Index not created yet → treat as empty, not an error.
+                        Err(OrmError::NotFound) => break,
+                        Err(e) => return Err(e),
+                    };
+                let got = r.results.len() as u64;
+                all.extend(r.results);
+                offset += got;
+                // Stop when the last page was short or we've collected the total.
+                if got < PAGE || offset >= r.total {
+                    break;
+                }
+            }
+            Ok(all)
         })
     }
 
@@ -116,29 +142,37 @@ where
             Err(e) => return Box::pin(async move { Err(e) }),
         };
         Box::pin(async move {
-            let pk = pk_field::<T>();
-            let list = id_strings.iter()
-                .map(|s| if s.parse::<f64>().is_ok() { s.clone() } else { format!("\"{}\"", s) })
-                .collect::<Vec<_>>().join(", ");
-            let req = crate::api::SearchRequest {
-                q: None,
-                filter: Some(format!("{} IN [{}]", pk, list)),
-                sort: vec![],
-                limit: Some(id_strings.len() as u64),
-                offset: None,
-            };
-            let url = format!("{}/indexes/{}/search", self.config.url, T::table_name());
-            let r: crate::api::SearchResult<T> = crate::api::post(&url, &self.config.api_key, &req).await?;
-            Ok(r.hits)
+            // Fetch each document by id via GET rather than a `search` filter on
+            // the primary key: the latter would require the PK to be configured
+            // `filterable`, which Meilisearch does not do by default.
+            let index = T::table_name();
+            let mut found = Vec::with_capacity(id_strings.len());
+            for id in &id_strings {
+                let url = format!("{}/indexes/{}/documents/{}", self.config.url, index, id);
+                if let Some(doc) =
+                    crate::api::get_optional::<T>(&url, &self.config.api_key).await?
+                {
+                    found.push(doc);
+                }
+            }
+            Ok(found)
         })
     }
 
     fn count<'a>(&'a self) -> BoxFuture<'a, Result<u64, OrmError>> {
         Box::pin(async move {
             let url = format!("{}/indexes/{}/documents?limit=0", self.config.url, T::table_name());
-            let r: crate::api::DocumentsResult<serde_json::Value> =
-                crate::api::get(&url, &self.config.api_key).await?;
-            Ok(r.total)
+            match crate::api::get::<crate::api::DocumentsResult<serde_json::Value>>(
+                &url,
+                &self.config.api_key,
+            )
+            .await
+            {
+                Ok(r) => Ok(r.total),
+                // Index not created yet → count is 0, not an error.
+                Err(OrmError::NotFound) => Ok(0),
+                Err(e) => Err(e),
+            }
         })
     }
 
@@ -178,21 +212,21 @@ where
             let task: crate::api::TaskEnqueued =
                 crate::api::post(&url, &self.config.api_key, &entities).await?;
             crate::api::wait_for_task(&self.config.url, &self.config.api_key, task.task_uid).await?;
-            let id_strings: Result<Vec<String>, OrmError> = entities.iter().map(|e| id_to_string(e.id())).collect();
+            // Fetch each saved document back by id via GET (no filterable-PK
+            // requirement, and preserves input order).
+            let id_strings: Result<Vec<String>, OrmError> =
+                entities.iter().map(|e| id_to_string(e.id())).collect();
             let id_strings = id_strings?;
-            let list = id_strings.iter()
-                .map(|s| if s.parse::<f64>().is_ok() { s.clone() } else { format!("\"{}\"", s) })
-                .collect::<Vec<_>>().join(", ");
-            let req = crate::api::SearchRequest {
-                q: None,
-                filter: Some(format!("{} IN [{}]", pk, list)),
-                sort: vec![],
-                limit: Some(entities.len() as u64),
-                offset: None,
-            };
-            let search_url = format!("{}/indexes/{}/search", self.config.url, index);
-            let r: crate::api::SearchResult<T> = crate::api::post(&search_url, &self.config.api_key, &req).await?;
-            Ok(r.hits)
+            let mut saved = Vec::with_capacity(id_strings.len());
+            for id in &id_strings {
+                let get_url = format!("{}/indexes/{}/documents/{}", self.config.url, index, id);
+                if let Some(doc) =
+                    crate::api::get_optional::<T>(&get_url, &self.config.api_key).await?
+                {
+                    saved.push(doc);
+                }
+            }
+            Ok(saved)
         })
     }
 

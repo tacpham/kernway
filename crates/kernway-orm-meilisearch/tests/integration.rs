@@ -19,16 +19,8 @@
 
 #![cfg(feature = "meilisearch")]
 
-use kernway_orm_core::{
-    entity::Entity,
-    query::QueryBuilder,
-    repository::Repository,
-    driver::Driver,
-};
-use kernway_orm_meilisearch::{
-    api,
-    driver::{MeilisearchConfig, MeilisearchDriver},
-};
+use kernway_orm_core::{driver::Driver, repository::Repository};
+use kernway_orm_meilisearch::{api, driver::MeilisearchDriver};
 use kernway_orm_macro::entity;
 use rt_core::Executor;
 use serde::{Deserialize, Serialize};

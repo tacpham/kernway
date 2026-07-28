@@ -1,0 +1,20 @@
+[package]
+name    = "meilisearch-search"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "meilisearch-search"
+path = "src/main.rs"
+
+# Search-as-you-type: the browser (htmx) fires a GET on each keystroke, the
+# handler queries Meilisearch through the ORM, and a results fragment swaps in.
+# htmx is loaded client-side from a CDN, so no kernway-htmx dependency is needed.
+[dependencies]
+kernway-core            = { workspace = true }
+kernway-server          = { workspace = true }
+kernway-orm-core        = { workspace = true }
+kernway-orm-macro       = { workspace = true }
+kernway-orm-meilisearch = { workspace = true, features = ["meilisearch"] }
+rt-core                 = { workspace = true }   # a throwaway executor to seed at startup
+serde                   = { workspace = true }
