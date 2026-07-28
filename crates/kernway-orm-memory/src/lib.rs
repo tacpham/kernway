@@ -76,6 +76,7 @@ where
 {
     store: Arc<Mutex<HashMap<T::Id, T>>>,
     filters: Vec<Filter>,
+    spec: Option<kernway_orm_core::spec::Spec>,
     order: Option<Order>,
     limit: Option<u64>,
     offset: u64,
@@ -90,6 +91,7 @@ where
         Self {
             store,
             filters: Vec::new(),
+            spec: None,
             order: None,
             limit: None,
             offset: 0,
@@ -114,7 +116,7 @@ where
     }
 
     fn matches_filters(&self, entity: &T) -> bool {
-        self.filters.iter().all(|filter| match filter {
+        let filters_ok = self.filters.iter().all(|filter| match filter {
             Filter::Eq { field, value } => get_field_str(entity, field)
                 .map(|candidate| candidate == *value)
                 .unwrap_or(false),
@@ -164,7 +166,13 @@ where
             Filter::IsNotNull { field } => raw_field_value(entity, field)
                 .map(|value| !value.is_null())
                 .unwrap_or(false),
-        })
+        });
+        // A Spec (composable OR/AND/NOT), if present, must also hold.
+        let spec_ok = match &self.spec {
+            Some(s) => s.matches(&|f: &str| get_field_str(entity, f)),
+            None => true,
+        };
+        filters_ok && spec_ok
     }
 
     fn apply_window(&self, items: Vec<T>) -> Vec<T> {
@@ -328,6 +336,14 @@ where
         field: &'static str,
     ) -> Box<dyn QueryBuilder<T>> {
         self.filters.push(Filter::IsNotNull { field });
+        self
+    }
+
+    fn filter_spec(
+        mut self: Box<Self>,
+        spec: kernway_orm_core::spec::Spec,
+    ) -> Box<dyn QueryBuilder<T>> {
+        self.spec = Some(spec);
         self
     }
 
@@ -803,5 +819,87 @@ mod tests {
             .collect();
         scores.sort();
         assert_eq!(scores, vec![10, 100]);
+    }
+
+    /// Composite key `(warehouse, sku)` — works out of the box because the store
+    /// is keyed by the whole `T::Id`, and a tuple Id is `Hash + Eq`.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[entity(table = "stock")]
+    struct Stock {
+        #[id()]
+        warehouse: String,
+        #[id()]
+        sku: String,
+        quantity: i32,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[entity(table = "people")]
+    struct Person {
+        #[id()]
+        id: u64,
+        role: String,
+        age: i64,
+        tier: String,
+    }
+
+    fn people() -> Vec<Person> {
+        vec![
+            Person { id: 1, role: "ADMIN".into(), age: 30, tier: "silver".into() },
+            Person { id: 2, role: "ADMIN".into(), age: 15, tier: "gold".into() },
+            Person { id: 3, role: "ADMIN".into(), age: 15, tier: "silver".into() },
+            Person { id: 4, role: "USER".into(), age: 40, tier: "gold".into() },
+        ]
+    }
+
+    #[test]
+    fn memory_filter_spec_or_and_not() {
+        use kernway_orm_core::spec::Spec;
+        let repo = InMemoryRepository::<Person>::new();
+        for p in people() {
+            block_on(repo.save(p)).unwrap();
+        }
+
+        // role = ADMIN AND (age > 18 OR tier = gold)
+        let spec = Spec::eq("role", "ADMIN").and(Spec::gt("age", "18").or(Spec::eq("tier", "gold")));
+        let mut ids: Vec<u64> = block_on(repo.query().filter_spec(spec).fetch_all())
+            .unwrap()
+            .iter()
+            .map(|p| p.id)
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec![1, 2]); // 3 = admin/15/silver excluded; 4 = USER excluded
+
+        // NOT (tier = gold) → silver ones.
+        let mut silver: Vec<u64> =
+            block_on(repo.query().filter_spec(Spec::eq("tier", "gold").not()).fetch_all())
+                .unwrap()
+                .iter()
+                .map(|p| p.id)
+                .collect();
+        silver.sort();
+        assert_eq!(silver, vec![1, 3]);
+    }
+
+    #[test]
+    fn memory_composite_primary_key() {
+        let repo = InMemoryRepository::<Stock>::new();
+        let key = |w: &str, s: &str| (w.to_string(), s.to_string());
+
+        block_on(repo.save(Stock { warehouse: "WH1".into(), sku: "SKU42".into(), quantity: 100 })).unwrap();
+        block_on(repo.save(Stock { warehouse: "WH2".into(), sku: "SKU42".into(), quantity: 5 })).unwrap();
+        assert_eq!(block_on(repo.count()).unwrap(), 2);
+
+        assert_eq!(block_on(repo.find_by_id(&key("WH1", "SKU42"))).unwrap().unwrap().quantity, 100);
+        assert!(block_on(repo.find_by_id(&key("WH3", "SKU42"))).unwrap().is_none());
+
+        // Re-saving the same composite key overwrites (update), not a new row.
+        block_on(repo.save(Stock { warehouse: "WH1".into(), sku: "SKU42".into(), quantity: 250 })).unwrap();
+        assert_eq!(block_on(repo.count()).unwrap(), 2);
+        assert_eq!(block_on(repo.find_by_id(&key("WH1", "SKU42"))).unwrap().unwrap().quantity, 250);
+
+        block_on(repo.delete_by_id(&key("WH1", "SKU42"))).unwrap();
+        assert!(block_on(repo.find_by_id(&key("WH1", "SKU42"))).unwrap().is_none());
+        assert!(block_on(repo.exists_by_id(&key("WH2", "SKU42"))).unwrap());
     }
 }

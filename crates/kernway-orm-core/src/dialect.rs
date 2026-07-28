@@ -61,16 +61,26 @@ pub trait SqlDialect: Send + Sync + 'static {
     /// [`Self::col_type_ddl`], and [`Self::auto_increment_keyword`] — override
     /// only when the dialect needs something special (e.g. PostgreSQL `SERIAL`).
     fn create_table_sql(&self, table: &str, cols: &[ColumnDef]) -> String {
+        // A composite key (several #[id] columns) must be declared once as a
+        // table-level `PRIMARY KEY (a, b)`, not per-column (that is invalid SQL).
+        let pk: Vec<&ColumnDef> = cols.iter().filter(|c| c.primary_key).collect();
+        let composite = pk.len() > 1;
+
         let mut parts = Vec::new();
         for col in cols {
             let sql_type = self.col_type_ddl(&col.col_type);
             let mut def = format!("{} {}", self.quote_identifier(col.name), sql_type);
             if col.primary_key {
-                def.push_str(" PRIMARY KEY");
-                let ai = self.auto_increment_keyword();
-                if col.auto && !ai.is_empty() {
-                    def.push(' ');
-                    def.push_str(ai);
+                if composite {
+                    // Columns are NOT NULL; the key itself is declared below.
+                    def.push_str(" NOT NULL");
+                } else {
+                    def.push_str(" PRIMARY KEY");
+                    let ai = self.auto_increment_keyword();
+                    if col.auto && !ai.is_empty() {
+                        def.push(' ');
+                        def.push_str(ai);
+                    }
                 }
             } else {
                 if !col.nullable {
@@ -81,6 +91,10 @@ pub trait SqlDialect: Send + Sync + 'static {
                 }
             }
             parts.push(def);
+        }
+        if composite {
+            let names: Vec<String> = pk.iter().map(|c| self.quote_identifier(c.name)).collect();
+            parts.push(format!("PRIMARY KEY ({})", names.join(", ")));
         }
         format!(
             "CREATE TABLE IF NOT EXISTS {} (\n  {}\n)",

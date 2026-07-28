@@ -99,11 +99,13 @@ pub mod page;
 pub mod query;
 /// The CRUD contract a backend implements per entity type.
 pub mod repository;
+pub mod spec;
 
 pub use dialect::SqlDialect;
 pub use driver::{Driver, DriverCapabilities};
 pub use entity::{ColumnDef, ColumnType, Entity};
 pub use error::OrmError;
 pub use page::Page;
+pub use spec::Spec;
 pub use query::QueryBuilder;
 pub use repository::Repository;
