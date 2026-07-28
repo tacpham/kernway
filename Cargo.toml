@@ -33,6 +33,7 @@ members = [
     "crates/kernway-compress",
     "crates/kernway-http-client",
     "crates/kernway-udp",
+    "crates/kernway-dns",
     "crates/kernway-tcp",
     "crates/kernway-oauth2",
     "crates/kernway",
@@ -147,6 +148,7 @@ kernway-persist      = { path = "crates/kernway-persist" }
 kernway-compress     = { path = "crates/kernway-compress" }
 kernway-http-client  = { path = "crates/kernway-http-client" }
 kernway-udp          = { path = "crates/kernway-udp" }
+kernway-dns          = { path = "crates/kernway-dns" }
 kernway-tcp          = { path = "crates/kernway-tcp" }
 kernway-oauth2       = { path = "crates/kernway-oauth2" }
 rt-core              = { path = "crates/rt-core" }
