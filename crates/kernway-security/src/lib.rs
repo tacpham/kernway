@@ -37,6 +37,14 @@ pub use tracking::{BanList, Bans, RequestMeta};
 pub mod password;
 pub use password::{hash_password, verify_password};
 
+/// BCrypt verify/generate — interop with an existing jBCrypt/Spring bcrypt store
+/// (feature = `bcrypt`). Kernway's own KDF is PBKDF2 above; this exists only to
+/// verify `$2a$…` hashes another system produced.
+#[cfg(feature = "bcrypt")]
+pub mod bcrypt;
+#[cfg(feature = "bcrypt")]
+pub use bcrypt::{hash_bcrypt, verify_bcrypt};
+
 /// Login throttling / account lockout — brute-force protection for the login flow.
 pub mod lockout;
 pub use lockout::LoginGuard;
