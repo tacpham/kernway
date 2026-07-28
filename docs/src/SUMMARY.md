@@ -15,6 +15,7 @@
 
 ## Guides
 
+- [Layered Architecture](guides/layered-architecture.md)
 - [Building a REST API](guides/rest-api.md)
 - [Database Access](guides/database.md)
 - [Caching (Redis)](guides/caching.md)
