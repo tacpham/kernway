@@ -1679,6 +1679,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernway-orm-web"
+version = "0.1.0"
+dependencies = [
+ "kernway-core",
+ "kernway-orm-core",
+ "kernway-orm-macro",
+ "kernway-orm-memory",
+ "rt-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kernway-persist"
 version = "0.1.0"
 
