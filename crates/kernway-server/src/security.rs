@@ -80,6 +80,7 @@ type Rule = (Option<String>, String, Access);
 pub struct HttpSecurity {
     rules: Vec<Rule>,
     default: Access,
+    login_redirect: Option<String>,
 }
 
 impl HttpSecurity {
@@ -90,6 +91,7 @@ impl HttpSecurity {
         Self {
             rules: Vec::new(),
             default: Access::Authenticated,
+            login_redirect: None,
         }
     }
 
@@ -149,12 +151,24 @@ impl HttpSecurity {
         self
     }
 
+    /// Redirect an **unauthenticated** request to `path` (a `302`) instead of
+    /// returning `401` — Spring's `RedirectServerAuthenticationEntryPoint` /
+    /// `formLogin().loginPage(...)`. This is what makes a browser app "you must log
+    /// in to enter": a visitor without a session is bounced to the login page. A
+    /// missing *role* (an authenticated user) still gets `403`, not a redirect.
+    #[must_use]
+    pub fn login_page(mut self, path: &str) -> Self {
+        self.login_redirect = Some(path.to_string());
+        self
+    }
+
     /// Finish into the enforcing middleware — add it with `app.layer(...)`.
     #[must_use]
     pub fn build(self) -> SecurityLayer {
         SecurityLayer {
             rules: Arc::new(self.rules),
             default: self.default,
+            login_redirect: self.login_redirect,
         }
     }
 }
@@ -170,6 +184,7 @@ impl Default for HttpSecurity {
 pub struct SecurityLayer {
     rules: Arc<Vec<Rule>>,
     default: Access,
+    login_redirect: Option<String>,
 }
 
 impl SecurityLayer {
@@ -212,7 +227,14 @@ impl Middleware for SecurityLayer {
         );
         match decision {
             Decision::Allow => next.run(req, scope),
-            Decision::Unauthenticated => Box::pin(async { unauthorized() }),
+            Decision::Unauthenticated => match &self.login_redirect {
+                Some(path) => {
+                    let mut resp = Response::new(kernway_core::error::StatusCode(302));
+                    resp.headers.insert("location", path);
+                    Box::pin(async move { resp })
+                }
+                None => Box::pin(async { unauthorized() }),
+            },
             Decision::Forbidden => Box::pin(async { forbidden() }),
         }
     }
@@ -314,6 +336,27 @@ mod tests {
         assert!(path_matches("/health", "/health"));
         assert!(!path_matches("/health", "/healthz"));
         assert!(path_matches("/**", "/anything/at/all"));
+    }
+
+    #[test]
+    fn login_page_redirects_anonymous_instead_of_401() {
+        let with = HttpSecurity::new()
+            .any_request(Access::Authenticated)
+            .login_page("/login")
+            .build();
+        // Anonymous → 302 (the entry-point redirect), not 401.
+        assert_eq!(enforce(&with, "/", SecurityContext::anonymous()), StatusCode(302));
+        // An authenticated user still reaches the handler.
+        assert_eq!(
+            enforce(&with, "/", SecurityContext::authenticated("u", ["USER".to_string()])),
+            StatusCode::OK
+        );
+        // Without login_page, an anonymous request is a plain 401.
+        let without = HttpSecurity::new().any_request(Access::Authenticated).build();
+        assert_eq!(
+            enforce(&without, "/", SecurityContext::anonymous()),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[test]
