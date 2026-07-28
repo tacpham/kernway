@@ -22,8 +22,9 @@ pub struct MeilisearchConfig {
 /// A configured handle to a Meilisearch instance.
 ///
 /// Holds the connection config and creates [`MeilisearchRepository`] instances
-/// on demand. No persistent connection is kept — each call opens a new
-/// `ureq` request on a blocking pool thread.
+/// on demand. No persistent connection is kept — each call issues an async
+/// request through `kernway-http-client` (Kernway's own runtime, no tokio, no
+/// blocking pool).
 ///
 /// # Example
 /// ```rust,ignore
