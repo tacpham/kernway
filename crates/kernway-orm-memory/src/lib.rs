@@ -404,7 +404,7 @@ where
     }
 
     fn maybe_assign_id(&self, entity: T) -> Result<T, OrmError> {
-        if entity.id() != &T::Id::default() {
+        if entity.id() != T::Id::default() {
             return Ok(entity);
         }
 
@@ -477,7 +477,7 @@ where
 
     fn save_sync(&self, entity: T) -> Result<T, OrmError> {
         let entity = self.maybe_assign_id(entity)?;
-        let id = entity.id().clone();
+        let id = entity.id();
         let mut store = self
             .store
             .lock()
@@ -699,7 +699,7 @@ mod tests {
     fn memory_repo_save_and_find_by_id() {
         let repo = InMemoryRepository::<Todo>::new();
         let saved = block_on(repo.save(sample("first"))).unwrap();
-        let found = block_on(repo.find_by_id(saved.id())).unwrap().unwrap();
+        let found = block_on(repo.find_by_id(&saved.id())).unwrap().unwrap();
 
         assert_eq!(saved.id, 1);
         assert_eq!(found.title, "first");
@@ -723,9 +723,9 @@ mod tests {
         let repo = InMemoryRepository::<Todo>::new();
         let saved = block_on(repo.save(sample("gone"))).unwrap();
 
-        block_on(repo.delete_by_id(saved.id())).unwrap();
+        block_on(repo.delete_by_id(&saved.id())).unwrap();
 
-        assert!(block_on(repo.find_by_id(saved.id())).unwrap().is_none());
+        assert!(block_on(repo.find_by_id(&saved.id())).unwrap().is_none());
     }
 
     #[test]
