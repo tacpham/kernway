@@ -804,4 +804,38 @@ mod tests {
         scores.sort();
         assert_eq!(scores, vec![10, 100]);
     }
+
+    /// Composite key `(warehouse, sku)` — works out of the box because the store
+    /// is keyed by the whole `T::Id`, and a tuple Id is `Hash + Eq`.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[entity(table = "stock")]
+    struct Stock {
+        #[id()]
+        warehouse: String,
+        #[id()]
+        sku: String,
+        quantity: i32,
+    }
+
+    #[test]
+    fn memory_composite_primary_key() {
+        let repo = InMemoryRepository::<Stock>::new();
+        let key = |w: &str, s: &str| (w.to_string(), s.to_string());
+
+        block_on(repo.save(Stock { warehouse: "WH1".into(), sku: "SKU42".into(), quantity: 100 })).unwrap();
+        block_on(repo.save(Stock { warehouse: "WH2".into(), sku: "SKU42".into(), quantity: 5 })).unwrap();
+        assert_eq!(block_on(repo.count()).unwrap(), 2);
+
+        assert_eq!(block_on(repo.find_by_id(&key("WH1", "SKU42"))).unwrap().unwrap().quantity, 100);
+        assert!(block_on(repo.find_by_id(&key("WH3", "SKU42"))).unwrap().is_none());
+
+        // Re-saving the same composite key overwrites (update), not a new row.
+        block_on(repo.save(Stock { warehouse: "WH1".into(), sku: "SKU42".into(), quantity: 250 })).unwrap();
+        assert_eq!(block_on(repo.count()).unwrap(), 2);
+        assert_eq!(block_on(repo.find_by_id(&key("WH1", "SKU42"))).unwrap().unwrap().quantity, 250);
+
+        block_on(repo.delete_by_id(&key("WH1", "SKU42"))).unwrap();
+        assert!(block_on(repo.find_by_id(&key("WH1", "SKU42"))).unwrap().is_none());
+        assert!(block_on(repo.exists_by_id(&key("WH2", "SKU42"))).unwrap());
+    }
 }
