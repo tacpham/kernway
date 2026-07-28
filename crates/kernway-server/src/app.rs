@@ -1035,7 +1035,9 @@ enum StaticOutcome {
 }
 
 impl StaticOutcome {
-    fn into_response(self) -> Response {
+    /// Build the response, tagging the file body with `cache_control` (the static
+    /// root passes `"no-cache"`; a media handler passes a long `max-age`).
+    fn into_response(self, cache_control: &str) -> Response {
         match self {
             StaticOutcome::NotModified {
                 etag,
@@ -1043,7 +1045,7 @@ impl StaticOutcome {
             } => {
                 let mut r = Response::new(StatusCode::NOT_MODIFIED);
                 r.headers.insert("etag", &etag);
-                r.headers.insert("cache-control", "no-cache");
+                r.headers.insert("cache-control", cache_control);
                 if vary_encoding {
                     r.headers.insert("vary", "Accept-Encoding");
                 }
@@ -1064,9 +1066,10 @@ impl StaticOutcome {
                     .content_type(mime)
                     .file(path, len);
                 r.headers.insert("etag", &etag);
-                // `no-cache` means "cache, but revalidate every time" — the browser
-                // re-asks with If-None-Match and gets a 304 when nothing changed.
-                r.headers.insert("cache-control", "no-cache");
+                // Caller's policy: `no-cache` (revalidate each time) for the static
+                // root; a long, immutable `max-age` for content-addressed media so
+                // an edge/CDN absorbs repeats and the origin is hit once.
+                r.headers.insert("cache-control", cache_control);
                 // The extension-derived type is authoritative; stop the browser sniffing.
                 r.headers.insert("x-content-type-options", "nosniff");
                 // Advertise range support so clients (video players, resumers) ask.
@@ -1256,7 +1259,7 @@ async fn try_static(
     })
     .await??;
 
-    let mut response = outcome.into_response();
+    let mut response = outcome.into_response("no-cache");
 
     // A byte range applies only to a 200 file body. Capture the length first so
     // the borrow of `response.body` ends before the mutation.
@@ -1270,6 +1273,83 @@ async fn try_static(
     }
 
     Some(response)
+}
+
+/// Serve a single file from an **explicit path** — the same streaming, `ETag`/
+/// `If-None-Match` → `304`, single byte `Range` → `206`/`416`, and extension MIME
+/// as the static-file root, but the *caller* picks the file and the
+/// `Cache-Control` policy.
+///
+/// This is what a media proxy needs: expose an opaque id (e.g. `/media/{token}`)
+/// that maps to a file the caller resolves, so the real path/origin never appears
+/// in a URL, and set a long immutable `cache_control` so an edge/CDN absorbs
+/// repeats — the origin (a local box on a tunnel) is hit once per file. The body
+/// streams in bounded chunks off the blocking pool; a large audio file is never
+/// read whole into memory, and a player's range request seeks without pulling it all.
+///
+/// Returns `404` when `path` is not a readable regular file. The caller owns the
+/// path it passes: map ids to files from trusted data, never from raw user input.
+/// All filesystem I/O runs on the blocking pool via [`rt_core::spawn_blocking`].
+pub async fn serve_file(
+    request: &Request,
+    path: impl Into<std::path::PathBuf>,
+    cache_control: &str,
+) -> Response {
+    let path = path.into();
+    let if_none_match = request.headers.get("if-none-match").map(str::to_string);
+
+    let outcome = rt_core::spawn_blocking(move || stat_file(&path, if_none_match.as_deref())).await;
+    let Some(Some(outcome)) = outcome else {
+        return Response::new(StatusCode::NOT_FOUND)
+            .content_type("text/plain; charset=utf-8")
+            .body(b"404 not found".to_vec());
+    };
+
+    let mut response = outcome.into_response(cache_control);
+
+    let file_len = if let Body::File { len, .. } = &response.body {
+        Some(*len)
+    } else {
+        None
+    };
+    if let (Some(len), Some(range_header)) = (file_len, request.headers.get("range")) {
+        apply_range(&mut response, range_header, len);
+    }
+    response
+}
+
+/// Stat an explicit file and build its [`StaticOutcome`] — like [`load_static`]
+/// but without a root/URL resolve or precompression negotiation (the caller chose
+/// the path). Canonicalises to reject a path that is not a regular file. Runs on
+/// the blocking pool.
+fn stat_file(path: &std::path::Path, if_none_match: Option<&str>) -> Option<StaticOutcome> {
+    let canon = std::fs::canonicalize(path).ok()?;
+    let meta = std::fs::metadata(&canon).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let mime = mime_for(&canon);
+    let mtime_nanos = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let etag = kernway_static::etag(meta.len(), mtime_nanos);
+
+    if let Some(inm) = if_none_match {
+        if kernway_static::etag_matches(inm, &etag) {
+            return Some(StaticOutcome::NotModified { etag, vary_encoding: false });
+        }
+    }
+    Some(StaticOutcome::File {
+        path: canon,
+        len: meta.len(),
+        etag,
+        mime,
+        encoding: None,
+        vary_encoding: false,
+    })
 }
 
 /// A parsed single byte range against a resource of known length.

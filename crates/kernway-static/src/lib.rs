@@ -186,6 +186,17 @@ pub fn mime_for(path: &Path) -> &'static str {
         Some("xml") => "application/xml; charset=utf-8",
         Some("wasm") => "application/wasm",
         Some("pdf") => "application/pdf",
+        // Audio — the media a `<audio>` player streams (Range-served).
+        Some("mp3") => "audio/mpeg",
+        Some("m4a" | "m4b" | "aac") => "audio/mp4",
+        Some("oga" | "ogg") => "audio/ogg",
+        Some("opus") => "audio/opus",
+        Some("wav") => "audio/wav",
+        Some("flac") => "audio/flac",
+        // Video.
+        Some("mp4" | "m4v") => "video/mp4",
+        Some("webm") => "video/webm",
+        Some("mov") => "video/quicktime",
         _ => "application/octet-stream",
     }
 }
