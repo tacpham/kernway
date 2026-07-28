@@ -685,7 +685,7 @@ fn cmp_field_to_query(field_val: &serde_json::Value, query: &str) -> Option<CmpO
 #[cfg(test)]
 mod tests {
     use super::InMemoryRepository;
-    use kernway_orm_core::{repository::Repository, Entity};
+    use kernway_orm_core::{error::OrmError, repository::Repository, Entity};
     use kernway_orm_macro::entity;
     use serde::{Deserialize, Serialize};
     use std::future::Future;
@@ -879,6 +879,53 @@ mod tests {
                 .collect();
         silver.sort();
         assert_eq!(silver, vec![1, 3]);
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[entity(table = "users")]
+    struct User {
+        #[id(strategy = "auto")]
+        id: u64,
+        email: String,
+        role: String,
+        age: i64,
+    }
+
+    // Derived repository — method names generate the queries.
+    #[kernway_orm_macro::repository(entity = User)]
+    #[allow(async_fn_in_trait)]
+    trait UserRepo {
+        async fn find_by_email(&self, email: &str) -> Result<Option<User>, OrmError>;
+        async fn find_by_role(&self, role: &str) -> Result<Vec<User>, OrmError>;
+        async fn find_by_role_and_age_gt(&self, role: &str, age: i64) -> Result<Vec<User>, OrmError>;
+        async fn count_by_role(&self, role: &str) -> Result<u64, OrmError>;
+        async fn exists_by_email(&self, email: &str) -> Result<bool, OrmError>;
+    }
+
+    #[test]
+    fn memory_derived_repository() {
+        let repo: Box<dyn Repository<User>> = Box::new(InMemoryRepository::<User>::new());
+        for (email, role, age) in [("a@x", "ADMIN", 30i64), ("b@x", "ADMIN", 15), ("c@x", "USER", 40)] {
+            block_on(repo.save(User { id: 0, email: email.into(), role: role.into(), age })).unwrap();
+        }
+        let users = UserRepoImpl::new(repo);
+
+        // find_by_email → Option
+        assert_eq!(block_on(users.find_by_email("a@x")).unwrap().unwrap().role, "ADMIN");
+        assert!(block_on(users.find_by_email("nope")).unwrap().is_none());
+
+        // find_by_role → Vec
+        assert_eq!(block_on(users.find_by_role("ADMIN")).unwrap().len(), 2);
+
+        // find_by_role_and_age_gt → the AND with a > operator
+        let over = block_on(users.find_by_role_and_age_gt("ADMIN", 18)).unwrap();
+        assert_eq!(over.len(), 1);
+        assert_eq!(over[0].email, "a@x");
+
+        // count_by_role and exists_by_email
+        assert_eq!(block_on(users.count_by_role("ADMIN")).unwrap(), 2);
+        assert!(block_on(users.exists_by_email("a@x")).unwrap());
+        assert!(!block_on(users.exists_by_email("nope")).unwrap());
     }
 
     #[test]
