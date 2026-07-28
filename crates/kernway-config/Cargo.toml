@@ -18,10 +18,17 @@ rust-version.workspace = true
 # a feature: off by default, the properties baseline stays dependency-free.
 yaml-rust2 = { version = "0.10", optional = true }
 
+# The `#[configuration]` derive (Spring's @ConfigurationProperties) lives in
+# di-macro; re-exported here behind `derive` so apps bind typed config without
+# knowing di-macro exists. Optional: the plain get/get_or API stays derive-free.
+di-macro = { workspace = true, optional = true }
+
 [features]
 # Also read application.yml / application-{profile}.yml, flattened into the same
 # dotted-key Config.
 yaml = ["dep:yaml-rust2"]
+# Re-export the `#[configuration]` derive from this crate (`kernway_config::configuration`).
+derive = ["dep:di-macro"]
 
 [dev-dependencies]
 di-macro = { workspace = true } # exercises the #[configuration] derive

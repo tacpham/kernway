@@ -94,7 +94,7 @@ pub mod driver;
 pub mod query;
 pub mod repository;
 
-pub use driver::{MeilisearchConfig, MeilisearchDriver};
+pub use driver::{Meilisearch, MeilisearchConfig, MeilisearchDriver};
 pub use repository::MeilisearchRepository;
 
 #[cfg(feature = "meilisearch")]

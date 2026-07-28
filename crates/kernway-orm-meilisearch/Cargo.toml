@@ -16,8 +16,16 @@ thiserror           = { workspace = true }
 kernway-http-client = { workspace = true, optional = true }
 rt-core             = { workspace = true, optional = true }
 
+# Auto-configuration: build a driver straight from layered kernway-config
+# (Spring Boot starter style). Optional — hand-wiring stays dependency-free.
+kernway-config      = { workspace = true, optional = true }
+
 [features]
 default = []
+# Wire MeilisearchConfig / MeilisearchDriver from kernway-config: enable the
+# feature, put `meilisearch.host` + `meilisearch.api-key` in application.yml, and
+# `MeilisearchDriver::from_config(&cfg)` connects — no hand-parsing in main.
+config = ["dep:kernway-config"]
 # Enable to compile the actual async HTTP-based Meilisearch implementation.
 # Without this feature, all types are available but every operation returns
 # OrmError::Unsupported — useful for compile-time checks without a running server.
