@@ -124,6 +124,7 @@ pub async fn delete(url: &str, api_key: &str) -> Result<(), OrmError> {
 /// Task enqueued by every write operation.
 #[derive(Debug, serde::Deserialize)]
 pub struct TaskEnqueued {
+    /// The uid to poll on `GET /tasks/{uid}` until the write completes.
     #[serde(rename = "taskUid")]
     pub task_uid: u64,
 }
@@ -131,29 +132,37 @@ pub struct TaskEnqueued {
 /// Full task status from `GET /tasks/{uid}`.
 #[derive(Debug, serde::Deserialize)]
 pub struct TaskStatus {
+    /// `"enqueued"`, `"processing"`, `"succeeded"`, or `"failed"`.
     pub status: String,
+    /// Present when `status` is `"failed"`.
     pub error: Option<TaskError>,
 }
 
 /// Error detail inside a failed task.
 #[derive(Debug, serde::Deserialize)]
 pub struct TaskError {
+    /// Human-readable failure message from Meilisearch.
     pub message: String,
 }
 
 /// Response from `GET /indexes/{uid}/documents`.
 #[derive(Debug, serde::Deserialize)]
 pub struct DocumentsResult<T> {
+    /// The documents returned in this page.
     pub results: Vec<T>,
+    /// Total documents in the index (independent of the page limit).
     pub total: u64,
 }
 
 /// Response from `POST /indexes/{uid}/search`.
 #[derive(Debug, serde::Deserialize)]
 pub struct SearchResult<T> {
+    /// The matching documents.
     pub hits: Vec<T>,
+    /// Approximate total match count (Meilisearch's default) — fast but not exact.
     #[serde(rename = "estimatedTotalHits")]
     pub estimated_total_hits: Option<u64>,
+    /// Exact total match count, present only when the query requested it.
     #[serde(rename = "totalHits")]
     pub total_hits: Option<u64>,
 }
@@ -161,14 +170,19 @@ pub struct SearchResult<T> {
 /// `POST /indexes/{uid}/search` request body.
 #[derive(Debug, Default, Serialize)]
 pub struct SearchRequest<'a> {
+    /// Full-text search terms (the `q` parameter).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub q: Option<&'a str>,
+    /// Meilisearch filter expression, e.g. `role = "ADMIN" AND age > 18`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filter: Option<String>,
+    /// Sort expressions, e.g. `["price:asc"]`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sort: Vec<String>,
+    /// Maximum hits to return.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
+    /// Number of leading hits to skip (pagination).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<u64>,
 }
@@ -176,6 +190,7 @@ pub struct SearchRequest<'a> {
 /// Response from `GET /health`.
 #[derive(Debug, serde::Deserialize)]
 pub struct HealthResponse {
+    /// `"available"` when Meilisearch is ready to serve.
     pub status: String,
 }
 
@@ -209,14 +224,27 @@ pub async fn wait_for_task(base_url: &str, api_key: &str, task_uid: u64) -> Resu
 
 /// Create the index if it does not exist, setting the primary key.
 ///
-/// Idempotent — safe to call before every write. Meilisearch returns a task
-/// on creation (202) and a 400 if the index already exists (which we ignore).
+/// Idempotent — safe to call before every write. We first check whether the
+/// index exists (`GET /indexes/{uid}`) and only create it when absent: creating
+/// an index that already exists returns a **202 whose task then fails** with
+/// "already exists" in Meilisearch v1.7 (not a 400), so blindly enqueuing a
+/// create is not safe. The task-failure case is tolerated too, as a guard
+/// against a concurrent creator racing the existence check.
 pub async fn ensure_index(
     base_url: &str,
     api_key: &str,
     index: &str,
     pk: &str,
 ) -> Result<(), OrmError> {
+    // Already there? Nothing to do.
+    let exists_url = format!("{}/indexes/{}", base_url, index);
+    if get_optional::<serde_json::Value>(&exists_url, api_key)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+
     #[derive(Serialize)]
     struct Body<'a> {
         uid: &'a str,
@@ -238,11 +266,16 @@ pub async fn ensure_index(
         .map_err(map_http)?;
 
     match resp.status {
-        // 202 = task enqueued to create the index → wait for it
+        // 202 = task enqueued to create the index → wait for it, but a concurrent
+        // creator winning the race ("already exists") is success, not failure.
         202 => {
             let task: TaskEnqueued = serde_json::from_slice(&resp.body)
                 .map_err(|e| OrmError::TypeConversion(e.to_string()))?;
-            wait_for_task(base_url, api_key, task.task_uid).await
+            match wait_for_task(base_url, api_key, task.task_uid).await {
+                Ok(()) => Ok(()),
+                Err(OrmError::Query(m)) if m.contains("already exists") => Ok(()),
+                Err(e) => Err(e),
+            }
         }
         // 400 = index already exists in some Meilisearch versions — fine
         400 => Ok(()),

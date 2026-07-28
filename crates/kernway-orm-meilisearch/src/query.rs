@@ -30,6 +30,9 @@ use std::marker::PhantomData;
 
 /// Fluent query builder for Meilisearch.
 pub struct MeilisearchQueryBuilder<T> {
+    // Only read by the terminal `fetch_*` methods, which exist solely under the
+    // `meilisearch` feature; without it the field is carried but never used.
+    #[cfg_attr(not(feature = "meilisearch"), allow(dead_code))]
     pub(crate) config: MeilisearchConfig,
     /// Filter expression fragments — joined with `" AND "`.
     pub(crate) filters: Vec<String>,
@@ -266,6 +269,8 @@ impl<T: Entity + Serialize + DeserializeOwned + Send + 'static> QueryBuilder<T> 
     }
 
     fn fetch_page(self: Box<Self>, page: u64, size: u64) -> BoxFuture<'static, Result<Page<T>, OrmError>> {
+        #[cfg(not(feature = "meilisearch"))]
+        let _ = (page, size);
         #[cfg(feature = "meilisearch")]
         {
             use crate::api::SearchRequest;
