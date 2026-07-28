@@ -1908,6 +1908,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "meilisearch-search"
+version = "0.1.0"
+dependencies = [
+ "kernway-core",
+ "kernway-orm-core",
+ "kernway-orm-macro",
+ "kernway-orm-meilisearch",
+ "kernway-server",
+ "rt-core",
+ "serde",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

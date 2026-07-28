@@ -53,6 +53,7 @@ members = [
     "examples/hello-config",
     "examples/hello-validate",
     "examples/hello-controller",
+    "examples/meilisearch-search",
 ]
 resolver = "2"
 
