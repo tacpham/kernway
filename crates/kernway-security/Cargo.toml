@@ -49,6 +49,10 @@ persist = ["dep:kernway-persist"]
 # JSON Web Tokens (RFC 7519), HS256 — a standards-compliant, stateless bearer
 # token alongside the stateful session token. Pulls in serde for the claims JSON.
 jwt = ["dep:serde", "dep:serde_json"]
+# BCrypt verify/generate ($2a/$2b/$2y), byte-compatible with jBCrypt / Spring
+# BCryptPasswordEncoder — for interop with an existing bcrypt user store. No new
+# deps (uses the getrandom already pulled in for CSRF).
+bcrypt = []
 # RS256 verification against a JWKS — accept tokens from an external issuer
 # (Auth0/Keycloak/Google) using their published public keys. Adds ring (RSA verify).
 jwks = ["jwt", "dep:ring"]
