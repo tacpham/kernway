@@ -1,0 +1,20 @@
+[package]
+name        = "kernway-orm-web"
+description = "Bridge: HTTP query params (JSON:API or a compact DSL) → validated ORM query → Page response"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kernway-orm-core = { workspace = true }
+kernway-core     = { workspace = true }   # QueryParams
+serde            = { workspace = true }
+
+[dev-dependencies]
+kernway-orm-memory = { workspace = true }
+kernway-orm-macro  = { workspace = true }
+rt-core            = { workspace = true }
+serde_json         = { workspace = true }
+
+[lints]
+workspace = true

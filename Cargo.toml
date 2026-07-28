@@ -19,6 +19,7 @@ members = [
     "crates/kernway-orm-postgres",
     "crates/kernway-orm-mysql",
     "crates/kernway-orm-meilisearch",
+    "crates/kernway-orm-web",
     "crates/kernway-cache-core",
     "crates/kernway-cache-macro",
     "crates/kernway-cache-memory",
@@ -135,6 +136,7 @@ kernway-orm-sqlite   = { path = "crates/kernway-orm-sqlite" }
 kernway-orm-postgres = { path = "crates/kernway-orm-postgres" }
 kernway-orm-mysql    = { path = "crates/kernway-orm-mysql" }
 kernway-orm-meilisearch = { path = "crates/kernway-orm-meilisearch" }
+kernway-orm-web      = { path = "crates/kernway-orm-web" }
 kernway-cache-core   = { path = "crates/kernway-cache-core" }
 kernway-cache-macro  = { path = "crates/kernway-cache-macro" }
 kernway-cache-memory = { path = "crates/kernway-cache-memory" }

@@ -1,7 +1,8 @@
 /// One page of results, plus the counts needed to render a pager.
 ///
-/// Equivalent to `Page<T>` in Spring Data.
-#[derive(Debug, Clone)]
+/// Equivalent to `Page<T>` in Spring Data. Serialises to a JSON envelope
+/// (`items` / `total` / `page` / `size` / `total_pages`) for a web response.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Page<T> {
     /// Rows on this page. Shorter than `size` on the final page.
     pub items: Vec<T>,
