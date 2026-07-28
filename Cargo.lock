@@ -1521,6 +1521,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernway-dns"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "kernway-udp",
+ "rt-core",
+ "rt-net",
+]
+
+[[package]]
 name = "kernway-htmx"
 version = "0.1.0"
 dependencies = [
@@ -1548,6 +1558,7 @@ dependencies = [
  "criterion",
  "httparse",
  "kernway-compress",
+ "kernway-dns",
  "rt-core",
  "rt-net",
  "rustls",
@@ -1742,6 +1753,7 @@ dependencies = [
 name = "kernway-udp"
 version = "0.1.0"
 dependencies = [
+ "mio 1.2.2",
  "rt-core",
 ]
 
