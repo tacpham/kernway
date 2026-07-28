@@ -12,8 +12,9 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
-    parse_macro_input, punctuated::Punctuated, Attribute, Expr, ExprLit, Fields, ItemStruct, Lit,
-    Meta, MetaNameValue, Token, Type,
+    parse_macro_input, punctuated::Punctuated, Attribute, Expr, ExprLit, FnArg, Fields,
+    GenericArgument, Ident, ItemStruct, ItemTrait, Lit, Meta, MetaNameValue, Pat, PathArguments,
+    ReturnType, Signature, Token, TraitItem, Type,
 };
 
 /// Maps a struct onto a database table — the JPA `@Entity` + `@Table` equivalent.
@@ -59,6 +60,7 @@ pub fn entity(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut id_fields = Vec::new();
     let mut id_types = Vec::new();
     let mut columns = Vec::new();
+    let mut relations = Vec::new();
 
     for field in fields.iter_mut() {
         let field_ident = match &field.ident {
@@ -93,6 +95,24 @@ pub fn entity(args: TokenStream, input: TokenStream) -> TokenStream {
             } else if attr.path().is_ident("column") {
                 match parse_column_attr(&attr, &mut column_name, &mut nullable, &mut unique) {
                     Ok(()) => {}
+                    Err(err) => return err.to_compile_error().into(),
+                }
+            } else if attr.path().is_ident("many_to_one") {
+                // The field is (and stays) the foreign-key column; record the
+                // association as metadata for relational drivers to act on.
+                match parse_relation_attr(&attr) {
+                    Ok((target, col)) => {
+                        let fk = col.unwrap_or_else(|| field_name.clone());
+                        relations.push(quote! {
+                            ::kernway_orm_core::RelationDef {
+                                field: #field_name,
+                                kind: ::kernway_orm_core::RelationKind::ManyToOne,
+                                target_table: #target,
+                                foreign_key: #fk,
+                                join_table: ::core::option::Option::None,
+                            }
+                        });
+                    }
                     Err(err) => return err.to_compile_error().into(),
                 }
             } else {
@@ -161,6 +181,12 @@ pub fn entity(args: TokenStream, input: TokenStream) -> TokenStream {
                 static COLS: ::std::sync::OnceLock<::std::vec::Vec<::kernway_orm_core::ColumnDef>> =
                     ::std::sync::OnceLock::new();
                 COLS.get_or_init(|| vec![#(#columns),*]).as_slice()
+            }
+
+            fn relations() -> &'static [::kernway_orm_core::RelationDef] {
+                static RELS: ::std::sync::OnceLock<::std::vec::Vec<::kernway_orm_core::RelationDef>> =
+                    ::std::sync::OnceLock::new();
+                RELS.get_or_init(|| vec![#(#relations),*]).as_slice()
             }
         }
     };
@@ -279,4 +305,211 @@ mod tests {
         assert_eq!(to_snake_case("MyStruct"), "my_struct");
         assert_eq!(to_snake_case("Todo"), "todo");
     }
+}
+
+/// Derives a repository from method names — the Spring Data "derived query"
+/// equivalent.
+///
+/// `#[repository(entity = User)]` on a trait of `async fn` methods generates a
+/// `<Trait>Impl` struct wrapping a `Box<dyn Repository<User>>` and implements each
+/// method by building a query from its name.
+///
+/// Grammar (snake_case): a prefix `find_by_` / `find_all_by_` (return `Vec<T>`, or
+/// `Option<T>` for a single result) / `count_by_` (`u64`) / `exists_by_` (`bool`),
+/// then conditions joined by `_and_`; each condition is `field` (equality) or
+/// `field_<op>` with `op` in `ne` `gt` `lt` `gte` `lte` `like`. Parameters bind to
+/// the conditions left to right.
+///
+/// ```ignore
+/// #[repository(entity = User)]
+/// #[allow(async_fn_in_trait)]
+/// trait UserRepo {
+///     async fn find_by_email(&self, email: &str) -> Result<Option<User>, OrmError>;
+///     async fn find_by_role_and_age_gt(&self, role: &str, age: i64) -> Result<Vec<User>, OrmError>;
+///     async fn count_by_role(&self, role: &str) -> Result<u64, OrmError>;
+///     async fn exists_by_email(&self, email: &str) -> Result<bool, OrmError>;
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn repository(args: TokenStream, input: TokenStream) -> TokenStream {
+    let metas = parse_macro_input!(args with Punctuated::<Meta, Token![,]>::parse_terminated);
+    let entity = match metas.iter().find_map(|m| match m {
+        Meta::NameValue(nv) if nv.path.is_ident("entity") => Some(nv.value.clone()),
+        _ => None,
+    }) {
+        Some(e) => e,
+        None => {
+            return syn::Error::new(proc_macro2::Span::call_site(), "#[repository] requires `entity = TypeName`")
+                .to_compile_error()
+                .into();
+        }
+    };
+
+    let item_trait = parse_macro_input!(input as ItemTrait);
+    let trait_name = item_trait.ident.clone();
+    let impl_name = Ident::new(&format!("{}Impl", trait_name), trait_name.span());
+
+    let mut methods = Vec::new();
+    for item in &item_trait.items {
+        if let TraitItem::Fn(m) = item {
+            match build_derived_method(&m.sig) {
+                Ok(ts) => methods.push(ts),
+                Err(err) => return err.to_compile_error().into(),
+            }
+        }
+    }
+
+    quote! {
+        #item_trait
+
+        /// Generated repository implementation (see the `#[repository]` trait).
+        pub struct #impl_name {
+            repository: ::std::boxed::Box<dyn ::kernway_orm_core::repository::Repository<#entity>>,
+        }
+
+        impl #impl_name {
+            /// Wrap a repository obtained from a driver.
+            pub fn new(
+                repository: ::std::boxed::Box<dyn ::kernway_orm_core::repository::Repository<#entity>>,
+            ) -> Self {
+                Self { repository }
+            }
+        }
+
+        impl #trait_name for #impl_name {
+            #(#methods)*
+        }
+    }
+    .into()
+}
+
+/// Build one generated method body from its signature (name-derived query).
+fn build_derived_method(sig: &Signature) -> syn::Result<proc_macro2::TokenStream> {
+    let name = sig.ident.to_string();
+
+    #[derive(Clone, Copy)]
+    enum Kind {
+        Find,
+        Count,
+        Exists,
+    }
+    let (kind, rest) = if let Some(r) = name.strip_prefix("find_all_by_") {
+        (Kind::Find, r)
+    } else if let Some(r) = name.strip_prefix("find_by_") {
+        (Kind::Find, r)
+    } else if let Some(r) = name.strip_prefix("count_by_") {
+        (Kind::Count, r)
+    } else if let Some(r) = name.strip_prefix("exists_by_") {
+        (Kind::Exists, r)
+    } else {
+        return Err(syn::Error::new(
+            sig.ident.span(),
+            "#[repository] method must start with find_by_ / find_all_by_ / count_by_ / exists_by_",
+        ));
+    };
+
+    // Conditions, AND-joined.
+    let conditions: Vec<(String, &'static str)> = rest.split("_and_").map(parse_condition).collect();
+
+    // Parameter idents (skip the receiver), left to right.
+    let params: Vec<&Ident> = sig
+        .inputs
+        .iter()
+        .filter_map(|arg| match arg {
+            FnArg::Typed(pt) => match &*pt.pat {
+                Pat::Ident(pi) => Some(&pi.ident),
+                _ => None,
+            },
+            FnArg::Receiver(_) => None,
+        })
+        .collect();
+
+    if params.len() != conditions.len() {
+        return Err(syn::Error::new(
+            sig.ident.span(),
+            format!(
+                "derived query has {} condition(s) but {} parameter(s)",
+                conditions.len(),
+                params.len()
+            ),
+        ));
+    }
+
+    let mut chain = quote! { self.repository.query() };
+    for ((field, op), param) in conditions.iter().zip(&params) {
+        let method = Ident::new(&format!("filter_{}", op), sig.ident.span());
+        chain = quote! { #chain.#method(#field, &#param.to_string()) };
+    }
+
+    let body = match kind {
+        Kind::Find if returns_option(&sig.output) => quote! { #chain.fetch_one().await },
+        Kind::Find => quote! { #chain.fetch_all().await },
+        Kind::Count => quote! { #chain.fetch_count().await },
+        Kind::Exists => quote! { ::core::result::Result::Ok(#chain.fetch_count().await? > 0) },
+    };
+
+    Ok(quote! { #sig { #body } })
+}
+
+/// Split a condition into `(field, operator)`; a trailing `_gt`/`_lt`/… is the
+/// operator and the rest is the (possibly multi-word) field.
+fn parse_condition(cond: &str) -> (String, &'static str) {
+    const OPS: [(&str, &str); 6] = [
+        ("_gte", "gte"),
+        ("_lte", "lte"),
+        ("_gt", "gt"),
+        ("_lt", "lt"),
+        ("_ne", "ne"),
+        ("_like", "like"),
+    ];
+    for (suffix, op) in OPS {
+        if let Some(field) = cond.strip_suffix(suffix) {
+            return (field.to_string(), op);
+        }
+    }
+    (cond.to_string(), "eq")
+}
+
+/// Whether a return type is `Result<Option<_>, _>` (→ `fetch_one`).
+fn returns_option(output: &ReturnType) -> bool {
+    let ReturnType::Type(_, ty) = output else {
+        return false;
+    };
+    let Type::Path(tp) = &**ty else { return false };
+    let Some(seg) = tp.path.segments.last() else {
+        return false;
+    };
+    if seg.ident != "Result" {
+        return false;
+    }
+    let PathArguments::AngleBracketed(ab) = &seg.arguments else {
+        return false;
+    };
+    matches!(
+        ab.args.first(),
+        Some(GenericArgument::Type(Type::Path(ok)))
+            if ok.path.segments.last().is_some_and(|s| s.ident == "Option")
+    )
+}
+
+/// Parse a relation attribute like `#[many_to_one(entity = "users", column = "user_id")]`,
+/// returning `(target_table, column)`.
+fn parse_relation_attr(attr: &Attribute) -> syn::Result<(String, Option<String>)> {
+    let mut entity = None;
+    let mut column = None;
+    attr.parse_nested_meta(|meta| {
+        if meta.path.is_ident("entity") {
+            entity = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+            return Ok(());
+        }
+        if meta.path.is_ident("column") {
+            column = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+            return Ok(());
+        }
+        Err(meta.error("unsupported relation option (expected `entity` or `column`)"))
+    })?;
+    let entity = entity.ok_or_else(|| {
+        syn::Error::new_spanned(attr, "relation requires `entity = \"table\"`")
+    })?;
+    Ok((entity, column))
 }
