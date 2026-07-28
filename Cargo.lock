@@ -1524,6 +1524,7 @@ dependencies = [
 name = "kernway-dns"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "getrandom 0.2.17",
  "kernway-udp",
  "rt-core",

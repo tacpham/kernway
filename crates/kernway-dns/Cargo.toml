@@ -13,5 +13,12 @@ rt-core     = { workspace = true }
 # tree via ring; 0.2 reuses that copy.
 getrandom   = "0.2"
 
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name    = "codec"
+harness = false
+
 [lints]
 workspace = true
