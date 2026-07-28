@@ -360,7 +360,7 @@ where
             .iter()
             .map(|c| json_to_sql(obj.get(c.field).cloned().unwrap_or(serde_json::Value::Null), c))
             .collect::<Result<_, _>>()?;
-        vals.push(id_to_sql(entity.id())?);
+        vals.push(id_to_sql(&entity.id())?);
 
         self.conn
             .lock()
@@ -454,7 +454,7 @@ where
             return self.do_insert(&entity);
         }
 
-        if is_auto_pk::<T>() || self.exists_by_id_sync(entity.id())? {
+        if is_auto_pk::<T>() || self.exists_by_id_sync(&entity.id())? {
             self.do_update(&entity)
         } else {
             self.do_insert(&entity)

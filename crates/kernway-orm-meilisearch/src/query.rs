@@ -320,7 +320,7 @@ mod tests {
     impl Entity for Product {
         type Id = u64;
         fn table_name() -> &'static str { "products" }
-        fn id(&self) -> &u64 { &self.id }
+        fn id(&self) -> u64 { self.id }
         fn columns() -> &'static [ColumnDef] { &[] }
     }
 

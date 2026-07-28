@@ -86,6 +86,19 @@ struct Article {
     published: bool,
 }
 
+/// Entity with a **composite key** `(warehouse, sku)` — two `#[id]` fields, so
+/// `Id = (String, String)`. Meilisearch has no native compound key, so the driver
+/// synthesizes a single `_pk` string from the parts.
+#[entity(table = "stock_test")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Stock {
+    #[id()]
+    warehouse: String,
+    #[id()]
+    sku: String,
+    quantity: u32,
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 /// 1. ping — server must be up
@@ -564,6 +577,36 @@ fn test_combined_filters() {
             assert!(p.price < 50.0);
         }
         cleanup("products_test").await;
+        Ok(())
+    });
+}
+
+/// 21. Composite primary key — (warehouse, sku) synthesized into one Meili _pk.
+#[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
+fn test_composite_primary_key() {
+    run!(async {
+        cleanup("stock_test").await;
+        let repo: Box<dyn Repository<Stock>> = driver().repository();
+
+        // Same sku in two warehouses → two distinct composite keys, two docs.
+        repo.save(Stock { warehouse: "WH1".into(), sku: "SKU42".into(), quantity: 100 }).await?;
+        repo.save(Stock { warehouse: "WH2".into(), sku: "SKU42".into(), quantity: 5 }).await?;
+        assert_eq!(repo.count().await?, 2, "same sku, different warehouse → 2 rows");
+
+        // find_by_id takes the tuple key.
+        let a = repo.find_by_id(&("WH1".to_string(), "SKU42".to_string())).await?.expect("WH1");
+        assert_eq!(a.quantity, 100);
+        let b = repo.find_by_id(&("WH2".to_string(), "SKU42".to_string())).await?.expect("WH2");
+        assert_eq!(b.quantity, 5);
+
+        // A miss and a delete on one composite key must not touch the other.
+        assert!(repo.find_by_id(&("WH3".to_string(), "SKU42".to_string())).await?.is_none());
+        repo.delete_by_id(&("WH1".to_string(), "SKU42".to_string())).await?;
+        assert!(!repo.exists_by_id(&("WH1".to_string(), "SKU42".to_string())).await?);
+        assert!(repo.exists_by_id(&("WH2".to_string(), "SKU42".to_string())).await?);
+
+        cleanup("stock_test").await;
         Ok(())
     });
 }
