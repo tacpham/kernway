@@ -1618,6 +1618,7 @@ dependencies = [
 name = "kernway-orm-meilisearch"
 version = "0.1.0"
 dependencies = [
+ "kernway-config",
  "kernway-http-client",
  "kernway-orm-core",
  "kernway-orm-macro",

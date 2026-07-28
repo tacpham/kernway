@@ -44,6 +44,23 @@ pub trait FromConfig: Sized {
     fn from_config(config: &Config) -> Self;
 }
 
+/// `#[configuration(prefix = "…")]` — Spring's `@ConfigurationProperties`: derive
+/// [`FromConfig`] for a struct, binding each field from `{prefix}.{field}` (a
+/// field's `_` becomes `-`). Re-exported from di-macro under the `derive` feature
+/// so apps write `use kernway_config::configuration;` without depending on di-macro.
+///
+/// ```rust,ignore
+/// use kernway_config::{configuration, FromConfig};
+///
+/// #[configuration(prefix = "server")]
+/// #[derive(Default)]
+/// struct ServerConfig { port: u16, host: String }
+///
+/// let server = ServerConfig::from_config(&config); // server.port, server.host
+/// ```
+#[cfg(feature = "derive")]
+pub use di_macro::configuration;
+
 /// Resolved configuration: a flat map of dotted keys to string values. Values stay
 /// strings until [`get`](Config::get) parses them.
 #[derive(Debug, Clone, Default)]
