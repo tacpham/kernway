@@ -90,6 +90,7 @@ struct Article {
 
 /// 1. ping — server must be up
 #[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
 fn test_ping() {
     run!(async {
         driver().ping().await
@@ -98,6 +99,7 @@ fn test_ping() {
 
 /// 2. save + find_by_id round-trip
 #[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
 fn test_save_and_find_by_id() {
     run!(async {
         cleanup("products_test").await;
@@ -122,6 +124,7 @@ fn test_save_and_find_by_id() {
 
 /// 3. find_by_id returns None for a missing document
 #[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
 fn test_find_by_id_missing() {
     run!(async {
         cleanup("products_test").await;
@@ -135,6 +138,7 @@ fn test_find_by_id_missing() {
 
 /// 4. save_all + find_all (batch insert)
 #[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
 fn test_save_all_and_find_all() {
     run!(async {
         cleanup("products_test").await;
@@ -155,6 +159,7 @@ fn test_save_all_and_find_all() {
 
 /// 5. count
 #[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
 fn test_count() {
     run!(async {
         cleanup("products_test").await;
@@ -170,6 +175,7 @@ fn test_count() {
 
 /// 6. exists_by_id
 #[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
 fn test_exists_by_id() {
     run!(async {
         cleanup("products_test").await;
@@ -184,6 +190,7 @@ fn test_exists_by_id() {
 
 /// 7. delete_by_id
 #[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
 fn test_delete_by_id() {
     run!(async {
         cleanup("products_test").await;
@@ -199,6 +206,7 @@ fn test_delete_by_id() {
 
 /// 8. find_all_by_ids
 #[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
 fn test_find_all_by_ids() {
     run!(async {
         cleanup("products_test").await;
@@ -219,6 +227,7 @@ fn test_find_all_by_ids() {
 
 /// 9. delete_all_by_ids
 #[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
 fn test_delete_all_by_ids() {
     run!(async {
         cleanup("products_test").await;
@@ -240,6 +249,7 @@ fn test_delete_all_by_ids() {
 
 /// 10. Configure filterable attributes, then filter with filter_eq
 #[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
 fn test_filterable_attributes_and_filter_eq() {
     run!(async {
         cleanup("products_test").await;
@@ -272,6 +282,7 @@ fn test_filterable_attributes_and_filter_eq() {
 
 /// 11. filter_gt / filter_lt on a numeric field
 #[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
 fn test_filter_gt_lt() {
     run!(async {
         cleanup("products_test").await;
@@ -299,6 +310,7 @@ fn test_filter_gt_lt() {
 
 /// 12. filter_between
 #[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
 fn test_filter_between() {
     run!(async {
         cleanup("products_test").await;
@@ -328,6 +340,7 @@ fn test_filter_between() {
 
 /// 13. filter_in
 #[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
 fn test_filter_in() {
     run!(async {
         cleanup("products_test").await;
@@ -356,6 +369,7 @@ fn test_filter_in() {
 
 /// 14. full-text search via filter_like (maps to Meilisearch `q` param)
 #[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
 fn test_filter_like_fulltext() {
     run!(async {
         cleanup("products_test").await;
@@ -379,6 +393,7 @@ fn test_filter_like_fulltext() {
 
 /// 15. Sortable attributes + order_by
 #[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
 fn test_sortable_attributes_and_order_by() {
     run!(async {
         cleanup("products_test").await;
@@ -408,6 +423,7 @@ fn test_sortable_attributes_and_order_by() {
 
 /// 16. limit + offset (pagination)
 #[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
 fn test_limit_and_offset() {
     run!(async {
         cleanup("products_test").await;
@@ -435,6 +451,7 @@ fn test_limit_and_offset() {
 
 /// 17. Update maxTotalHits (pagination settings)
 #[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
 fn test_set_pagination_max_total_hits() {
     run!(async {
         cleanup("products_test").await;
@@ -460,6 +477,7 @@ fn test_set_pagination_max_total_hits() {
 
 /// 18. Custom string UUID primary key
 #[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
 fn test_custom_string_id() {
     run!(async {
         cleanup("articles_test").await;
@@ -489,6 +507,7 @@ fn test_custom_string_id() {
 
 /// 19. filter_is_null / filter_is_not_null (filterable field must exist)
 #[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
 fn test_filter_gte_lte() {
     run!(async {
         cleanup("products_test").await;
@@ -517,6 +536,7 @@ fn test_filter_gte_lte() {
 
 /// 20. Combined filter: category + price range
 #[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
 fn test_combined_filters() {
     run!(async {
         cleanup("products_test").await;

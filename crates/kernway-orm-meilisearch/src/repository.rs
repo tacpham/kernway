@@ -40,13 +40,9 @@ where
     fn find_all<'a>(&'a self) -> BoxFuture<'a, Result<Vec<T>, OrmError>> {
         Box::pin(async { Err(OrmError::Unsupported("enable the `meilisearch` feature".into())) })
     }
-    fn find_all_by_ids<'a>(&'a self, _ids: &'a [T::Id]) -> BoxFuture<'a, Result<Vec<T>, OrmError>> {
-        Box::pin(async { Err(OrmError::Unsupported("enable the `meilisearch` feature".into())) })
-    }
+    // find_all_by_ids and exists_by_id use the trait defaults (built on
+    // find_by_id, which returns Unsupported here).
     fn count<'a>(&'a self) -> BoxFuture<'a, Result<u64, OrmError>> {
-        Box::pin(async { Err(OrmError::Unsupported("enable the `meilisearch` feature".into())) })
-    }
-    fn exists_by_id<'a>(&'a self, _id: &'a T::Id) -> BoxFuture<'a, Result<bool, OrmError>> {
         Box::pin(async { Err(OrmError::Unsupported("enable the `meilisearch` feature".into())) })
     }
     fn save<'a>(&'a self, _entity: T) -> BoxFuture<'a, Result<T, OrmError>> {
@@ -135,29 +131,9 @@ where
         })
     }
 
-    fn find_all_by_ids<'a>(&'a self, ids: &'a [T::Id]) -> BoxFuture<'a, Result<Vec<T>, OrmError>> {
-        let id_strings: Result<Vec<String>, OrmError> = ids.iter().map(id_to_string).collect();
-        let id_strings = match id_strings {
-            Ok(v) => v,
-            Err(e) => return Box::pin(async move { Err(e) }),
-        };
-        Box::pin(async move {
-            // Fetch each document by id via GET rather than a `search` filter on
-            // the primary key: the latter would require the PK to be configured
-            // `filterable`, which Meilisearch does not do by default.
-            let index = T::table_name();
-            let mut found = Vec::with_capacity(id_strings.len());
-            for id in &id_strings {
-                let url = format!("{}/indexes/{}/documents/{}", self.config.url, index, id);
-                if let Some(doc) =
-                    crate::api::get_optional::<T>(&url, &self.config.api_key).await?
-                {
-                    found.push(doc);
-                }
-            }
-            Ok(found)
-        })
-    }
+    // find_all_by_ids uses the trait default: one find_by_id (GET /documents/{id})
+    // per id. Meilisearch has no batch get-by-id, and searching by a PK `IN`
+    // filter would need the PK to be `filterable`, so the default is the best path.
 
     fn count<'a>(&'a self) -> BoxFuture<'a, Result<u64, OrmError>> {
         Box::pin(async move {
@@ -176,17 +152,8 @@ where
         })
     }
 
-    fn exists_by_id<'a>(&'a self, id: &'a T::Id) -> BoxFuture<'a, Result<bool, OrmError>> {
-        let id_str = match id_to_string(id) {
-            Ok(s) => s,
-            Err(e) => return Box::pin(async move { Err(e) }),
-        };
-        Box::pin(async move {
-            let url = format!("{}/indexes/{}/documents/{}", self.config.url, T::table_name(), id_str);
-            let found: Option<serde_json::Value> = crate::api::get_optional(&url, &self.config.api_key).await?;
-            Ok(found.is_some())
-        })
-    }
+    // exists_by_id uses the trait default: find_by_id(id).is_some(), which is
+    // exactly the GET /documents/{id} probe we would write by hand.
 
     fn save<'a>(&'a self, entity: T) -> BoxFuture<'a, Result<T, OrmError>> {
         Box::pin(async move {
