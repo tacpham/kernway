@@ -31,6 +31,9 @@ const TAG_UNBAN_SUBNET: u8 = 4;
 const TAG_BAN_UA_CONTAINS: u8 = 5;
 const TAG_UNBAN_UA_CONTAINS: u8 = 6;
 const TAG_BAN_UA_EXACT: u8 = 7;
+const TAG_UNBAN_UA_EXACT: u8 = 8;
+const TAG_BAN_USER: u8 = 9;
+const TAG_UNBAN_USER: u8 = 10;
 
 /// Snapshot once this many mutations have been logged, to bound the log and recovery
 /// time. Bans churn slowly, so this is rarely reached in practice.
@@ -113,6 +116,31 @@ impl FileBackedBans {
             .await
     }
 
+    /// Ban an exact User-Agent in memory and on disk.
+    pub async fn ban_user_agent_exact(&self, agent: &str) -> Result<(), PersistError> {
+        self.bans.ban_user_agent_exact(agent);
+        self.log(TAG_BAN_UA_EXACT, agent).await
+    }
+
+    /// Unban an exact User-Agent in memory and on disk.
+    pub async fn unban_user_agent_exact(&self, agent: &str) -> Result<(), PersistError> {
+        self.bans.unban_user_agent_exact(agent);
+        self.log(TAG_UNBAN_UA_EXACT, agent).await
+    }
+
+    /// Ban a principal (e.g. an email) in memory and on disk — blocks that identity
+    /// even while its session token is still valid.
+    pub async fn ban_user(&self, user: &str) -> Result<(), PersistError> {
+        self.bans.ban_user(user);
+        self.log(TAG_BAN_USER, user).await
+    }
+
+    /// Unban a principal in memory and on disk.
+    pub async fn unban_user(&self, user: &str) -> Result<(), PersistError> {
+        self.bans.unban_user(user);
+        self.log(TAG_UNBAN_USER, user).await
+    }
+
     /// Append a mutation, then checkpoint if enough have accrued.
     async fn log(&self, tag: u8, payload: &str) -> Result<(), PersistError> {
         self.persist.append(record(tag, payload)).await?;
@@ -171,6 +199,9 @@ fn apply(bans: &Bans, rec: &[u8]) {
         TAG_BAN_UA_CONTAINS => bans.ban_user_agent_containing(value),
         TAG_UNBAN_UA_CONTAINS => bans.unban_user_agent_containing(value),
         TAG_BAN_UA_EXACT => bans.ban_user_agent_exact(value),
+        TAG_UNBAN_UA_EXACT => bans.unban_user_agent_exact(value),
+        TAG_BAN_USER => bans.ban_user(value),
+        TAG_UNBAN_USER => bans.unban_user(value),
         _ => {} // an unknown tag from a newer version — skip, don't corrupt state
     }
 }
@@ -188,6 +219,7 @@ fn view_record(view: &BanRuleView) -> Vec<u8> {
         BanRuleView::Subnet(cidr) => record(TAG_BAN_SUBNET, cidr),
         BanRuleView::UserAgentExact(ua) => record(TAG_BAN_UA_EXACT, ua),
         BanRuleView::UserAgentContains(phrase) => record(TAG_BAN_UA_CONTAINS, phrase),
+        BanRuleView::User(user) => record(TAG_BAN_USER, user),
     }
 }
 
@@ -264,6 +296,30 @@ mod tests {
             !bans.is_banned(Some(ip("8.8.8.8")), Some("Mozilla/5.0")),
             "a clean request is fine"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_user_ban_survives_a_restart() {
+        let dir = temp_dir("userban");
+        {
+            let store = FileBackedBans::open(&dir, Fsync::EveryWrite).unwrap();
+            block_on(store.ban_user("abuser@x.com")).unwrap();
+            block_on(store.ban_user_agent_exact("BadBot/1.0")).unwrap();
+            assert!(store.bans().is_user_banned("abuser@x.com"));
+        } // "restart"
+
+        let store = FileBackedBans::open(&dir, Fsync::EveryWrite).unwrap();
+        assert!(store.bans().is_user_banned("abuser@x.com"), "user ban recovered");
+        assert!(
+            store.bans().is_banned(None, Some("BadBot/1.0")),
+            "exact-UA ban recovered"
+        );
+        // Unban the user, restart again — the unban must stick.
+        block_on(store.unban_user("abuser@x.com")).unwrap();
+        drop(store);
+        let store = FileBackedBans::open(&dir, Fsync::EveryWrite).unwrap();
+        assert!(!store.bans().is_user_banned("abuser@x.com"), "unban recovered");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

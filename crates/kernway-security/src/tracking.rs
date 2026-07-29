@@ -110,6 +110,7 @@ enum BanRule {
     Subnet(Cidr),
     UserAgentExact(String),
     UserAgentContains(String), // stored lowercased; matched case-insensitively
+    User(String),              // a banned principal (e.g. an email), matched exactly
 }
 
 /// A blocklist matched against a request's resolved IP and User-Agent. Ban an
@@ -225,6 +226,40 @@ impl BanList {
             .retain(|r| *r != BanRule::UserAgentContains(phrase.to_ascii_lowercase()));
     }
 
+    /// Remove an exact-User-Agent ban (unban).
+    pub fn remove_user_agent_exact(&mut self, agent: &str) {
+        self.rules.retain(|r| *r != BanRule::UserAgentExact(agent.to_string()));
+    }
+
+    /// Ban a principal (a logged-in identity, e.g. an email). Builder form.
+    #[must_use]
+    pub fn user(mut self, user: &str) -> Self {
+        self.add_user(user);
+        self
+    }
+
+    /// Add a principal ban — blocks that identity even on a valid session, which a
+    /// token cannot be un-issued to do. Matched exactly by [`is_user_banned`](Self::is_user_banned).
+    pub fn add_user(&mut self, user: &str) {
+        let rule = BanRule::User(user.to_string());
+        if !self.rules.contains(&rule) {
+            self.rules.push(rule);
+        }
+    }
+
+    /// Remove a principal ban (unban the user).
+    pub fn remove_user(&mut self, user: &str) {
+        self.rules.retain(|r| *r != BanRule::User(user.to_string()));
+    }
+
+    /// Whether `user` (a resolved principal) is banned. Checked *in addition to*
+    /// [`is_banned`](Self::is_banned) on each request, so a banned account is blocked
+    /// immediately even while its JWT is still valid.
+    #[must_use]
+    pub fn is_user_banned(&self, user: &str) -> bool {
+        self.rules.iter().any(|r| matches!(r, BanRule::User(u) if u == user))
+    }
+
     /// Drop every rule.
     pub fn clear(&mut self) {
         self.rules.clear();
@@ -240,6 +275,8 @@ impl BanList {
             BanRule::UserAgentContains(phrase) => {
                 user_agent.is_some_and(|ua| ua.to_ascii_lowercase().contains(phrase.as_str()))
             }
+            // A principal ban is not an ip/ua match — checked via `is_user_banned`.
+            BanRule::User(_) => false,
         })
     }
 
@@ -262,6 +299,7 @@ impl BanList {
                 }
                 BanRule::UserAgentExact(ua) => BanRuleView::UserAgentExact(ua.clone()),
                 BanRule::UserAgentContains(p) => BanRuleView::UserAgentContains(p.clone()),
+                BanRule::User(u) => BanRuleView::User(u.clone()),
             })
             .collect()
     }
@@ -280,6 +318,8 @@ pub enum BanRuleView {
     UserAgentExact(String),
     /// A banned User-Agent phrase (already lowercased).
     UserAgentContains(String),
+    /// A banned principal (e.g. an email).
+    User(String),
 }
 
 /// A **shared, runtime-mutable** ban list — the handle an admin uses to ban and
@@ -338,6 +378,22 @@ impl Bans {
         self.0.write().unwrap().remove_user_agent_containing(phrase);
     }
 
+    /// Unban an exact-User-Agent rule at runtime.
+    pub fn unban_user_agent_exact(&self, agent: &str) {
+        self.0.write().unwrap().remove_user_agent_exact(agent);
+    }
+
+    /// Ban a principal (e.g. an email) at runtime — blocks that identity even on a
+    /// still-valid session.
+    pub fn ban_user(&self, user: &str) {
+        self.0.write().unwrap().add_user(user);
+    }
+
+    /// Unban a principal at runtime.
+    pub fn unban_user(&self, user: &str) {
+        self.0.write().unwrap().remove_user(user);
+    }
+
     /// Drop every ban.
     pub fn clear(&self) {
         self.0.write().unwrap().clear();
@@ -347,6 +403,13 @@ impl Bans {
     #[must_use]
     pub fn is_banned(&self, ip: Option<IpAddr>, user_agent: Option<&str>) -> bool {
         self.0.read().unwrap().is_banned(ip, user_agent)
+    }
+
+    /// Whether the principal `user` is currently banned (checked per request in
+    /// addition to [`is_banned`](Self::is_banned), so a ban applies to a live session).
+    #[must_use]
+    pub fn is_user_banned(&self, user: &str) -> bool {
+        self.0.read().unwrap().is_user_banned(user)
     }
 
     /// A snapshot of every current rule (for a durable backend's checkpoint).
@@ -523,5 +586,23 @@ mod tests {
         assert!(!bans.is_banned(Some(ip("2001:db9::1")), None));
         // A v4 address never matches a v6 rule.
         assert!(!bans.is_banned(Some(ip("1.2.3.4")), None));
+    }
+
+    #[test]
+    fn bans_a_principal_by_exact_match() {
+        let bans = BanList::new().user("abuser@x.com");
+        assert!(bans.is_user_banned("abuser@x.com"));
+        assert!(!bans.is_user_banned("someone@x.com"));
+        // A user ban is a separate dimension: it does not match on ip/ua, and ip/ua
+        // rules do not make a user "banned".
+        assert!(!bans.is_banned(Some(ip("1.2.3.4")), Some("abuser@x.com")));
+        assert!(!BanList::new().ip(ip("1.2.3.4")).is_user_banned("abuser@x.com"));
+    }
+
+    #[test]
+    fn unbanning_a_principal_lifts_it() {
+        let mut bans = BanList::new().user("abuser@x.com");
+        bans.remove_user("abuser@x.com");
+        assert!(!bans.is_user_banned("abuser@x.com"));
     }
 }
