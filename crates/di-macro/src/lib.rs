@@ -916,8 +916,8 @@ fn builtin_check(
 /// ```
 #[proc_macro_attribute]
 pub fn configuration(args: TokenStream, input: TokenStream) -> TokenStream {
-    let input_struct = parse_macro_input!(input as ItemStruct);
-    let name = &input_struct.ident;
+    let mut input_struct = parse_macro_input!(input as ItemStruct);
+    let name = input_struct.ident.clone();
 
     // `prefix = "server"` → "server"; no arg → "" (top-level keys).
     let prefix = args
@@ -927,7 +927,7 @@ pub fn configuration(args: TokenStream, input: TokenStream) -> TokenStream {
         .unwrap_or_default();
 
     let fields = match &input_struct.fields {
-        Fields::Named(named) => &named.named,
+        Fields::Named(named) => named.named.clone(),
         _ => {
             return syn::Error::new_spanned(
                 &input_struct,
@@ -947,13 +947,28 @@ pub fn configuration(args: TokenStream, input: TokenStream) -> TokenStream {
         } else {
             format!("{prefix}.{suffix}")
         };
-        match extract_generic_inner(ty, "Option") {
-            // Option<T> → present-or-absent, no default needed.
-            Some(inner) => quote! { #fname: config.get::<#inner>(#key) },
-            // Anything else → parse or fall back to Default.
-            None => quote! { #fname: config.get::<#ty>(#key).unwrap_or_default() },
+        // `#[config(default = EXPR)]` — the field's default (Spring's `${key:default}`).
+        // EXPR must be `Into` the field type, so `application.yml` overrides a value
+        // declared once, next to the field, and `main` holds no fallbacks.
+        if let Some(def) = config_default(field) {
+            quote! { #fname: config.get::<#ty>(#key).unwrap_or_else(|| ::core::convert::Into::into(#def)) }
+        } else {
+            match extract_generic_inner(ty, "Option") {
+                // Option<T> → present-or-absent, no default needed.
+                Some(inner) => quote! { #fname: config.get::<#inner>(#key) },
+                // Anything else → parse or fall back to `Default`.
+                None => quote! { #fname: config.get::<#ty>(#key).unwrap_or_default() },
+            }
         }
     });
+
+    // Strip the helper `#[config(...)]` attributes before re-emitting the struct
+    // (they are not real attributes and would not compile).
+    if let Fields::Named(named) = &mut input_struct.fields {
+        for f in &mut named.named {
+            f.attrs.retain(|a| !a.path().is_ident("config"));
+        }
+    }
 
     let expanded = quote! {
         #input_struct
@@ -967,4 +982,23 @@ pub fn configuration(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
     TokenStream::from(expanded)
+}
+
+/// Read a field's `#[config(default = EXPR)]`, if present.
+fn config_default(field: &syn::Field) -> Option<Expr> {
+    for attr in &field.attrs {
+        if attr.path().is_ident("config") {
+            let mut found = None;
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("default") {
+                    found = Some(meta.value()?.parse::<Expr>()?);
+                }
+                Ok(())
+            });
+            if found.is_some() {
+                return found;
+            }
+        }
+    }
+    None
 }

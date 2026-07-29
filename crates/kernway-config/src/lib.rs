@@ -476,6 +476,33 @@ mod tests {
         );
     }
 
+    #[configuration(prefix = "svc")]
+    #[derive(Debug, PartialEq)]
+    struct WithDefaults {
+        #[config(default = 8080u16)]
+        port: u16,
+        #[config(default = "http://localhost:9000")]
+        base_url: String,
+    }
+
+    #[test]
+    fn config_default_declares_the_fallback_on_the_field() {
+        // Absent → the field's declared default (no `.unwrap_or` at the call site).
+        let empty = Config::builder().build();
+        assert_eq!(
+            WithDefaults::from_config(&empty),
+            WithDefaults { port: 8080, base_url: "http://localhost:9000".into() }
+        );
+        // Present in config → overrides the default (Spring's `${key:default}`).
+        let set = Config::builder()
+            .parse("svc.port = 9000\nsvc.base-url = http://prod")
+            .build();
+        assert_eq!(
+            WithDefaults::from_config(&set),
+            WithDefaults { port: 9000, base_url: "http://prod".into() }
+        );
+    }
+
     #[cfg(feature = "yaml")]
     #[test]
     fn yaml_flattens_into_the_same_dotted_keys() {
