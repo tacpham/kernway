@@ -64,7 +64,9 @@ pub mod presence;
 #[cfg(all(feature = "presence", feature = "redis"))]
 pub use presence::RedisPresence;
 #[cfg(feature = "presence")]
-pub use presence::{InMemoryPresence, Presence};
+pub use presence::{
+    DeviceSession, InMemoryPresence, InMemoryUserPresence, OnlineUser, Presence, UserPresence,
+};
 
 /// Activity — who is here right now and on what page, recorded per request (the live
 /// "who's on the site" view). Same feature as presence.
