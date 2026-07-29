@@ -13,9 +13,9 @@
 //! let tokens = client.post_form("https://oauth2.example/token", &[("code", code)]).await?;
 //! ```
 //!
-//! This first cut speaks plain HTTP/1.1 (parsing, `Content-Length`, chunked, read-to-
-//! close). `https://` requires TLS, which lands in a follow-up on `rustls`; until then
-//! an `https` URL returns [`HttpError::Tls`].
+//! Speaks HTTP/1.1 (parsing, `Content-Length`, chunked, read-to-close) over plain TCP
+//! or **TLS**: an `https://` URL is dialled through `rustls` (server certificate
+//! verified against the webpki roots — see [`tls`]), transparently to the HTTP layer.
 
 #![forbid(unsafe_code)]
 
