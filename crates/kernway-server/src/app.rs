@@ -760,7 +760,7 @@ async fn serve_connection(
         // A static-file hit is served from the blocking pool so the read never
         // stalls this shard; a miss (no root configured, an unsupported method, a
         // route claims the path, or no such file) falls through to the router.
-        let response = match try_static(static_files.as_deref(), &router, &request).await {
+        let mut response = match try_static(static_files.as_deref(), &router, &request).await {
             Some(file_response) => file_response,
             None => handle(request, &router, &context, &middlewares).await,
         };
@@ -769,7 +769,7 @@ async fn serve_connection(
         } else {
             Connection::Close
         };
-        if write_response(&mut stream, &response, connection, is_head, file_chunk)
+        if write_response(&mut stream, &mut response, connection, is_head, file_chunk)
             .await
             .is_err()
         {
@@ -919,7 +919,7 @@ const FILE_CHUNK: usize = 256 * 1024;
 /// bounded chunks, each read on the blocking pool so it never stalls the shard.
 async fn write_response(
     stream: &mut AsyncTcpStream,
-    response: &Response,
+    response: &mut Response,
     connection: Connection,
     is_head: bool,
     file_chunk: usize,
@@ -935,14 +935,25 @@ async fn write_response(
         Body::File { path, len, range } => {
             let head = encode_head(response, connection, response.body.len());
             stream.write_all(&head).await?;
-            stream_file(stream, path.clone(), *range, *len, file_chunk).await
+            return stream_file(stream, path.clone(), *range, *len, file_chunk).await;
         }
         Body::Empty | Body::Bytes(_) => {
-            stream
+            return stream
                 .write_all(&encode_response_with(response, connection))
-                .await
+                .await;
+        }
+        Body::Stream { .. } => {} // handled below with a fresh &mut borrow of the source
+    }
+    // A streamed body: write the head (framed by the known length), then pull
+    // chunks off the source and write them — nothing held whole in memory.
+    let head = encode_head(response, connection, response.body.len());
+    stream.write_all(&head).await?;
+    if let Body::Stream { source, .. } = &mut response.body {
+        while let Some(chunk) = source.next().await? {
+            stream.write_all(&chunk).await?;
         }
     }
+    Ok(())
 }
 
 /// Stream a file (or a byte range of it) to the socket, chunk by chunk. Each

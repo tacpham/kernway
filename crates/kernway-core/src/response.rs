@@ -2,7 +2,17 @@
 
 use crate::error::StatusCode;
 use crate::fields::Headers;
+use crate::layer::BoxFuture;
 use std::path::PathBuf;
+
+/// An async source of body byte-chunks — a response whose bytes are not all in
+/// memory or on disk (a proxied upstream, a live feed). [`next`](BodyStream::next)
+/// yields the next chunk, `Ok(None)` at the end; an `Err` ends the stream. The
+/// connection task pulls chunks and writes them, so memory stays O(chunk).
+pub trait BodyStream: Send {
+    /// The next body chunk, or `None` when the stream is exhausted.
+    fn next(&mut self) -> BoxFuture<'_, std::io::Result<Option<Vec<u8>>>>;
+}
 
 /// A response body: bytes in memory, or a file the connection task streams.
 ///
@@ -12,7 +22,6 @@ use std::path::PathBuf;
 /// reads it in bounded chunks off the blocking pool.
 ///
 /// [KEP-0002]: https://github.com/tacpham/kernway/blob/main/docs/kep/0002-response-body.md
-#[derive(Debug)]
 pub enum Body {
     /// No body — a `HEAD` response, a `204`, a `304`.
     Empty,
@@ -28,6 +37,32 @@ pub enum Body {
         /// The byte interval to send, for a partial response; `None` sends all.
         range: Option<(u64, u64)>,
     },
+    /// A streamed body pulled from an async source (a proxied upstream). `len` is
+    /// the total `Content-Length` (known from the upstream), so it streams framed
+    /// with keep-alive — the connection task pulls chunks off `source` and writes
+    /// them, never holding the whole body.
+    Stream {
+        /// Total body length, for `Content-Length`.
+        len: u64,
+        /// The async chunk source.
+        source: Box<dyn BodyStream>,
+    },
+}
+
+impl std::fmt::Debug for Body {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Body::Empty => f.write_str("Empty"),
+            Body::Bytes(b) => write!(f, "Bytes({} bytes)", b.len()),
+            Body::File { path, len, range } => f
+                .debug_struct("File")
+                .field("path", path)
+                .field("len", len)
+                .field("range", range)
+                .finish(),
+            Body::Stream { len, .. } => write!(f, "Stream({len} bytes)"),
+        }
+    }
 }
 
 impl Body {
@@ -40,6 +75,7 @@ impl Body {
             Body::Empty => 0,
             Body::Bytes(b) => b.len() as u64,
             Body::File { len, range, .. } => range.map_or(*len, |(s, e)| e - s),
+            Body::Stream { len, .. } => *len,
         }
     }
 
@@ -99,8 +135,15 @@ impl Response {
     pub fn body_bytes(&self) -> &[u8] {
         match &self.body {
             Body::Bytes(b) => b,
-            Body::Empty | Body::File { .. } => &[],
+            Body::Empty | Body::File { .. } | Body::Stream { .. } => &[],
         }
+    }
+
+    /// Set the body to a streamed source of `len` total bytes (a proxied upstream).
+    /// The connection task pulls chunks and writes them; nothing is buffered whole.
+    pub fn stream(mut self, len: u64, source: Box<dyn BodyStream>) -> Self {
+        self.body = Body::Stream { len, source };
+        self
     }
 
     /// Set Content-Type header.
