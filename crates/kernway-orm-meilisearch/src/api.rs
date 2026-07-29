@@ -102,6 +102,31 @@ pub async fn post<Req: Serialize, Res: DeserializeOwned>(
     serde_json::from_slice(&resp.body).map_err(|e| OrmError::TypeConversion(e.to_string()))
 }
 
+/// `PUT {url}` — the request body is sent as JSON. Meilisearch's document endpoint
+/// treats a `PUT` as **add-or-update** (a partial merge: fields in the payload are
+/// updated, fields absent from it are left untouched), unlike `POST` which replaces the
+/// whole document. Use this to patch a few fields without clobbering the rest.
+pub async fn put<Req: Serialize, Res: DeserializeOwned>(
+    url: &str,
+    api_key: &str,
+    body: &Req,
+) -> Result<Res, OrmError> {
+    let json = serde_json::to_vec(body).map_err(|e| OrmError::TypeConversion(e.to_string()))?;
+    let resp = client()
+        .send(
+            Request::new(Method::Put, Url::parse(url).map_err(map_http)?)
+                .header("Authorization", bearer(api_key))
+                .body("application/json", json),
+        )
+        .await
+        .map_err(map_http)?;
+
+    if !resp.is_success() {
+        return Err(map_status(resp.status, &resp.body));
+    }
+    serde_json::from_slice(&resp.body).map_err(|e| OrmError::TypeConversion(e.to_string()))
+}
+
 /// `DELETE {url}` — maps 404 to `OrmError::NotFound`.
 pub async fn delete(url: &str, api_key: &str) -> Result<(), OrmError> {
     let resp = client()
