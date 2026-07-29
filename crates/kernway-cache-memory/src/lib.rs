@@ -37,6 +37,9 @@ use std::{
 /// ```
 pub struct InMemoryCache<K, V> {
     store: Mutex<HashMap<K, CacheEntry<V>>>,
+    /// Max live entries; `None` = unbounded. Over the cap, `put` evicts (expired
+    /// first, then arbitrary) so the cache cannot grow without limit.
+    capacity: Option<usize>,
     hits: AtomicU64,
     misses: AtomicU64,
 }
@@ -46,10 +49,25 @@ where
     K: Eq + Hash + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
 {
-    /// Create a new empty in-memory cache.
+    /// Create a new empty, **unbounded** in-memory cache (grows until entries
+    /// expire). Prefer [`with_capacity`](Self::with_capacity) for large values
+    /// (e.g. cached images) so memory stays bounded.
     pub fn new() -> Self {
         Self {
             store: Mutex::new(HashMap::new()),
+            capacity: None,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+        }
+    }
+
+    /// A cache bounded to at most `max_entries` live entries. When full, `put`
+    /// drops expired entries first, then evicts arbitrary ones to stay within the
+    /// cap — so the memory footprint is bounded (`max_entries` × value size).
+    pub fn with_capacity(max_entries: usize) -> Self {
+        Self {
+            store: Mutex::new(HashMap::new()),
+            capacity: Some(max_entries.max(1)),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
         }
@@ -109,6 +127,18 @@ where
     fn put(&self, key: K, value: V, ttl: Ttl) -> Result<(), CacheError> {
         let mut store = self.lock();
         store.insert(key, CacheEntry::new(value, ttl));
+        // Enforce the capacity bound: drop expired entries first, then evict
+        // arbitrary entries until within the cap — so memory cannot grow without
+        // limit (the [`with_capacity`] contract).
+        if let Some(cap) = self.capacity {
+            if store.len() > cap {
+                Self::purge_expired(&mut store);
+                while store.len() > cap {
+                    let Some(victim) = store.keys().next().cloned() else { break };
+                    store.remove(&victim);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -189,6 +219,22 @@ mod tests {
     fn get_miss_returns_none() {
         let c = make_cache();
         assert_eq!(c.get(&"missing".to_string()).unwrap(), None);
+    }
+
+    #[test]
+    fn with_capacity_bounds_the_store() {
+        let c: InMemoryCache<u32, u32> = InMemoryCache::with_capacity(3);
+        for i in 0..100 {
+            c.put(i, i, Ttl::Forever).unwrap();
+        }
+        // The cache never holds more than the cap, however many were inserted.
+        let mut live = 0;
+        for i in 0..100 {
+            if c.get(&i).unwrap().is_some() {
+                live += 1;
+            }
+        }
+        assert!(live <= 3, "held {live} entries, cap was 3");
     }
 
     #[test]
