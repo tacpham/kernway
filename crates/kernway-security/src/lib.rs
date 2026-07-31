@@ -376,6 +376,12 @@ pub struct SecurityContext {
     authenticated: bool,
     principal: Option<String>,
     roles: HashSet<String>,
+    /// Non-role grants — Spring's *authorities*. A second, orthogonal axis to roles:
+    /// use it for attributes that gate access but aren't roles (a subscription tier,
+    /// a feature flag, a scope). Empty unless set via [`with_authorities`].
+    ///
+    /// [`with_authorities`]: SecurityContext::with_authorities
+    authorities: HashSet<String>,
 }
 
 impl SecurityContext {
@@ -394,7 +400,20 @@ impl SecurityContext {
             authenticated: true,
             principal: Some(principal.into()),
             roles: roles.into_iter().map(Into::into).collect(),
+            authorities: HashSet::new(),
         }
+    }
+
+    /// Attach non-role authorities (a subscription tier, a scope, a feature flag).
+    /// Chainable after [`authenticated`](Self::authenticated); leaves roles untouched.
+    #[must_use]
+    pub fn with_authorities<I, S>(mut self, authorities: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.authorities = authorities.into_iter().map(Into::into).collect();
+        self
     }
 
     /// Whether the request is authenticated.
@@ -421,6 +440,21 @@ impl SecurityContext {
     pub fn roles(&self) -> impl Iterator<Item = &str> {
         self.roles.iter().map(String::as_str)
     }
+
+    /// Whether the principal holds `authority` (a non-role grant, e.g. a subscription tier).
+    pub fn has_authority(&self, authority: &str) -> bool {
+        self.authorities.contains(authority)
+    }
+
+    /// Whether the principal holds *any* of `authorities`.
+    pub fn has_any_authority(&self, authorities: &[&str]) -> bool {
+        authorities.iter().any(|a| self.authorities.contains(*a))
+    }
+
+    /// The authorities held, in no particular order.
+    pub fn authorities(&self) -> impl Iterator<Item = &str> {
+        self.authorities.iter().map(String::as_str)
+    }
 }
 
 /// So a template's `th:authorize` can consult the context through the spec-crate
@@ -431,6 +465,9 @@ impl kernway_core::security::Authorization for SecurityContext {
     }
     fn has_role(&self, role: &str) -> bool {
         self.roles.contains(role)
+    }
+    fn has_authority(&self, authority: &str) -> bool {
+        self.authorities.contains(authority)
     }
 }
 

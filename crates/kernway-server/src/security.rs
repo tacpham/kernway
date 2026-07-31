@@ -9,6 +9,7 @@
 //!     .permit_all("/login")
 //!     .has_role("/admin/**", "ADMIN")      // ADMIN only
 //!     .has_any_role("/staff/**", &["ADMIN", "STAFF"])
+//!     .has_authority("/premium/**", "PAID") // a non-role grant (subscription, scope)
 //!     .authenticated("/api/**")            // any logged-in user
 //!     .any_request(Access::Authenticated)  // the fallback (Spring's anyRequest())
 //!     .build();
@@ -66,6 +67,11 @@ pub enum Access {
     HasRole(String),
     /// An authenticated user with at least one of these roles.
     HasAnyRole(Vec<String>),
+    /// An authenticated user with this authority — a non-role grant (a subscription
+    /// tier, a scope, a feature flag). Roles and authorities are orthogonal axes.
+    HasAuthority(String),
+    /// An authenticated user with at least one of these authorities.
+    HasAnyAuthority(Vec<String>),
     /// No one.
     DenyAll,
 }
@@ -120,6 +126,23 @@ impl HttpSecurity {
             None,
             pattern,
             Access::HasAnyRole(roles.iter().map(|r| (*r).to_string()).collect()),
+        )
+    }
+
+    /// Require `authority` on a pattern (any method). An authority is a non-role grant
+    /// (a subscription tier, a scope) — a second axis to [`has_role`](Self::has_role).
+    #[must_use]
+    pub fn has_authority(self, pattern: &str, authority: &str) -> Self {
+        self.rule(None, pattern, Access::HasAuthority(authority.to_string()))
+    }
+
+    /// Require any of `authorities` on a pattern (any method).
+    #[must_use]
+    pub fn has_any_authority(self, pattern: &str, authorities: &[&str]) -> Self {
+        self.rule(
+            None,
+            pattern,
+            Access::HasAnyAuthority(authorities.iter().map(|a| (*a).to_string()).collect()),
         )
     }
 
@@ -264,6 +287,14 @@ fn decide(access: &Access, context: &SecurityContext) -> Decision {
         Access::HasAnyRole(_) if !authed => Decision::Unauthenticated,
         Access::HasAnyRole(roles) if roles.iter().any(|r| context.has_role(r)) => Decision::Allow,
         Access::HasAnyRole(_) => Decision::Forbidden,
+        Access::HasAuthority(_) if !authed => Decision::Unauthenticated,
+        Access::HasAuthority(a) if context.has_authority(a) => Decision::Allow,
+        Access::HasAuthority(_) => Decision::Forbidden,
+        Access::HasAnyAuthority(_) if !authed => Decision::Unauthenticated,
+        Access::HasAnyAuthority(auths) if auths.iter().any(|a| context.has_authority(a)) => {
+            Decision::Allow
+        }
+        Access::HasAnyAuthority(_) => Decision::Forbidden,
         Access::DenyAll if authed => Decision::Forbidden,
         Access::DenyAll => Decision::Unauthenticated,
     }
@@ -450,6 +481,44 @@ mod tests {
             decide(&Access::DenyAll, &anon),
             Decision::Unauthenticated
         ));
+    }
+
+    #[test]
+    fn decisions_cover_authority_axis() {
+        // Authorities are orthogonal to roles: a USER-role member can still hold a PAID
+        // authority (a subscription tier), and an ADMIN-role member may hold none.
+        let paid = SecurityContext::authenticated("p", ["USER"]).with_authorities(["PAID", "GOLD"]);
+        let free = SecurityContext::authenticated("f", ["USER"]);
+        let anon = SecurityContext::anonymous();
+
+        assert!(matches!(
+            decide(&Access::HasAuthority("PAID".into()), &anon),
+            Decision::Unauthenticated
+        ));
+        assert!(matches!(
+            decide(&Access::HasAuthority("PAID".into()), &free),
+            Decision::Forbidden
+        ));
+        assert!(matches!(
+            decide(&Access::HasAuthority("PAID".into()), &paid),
+            Decision::Allow
+        ));
+        assert!(matches!(
+            decide(
+                &Access::HasAnyAuthority(vec!["GOLD".into(), "DIAMOND".into()]),
+                &paid
+            ),
+            Decision::Allow
+        ));
+        assert!(matches!(
+            decide(
+                &Access::HasAnyAuthority(vec!["DIAMOND".into(), "VIP".into()]),
+                &paid
+            ),
+            Decision::Forbidden
+        ));
+        // A role check is unaffected by authorities and vice-versa.
+        assert!(!paid.has_role("ADMIN") && paid.has_authority("PAID"));
     }
 
     #[test]
