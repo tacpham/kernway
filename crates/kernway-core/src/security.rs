@@ -14,6 +14,13 @@ pub trait Authorization {
 
     /// Whether the principal holds `role`.
     fn has_role(&self, role: &str) -> bool;
+
+    /// Whether the principal holds `authority` — a non-role grant (a subscription tier,
+    /// a scope, a feature flag). A second, orthogonal axis to roles. Defaults to `false`
+    /// so existing implementors need no change; override to support authority checks.
+    fn has_authority(&self, _authority: &str) -> bool {
+        false
+    }
 }
 
 /// The fail-closed default: an unauthenticated request with no roles. What a

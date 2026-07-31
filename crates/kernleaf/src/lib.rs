@@ -210,6 +210,10 @@ enum AuthzExpr {
     HasRole(String),
     /// `hasAnyRole('A','B')` — true if the principal has any listed role.
     HasAnyRole(Vec<String>),
+    /// `hasAuthority('X')` — a non-role grant (e.g. a subscription tier).
+    HasAuthority(String),
+    /// `hasAnyAuthority('A','B')` — true if the principal has any listed authority.
+    HasAnyAuthority(Vec<String>),
 }
 
 impl AuthzExpr {
@@ -221,6 +225,8 @@ impl AuthzExpr {
             AuthzExpr::IsAnonymous => !authz.is_authenticated(),
             AuthzExpr::HasRole(r) => authz.has_role(r),
             AuthzExpr::HasAnyRole(rs) => rs.iter().any(|r| authz.has_role(r)),
+            AuthzExpr::HasAuthority(a) => authz.has_authority(a),
+            AuthzExpr::HasAnyAuthority(as_) => as_.iter().any(|a| authz.has_authority(a)),
         }
     }
 }
@@ -993,7 +999,8 @@ fn is_state_changing_form(el: &Element) -> bool {
 }
 
 /// Parse a `th:authorize` security expression: `permitAll`, `denyAll`,
-/// `isAuthenticated()`, `isAnonymous()`, `hasRole('X')`, `hasAnyRole('A','B')`.
+/// `isAuthenticated()`, `isAnonymous()`, `hasRole('X')`, `hasAnyRole('A','B')`,
+/// `hasAuthority('X')`, `hasAnyAuthority('A','B')`.
 fn parse_authorize(value: &str) -> Result<AuthzExpr, TemplateError> {
     let v = value.trim().trim_end_matches("()").trim();
     match v {
@@ -1014,6 +1021,20 @@ fn parse_authorize(value: &str) -> Result<AuthzExpr, TemplateError> {
             .filter(|r| !r.is_empty())
             .collect();
         return Ok(AuthzExpr::HasAnyRole(roles));
+    }
+    // `hasAnyAuthority` before `hasAuthority` is unnecessary (distinct prefixes), but keep
+    // the any-variant first for symmetry with the role branches above.
+    if let Some(args) = fn_call(value.trim(), "hasAnyAuthority") {
+        let auths = args
+            .split(',')
+            .map(|a| a.trim().trim_matches('\'').trim_matches('"').to_string())
+            .filter(|a| !a.is_empty())
+            .collect();
+        return Ok(AuthzExpr::HasAnyAuthority(auths));
+    }
+    if let Some(args) = fn_call(value.trim(), "hasAuthority") {
+        let authority = args.trim().trim_matches('\'').trim_matches('"');
+        return Ok(AuthzExpr::HasAuthority(authority.to_string()));
     }
     Err(err(format!(
         "unsupported th:authorize expression `{value}`"
@@ -1467,6 +1488,7 @@ mod tests {
     struct MockAuth {
         authed: bool,
         roles: &'static [&'static str],
+        authorities: &'static [&'static str],
     }
     impl kernway_core::security::Authorization for MockAuth {
         fn is_authenticated(&self) -> bool {
@@ -1474,6 +1496,9 @@ mod tests {
         }
         fn has_role(&self, role: &str) -> bool {
             self.roles.contains(&role)
+        }
+        fn has_authority(&self, authority: &str) -> bool {
+            self.authorities.contains(&authority)
         }
     }
 
@@ -1485,10 +1510,12 @@ mod tests {
         let admin = MockAuth {
             authed: true,
             roles: &["ADMIN"],
+            authorities: &[],
         };
         let user = MockAuth {
             authed: true,
             roles: &["USER"],
+            authorities: &[],
         };
         assert_eq!(
             e.render_with("t", &Value::Null, &RenderContext::new().authorize(&admin))
@@ -1499,6 +1526,30 @@ mod tests {
             e.render_with("t", &Value::Null, &RenderContext::new().authorize(&user))
                 .unwrap(),
             ""
+        );
+    }
+
+    #[test]
+    fn th_authorize_has_authority() {
+        let mut e = Kernleaf::new();
+        e.add("t", "<div th:authorize=\"hasAuthority('PAID')\">premium</div>")
+            .unwrap();
+        e.add("any", "<div th:authorize=\"hasAnyAuthority('GOLD','VIP')\">tier</div>")
+            .unwrap();
+        // Same role (USER), different authorities — the axis that decides here.
+        let paid = MockAuth { authed: true, roles: &["USER"], authorities: &["PAID", "GOLD"] };
+        let free = MockAuth { authed: true, roles: &["USER"], authorities: &[] };
+        assert_eq!(
+            e.render_with("t", &Value::Null, &RenderContext::new().authorize(&paid)).unwrap(),
+            "<div>premium</div>"
+        );
+        assert_eq!(
+            e.render_with("t", &Value::Null, &RenderContext::new().authorize(&free)).unwrap(),
+            ""
+        );
+        assert_eq!(
+            e.render_with("any", &Value::Null, &RenderContext::new().authorize(&paid)).unwrap(),
+            "<div>tier</div>"
         );
     }
 
@@ -1525,10 +1576,12 @@ mod tests {
         let anon = MockAuth {
             authed: false,
             roles: &[],
+            authorities: &[],
         };
         let logged = MockAuth {
             authed: true,
             roles: &["B"],
+            authorities: &[],
         };
         let ctx_anon = RenderContext::new().authorize(&anon);
         let ctx_logged = RenderContext::new().authorize(&logged);
