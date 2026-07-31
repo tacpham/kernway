@@ -41,6 +41,17 @@ pub fn default_config() -> Arc<ClientConfig> {
 pub struct AsyncTlsStream {
     tcp: AsyncTcpStream,
     conn: ClientConnection,
+    /// Decrypted plaintext pulled out of `rustls` but not yet handed to the caller. We
+    /// drain `rustls`'s own (bounded) plaintext buffer into here after *every*
+    /// `process_new_packets`, so it can never hit its `"received plaintext buffer full"`
+    /// limit — which `read_tls` raises as backpressure when a fast, large download (e.g.
+    /// Cloudflare pushing a multi-MB `.ts` segment in a burst of TLS records) decrypts
+    /// faster than the caller reads. Treating that as fatal truncated the body mid-stream.
+    inbox: Vec<u8>,
+    /// Read cursor into `inbox`; bytes before it were already returned to the caller.
+    inbox_pos: usize,
+    /// The peer sent `close_notify` — no more plaintext will arrive.
+    closed: bool,
 }
 
 impl AsyncTlsStream {
@@ -54,7 +65,13 @@ impl AsyncTlsStream {
         let name = ServerName::try_from(server_name.to_string())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid server name"))?;
         let conn = ClientConnection::new(config, name).map_err(to_io)?;
-        let mut stream = Self { tcp, conn };
+        let mut stream = Self {
+            tcp,
+            conn,
+            inbox: Vec::new(),
+            inbox_pos: 0,
+            closed: false,
+        };
         stream.handshake().await?;
         Ok(stream)
     }
@@ -82,17 +99,28 @@ impl AsyncTlsStream {
         self.flush_tls().await
     }
 
-    /// Read plaintext, pulling and decrypting more TLS from the socket as needed.
+    /// Read plaintext, pulling and decrypting more TLS from the socket as needed. Plaintext
+    /// is served from our own `inbox` (filled by [`pump_from_socket`], which drains `rustls`
+    /// eagerly so its bounded buffer never overflows on a large, fast body).
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
-            match self.conn.reader().read(buf) {
-                // A clean `Ok(0)` is a TLS close_notify — end of stream.
-                Ok(n) => return Ok(n),
-                // No plaintext buffered yet: pull more TLS and retry.
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                Err(e) => return Err(e),
+            // 1. Serve anything already decrypted and waiting.
+            if self.inbox_pos < self.inbox.len() {
+                let n = buf.len().min(self.inbox.len() - self.inbox_pos);
+                buf[..n].copy_from_slice(&self.inbox[self.inbox_pos..self.inbox_pos + n]);
+                self.inbox_pos += n;
+                if self.inbox_pos == self.inbox.len() {
+                    self.inbox.clear();
+                    self.inbox_pos = 0;
+                }
+                return Ok(n);
             }
-            if self.pump_from_socket().await? == 0 {
+            // 2. Nothing buffered and the peer said goodbye — clean end of stream.
+            if self.closed {
+                return Ok(0);
+            }
+            // 3. Pull more TLS; it decrypts new plaintext into `inbox` (or sets `closed`).
+            if self.pump_from_socket().await? == 0 && self.inbox.is_empty() {
                 // Socket EOF without a close_notify — treat as end of body.
                 return Ok(0);
             }
@@ -112,8 +140,11 @@ impl AsyncTlsStream {
         Ok(())
     }
 
-    /// Read one chunk of TLS bytes from the socket and feed them to `rustls`. Returns
-    /// the number of socket bytes read (`0` at EOF).
+    /// Read one chunk of TLS bytes from the socket and feed them to `rustls`, draining the
+    /// decrypted plaintext into `inbox` after each step so `rustls`'s bounded plaintext
+    /// buffer never fills (its `"received plaintext buffer full"` backpressure would
+    /// otherwise abort a fast, large download mid-body). Returns the number of socket bytes
+    /// read (`0` at EOF).
     async fn pump_from_socket(&mut self) -> io::Result<usize> {
         let mut chunk = [0u8; 8192];
         let n = self.tcp.read(&mut chunk).await?;
@@ -124,8 +155,28 @@ impl AsyncTlsStream {
         while !cursor.is_empty() {
             self.conn.read_tls(&mut cursor)?; // consumes from `cursor`
             self.conn.process_new_packets().map_err(to_io)?;
+            self.drain_plaintext()?; // keep rustls's buffer empty as we go
         }
         Ok(n)
+    }
+
+    /// Move all currently-decrypted plaintext out of `rustls` and into `inbox`. Called after
+    /// every `process_new_packets` so `rustls` never has to hold more than one record's worth.
+    fn drain_plaintext(&mut self) -> io::Result<()> {
+        let mut tmp = [0u8; 16384];
+        loop {
+            match self.conn.reader().read(&mut tmp) {
+                // `Ok(0)` from the reader is a clean close_notify — record it and stop.
+                Ok(0) => {
+                    self.closed = true;
+                    return Ok(());
+                }
+                Ok(n) => self.inbox.extend_from_slice(&tmp[..n]),
+                // Nothing more decrypted right now.
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                Err(e) => return Err(e),
+            }
+        }
     }
 }
 
