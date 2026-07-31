@@ -563,6 +563,13 @@ const VOID: &[&str] = &[
     "track", "wbr",
 ];
 
+/// Raw-text elements: their content is text, never markup. The HTML parser does not
+/// look for tags inside them — only for the matching end tag — so tag-like text (a
+/// `<details>` in a CSS comment, a `<div>` in a JS string) is content, not an element.
+/// We mirror that: everything up to `</tag>` is one text node (with `[[…]]` inline
+/// expressions still compiled). Without this, such text silently reshapes the DOM.
+const RAW_TEXT: &[&str] = &["script", "style", "textarea", "title"];
+
 struct Parser<'a> {
     s: &'a [u8],
     src: &'a str,
@@ -619,6 +626,37 @@ impl<'a> Parser<'a> {
         compile_text(&self.src[start..self.pos])
     }
 
+    /// Content of a raw-text element ([`RAW_TEXT`]) up to — but not including — its
+    /// matching `</tag>` (case-insensitive). Returned as one node; `[[…]]` inline
+    /// expressions are still compiled (so `th:inline` on a `<script>`/`<style>` keeps
+    /// working), but HTML tags inside are text, not markup. The caller consumes the
+    /// close tag exactly as for any other element.
+    fn read_raw_text(&mut self, tag_lower: &str) -> Result<Dom, TemplateError> {
+        let start = self.pos;
+        let needle = tag_lower.as_bytes();
+        let mut i = self.pos;
+        while i < self.s.len() {
+            if self.s[i] == b'<'
+                && i + 2 + needle.len() <= self.s.len()
+                && self.s[i + 1] == b'/'
+                && self.s[i + 2..i + 2 + needle.len()].eq_ignore_ascii_case(needle)
+            {
+                // A real close tag ends in whitespace or `>` (or EOF), so `</style>`
+                // matches but `</styled>` does not.
+                let end_idx = i + 2 + needle.len();
+                if end_idx >= self.s.len()
+                    || self.s[end_idx] == b'>'
+                    || self.s[end_idx].is_ascii_whitespace()
+                {
+                    break;
+                }
+            }
+            i += 1;
+        }
+        self.pos = i;
+        compile_text(&self.src[start..i])
+    }
+
     fn read_comment(&mut self) -> Result<Dom, TemplateError> {
         self.pos += 4; // <!--
         let start = self.pos;
@@ -653,6 +691,10 @@ impl<'a> Parser<'a> {
 
         let children = if void {
             Vec::new()
+        } else if RAW_TEXT.contains(&tag_lower.as_str()) {
+            // Raw-text element (script/style/…): consume content verbatim to the close
+            // tag so tag-like text inside is never parsed as markup.
+            vec![self.read_raw_text(&tag_lower)?]
         } else {
             self.parse_nodes()?
         };
@@ -1390,6 +1432,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "<style>.x{color:red\\3B \\7D }</style>");
+    }
+
+    #[test]
+    fn a_style_does_not_parse_tag_like_text_inside_it() {
+        // A `<details>` in a CSS comment must be content, not an element — otherwise the
+        // unclosed tag swallows the <body> that follows and the page renders empty.
+        let src = "<head><style>/* <details> accordion */ .a{color:red}</style></head>\
+                   <body><p>hi</p></body>";
+        assert_eq!(render(src, &Value::Null).unwrap(), src);
+    }
+
+    #[test]
+    fn a_script_keeps_tag_like_text_and_the_next_element_is_a_sibling() {
+        // `a<b` and `</div>` inside the script are text; only `</script>` ends it, so
+        // the following <p> is a sibling, not swallowed.
+        let src = "<script>if (a<b) x='</div>';</script><p>after</p>";
+        assert_eq!(render(src, &Value::Null).unwrap(), src);
     }
 
     #[test]
