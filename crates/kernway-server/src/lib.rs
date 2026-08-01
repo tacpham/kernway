@@ -96,7 +96,7 @@ pub use security::{Access, HttpSecurity, SecurityLayer};
 // params (`id: Path<u64>`, `body: Validated<T>`) reference only `::kernway_server::`.
 pub use app::UploadConfig;
 pub use extract::Extract;
-pub use kernway_web::{Json, Path, ProblemDetail, Query, Validated};
+pub use kernway_web::{json, Json, Path, ProblemDetail, Query, Validated};
 pub use multipart::{Multipart, Part};
 pub use upload::UploadFile;
 // Visitor tracking + ban middleware and its types.
