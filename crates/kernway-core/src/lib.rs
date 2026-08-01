@@ -113,6 +113,7 @@ pub mod request;
 pub mod response;
 pub mod security;
 pub mod template;
+pub mod url;
 
 /// Re-export all traits for use with: `use kernway_core::prelude::*`
 pub mod prelude {
