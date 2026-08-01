@@ -134,6 +134,18 @@ impl Request {
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers.get(name)
     }
+
+    /// Read one cookie from the `Cookie` header by name, trimmed. `None` if there is no
+    /// `Cookie` header or no cookie with that name. The name match is case-sensitive
+    /// (cookie names are), and the returned value is the raw (still percent-encoded) text —
+    /// decode with [`crate::url::percent_decode`] if the value was encoded when set.
+    pub fn cookie(&self, name: &str) -> Option<String> {
+        let header = self.header("cookie")?;
+        header.split(';').find_map(|pair| {
+            let (k, v) = pair.split_once('=')?;
+            (k.trim() == name).then(|| v.trim().to_string())
+        })
+    }
 }
 
 // Data extraction from a request happens through `kernway_server::Extract` (which also

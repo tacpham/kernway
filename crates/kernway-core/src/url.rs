@@ -50,9 +50,33 @@ pub fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Read one field from an `application/x-www-form-urlencoded` body by name, percent-decoded
+/// (so `+` → space and `%XX` → its byte, via [`percent_decode`]). Returns an empty string if
+/// the field is absent — a missing form field and a present-but-empty one are not
+/// distinguished, which is what a plain form POST wants. The first match wins.
+#[must_use]
+pub fn form_field(body: &[u8], name: &str) -> String {
+    String::from_utf8_lossy(body)
+        .split('&')
+        .find_map(|pair| {
+            let (k, v) = pair.split_once('=')?;
+            (k == name).then(|| percent_decode(v))
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn form_field_basics() {
+        let body = b"email=a%40b.com&name=Jo+Reader&empty=";
+        assert_eq!(form_field(body, "email"), "a@b.com");
+        assert_eq!(form_field(body, "name"), "Jo Reader");
+        assert_eq!(form_field(body, "empty"), "");
+        assert_eq!(form_field(body, "missing"), ""); // absent → empty, same as present-empty
+    }
 
     #[test]
     fn decode_basics() {

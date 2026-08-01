@@ -27,14 +27,24 @@ pub struct Json<T>(pub T);
 
 impl<T: Serialize + Send> IntoResponse for Json<T> {
     fn into_response(self) -> Response {
-        match serde_json::to_vec(&self.0) {
-            Ok(body) => Response::new(StatusCode::OK)
-                .content_type("application/json; charset=utf-8")
-                .body(body),
-            Err(e) => Response::new(StatusCode::INTERNAL_SERVER_ERROR)
-                .content_type("application/json; charset=utf-8")
-                .body(format!(r#"{{"error":"serialize error: {}"}}"#, e).into_bytes()),
-        }
+        json(StatusCode::OK, &self.0)
+    }
+}
+
+/// Serialize `body` as a JSON response with an explicit status — the building block behind
+/// `Json<T>`'s `IntoResponse`, exposed as a free function for the common case of returning
+/// a status other than `200` (a `403` refusal, a `201` create) without wrapping the value in
+/// [`Json`] first: `json(StatusCode::FORBIDDEN, &err)`. A serialize failure falls back to a
+/// `500` with a `{}` body, so a handler never panics on a non-serializable value.
+#[must_use]
+pub fn json<T: Serialize>(status: StatusCode, body: &T) -> Response {
+    match serde_json::to_vec(body) {
+        Ok(bytes) => Response::new(status)
+            .content_type("application/json; charset=utf-8")
+            .body(bytes),
+        Err(_) => Response::new(StatusCode::INTERNAL_SERVER_ERROR)
+            .content_type("application/json; charset=utf-8")
+            .body(b"{}".to_vec()),
     }
 }
 
