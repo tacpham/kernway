@@ -249,4 +249,63 @@ impl Connection {
             .as_int()
             .unwrap_or(0))
     }
+
+    // --- pub/sub ------------------------------------------------------------
+    //
+    // `command`'s send-one/read-one shape fits every request/reply command, but a
+    // subscriber is different: after `SUBSCRIBE` the server pushes `message` frames
+    // whenever a publisher sends, with no request in between. So subscribing is split
+    // into `subscribe` (enter the mode) + `next_message` (block for the next push).
+
+    /// `PUBLISH channel payload` → the number of subscribers that received it.
+    /// **Fire-and-forget**: with no subscriber connected at publish time the message is
+    /// dropped — Redis pub/sub is not durable, so a subscriber that was offline must
+    /// reconcile any missed work from a durable source on reconnect.
+    pub async fn publish(&mut self, channel: &str, payload: &[u8]) -> Result<i64, RedisError> {
+        Ok(self
+            .command(&[b"PUBLISH", channel.as_bytes(), payload])
+            .await?
+            .as_int()
+            .unwrap_or(0))
+    }
+
+    /// `SUBSCRIBE channel…` — put this connection into subscribe mode and drain the
+    /// per-channel confirmation frames. After this the connection is **dedicated** to
+    /// receiving pushes via [`next_message`](Self::next_message); in RESP2 only
+    /// (un)subscribe and PING are valid on a subscribed connection, so it must not be
+    /// returned to a [`Pool`](crate::Pool) — keep it for the lifetime of the listener.
+    pub async fn subscribe(&mut self, channels: &[&str]) -> Result<(), RedisError> {
+        let mut args: Vec<&[u8]> = Vec::with_capacity(channels.len() + 1);
+        args.push(b"SUBSCRIBE");
+        args.extend(channels.iter().map(|c| c.as_bytes()));
+        let mut out = Vec::with_capacity(32);
+        resp::encode(&args, &mut out);
+        self.stream.write_all(&out).await?;
+        // One `subscribe` confirmation frame per channel.
+        for _ in 0..channels.len() {
+            self.read_reply().await?;
+        }
+        Ok(())
+    }
+
+    /// Block until the next `message` on a subscribed channel, returning
+    /// `(channel, payload)`. It awaits the socket, so this call *is* the push wake-up —
+    /// it returns the instant a publisher sends, without polling. Frames that are not a
+    /// message (extra subscribe confirmations, a `pong` from a keepalive PING) are
+    /// skipped. Requires a prior [`subscribe`](Self::subscribe).
+    pub async fn next_message(&mut self) -> Result<(String, Vec<u8>), RedisError> {
+        loop {
+            if let Value::Array(items) = self.read_reply().await? {
+                // A published message is exactly `["message", channel, payload]`.
+                if let [Value::Bulk(kind), Value::Bulk(channel), Value::Bulk(payload)] =
+                    items.as_slice()
+                {
+                    if kind.as_slice() == b"message" {
+                        return Ok((String::from_utf8_lossy(channel).into_owned(), payload.clone()));
+                    }
+                }
+            }
+            // Any other frame (subscribe/unsubscribe/pong) → keep waiting for a message.
+        }
+    }
 }
