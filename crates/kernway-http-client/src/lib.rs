@@ -15,7 +15,7 @@
 //!
 //! Speaks HTTP/1.1 (parsing, `Content-Length`, chunked, read-to-close) over plain TCP
 //! or **TLS**: an `https://` URL is dialled through `rustls` (server certificate
-//! verified against the webpki roots — see [`tls`]), transparently to the HTTP layer.
+//! verified against the webpki roots — see the `tls` module), transparently to the HTTP layer.
 
 #![forbid(unsafe_code)]
 
