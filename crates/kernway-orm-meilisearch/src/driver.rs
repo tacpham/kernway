@@ -59,7 +59,7 @@ impl MeilisearchDriver {
     }
 
     /// Auto-configure from layered [`kernway_config::Config`] — Spring Boot starter
-    /// style. Reads [`MeilisearchConfig`] via [`FromConfig`], so enabling the
+    /// style. Reads [`MeilisearchConfig`] via [`FromConfig`](kernway_config::FromConfig), so enabling the
     /// `config` feature and putting `meilisearch.host` + `meilisearch.api-key` in
     /// `application.yml` is all it takes to connect. (Requires the `config` feature.)
     #[cfg(feature = "config")]
