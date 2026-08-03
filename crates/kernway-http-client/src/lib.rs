@@ -29,6 +29,7 @@ use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::Range;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::{self, ThreadId};
 use std::time::{Duration, SystemTime};
 
 use rt_net::AsyncTcpStream;
@@ -80,11 +81,18 @@ struct Idle {
     since_ms: u64,
 }
 
-/// A pool of idle keep-alive connections, keyed by origin, shared across cores. Like
-/// [`kernway_redis::Pool`], the `Mutex` is held only to pop/push a connection, never
-/// across a request's `.await`, so a slow request never blocks another core at the lock.
+/// A pool of idle keep-alive connections. The `Mutex` is held only to pop/push a
+/// connection, never across a request's `.await`, so a slow request never blocks
+/// another core at the lock.
+///
+/// **Per-shard, not shared across cores.** A socket is registered on the reactor of the
+/// shard (thread) that created it; its readiness events are delivered there and nowhere
+/// else. Reusing a pooled connection on a *different* shard would park the waiter on a
+/// reactor that never owns the socket, so the read is never woken (it dies at the request
+/// timeout) — the source of intermittent, shard-dependent failures. Keying the bucket by
+/// the owning `ThreadId` keeps each connection on its home shard.
 struct ConnPool {
-    idle: Mutex<HashMap<Origin, Vec<Idle>>>,
+    idle: Mutex<HashMap<(ThreadId, Origin), Vec<Idle>>>,
     max_per_origin: usize,
 }
 
@@ -96,11 +104,12 @@ impl ConnPool {
         }
     }
 
-    /// Take a fresh-enough idle connection for `origin`, discarding any that have sat
-    /// too long (a server would have closed them).
+    /// Take a fresh-enough idle connection for `origin` **on the current shard**,
+    /// discarding any that have sat too long (a server would have closed them).
     fn take(&self, origin: &Origin, now_ms: u64) -> Option<Conn> {
+        let key = (thread::current().id(), origin.clone());
         let mut map = self.idle.lock().unwrap();
-        let bucket = map.get_mut(origin)?;
+        let bucket = map.get_mut(&key)?;
         while let Some(entry) = bucket.pop() {
             if now_ms.saturating_sub(entry.since_ms) < POOL_IDLE_TIMEOUT_MS {
                 return Some(entry.conn);
@@ -110,13 +119,15 @@ impl ConnPool {
         None
     }
 
-    /// Return a reusable connection to the pool (dropped if the bucket is full).
+    /// Return a reusable connection to the pool, tagged to the current shard (dropped if
+    /// the bucket is full).
     fn put(&self, origin: Origin, conn: Conn, now_ms: u64) {
         if self.max_per_origin == 0 {
             return;
         }
+        let key = (thread::current().id(), origin);
         let mut map = self.idle.lock().unwrap();
-        let bucket = map.entry(origin).or_default();
+        let bucket = map.entry(key).or_default();
         if bucket.len() < self.max_per_origin {
             bucket.push(Idle {
                 conn,
