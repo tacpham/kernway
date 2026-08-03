@@ -78,9 +78,9 @@ impl AsyncTcpStream {
     /// distinguishes "connected" from "refused" — a writable event alone does
     /// not mean success.
     pub async fn connect(addr: SocketAddr) -> io::Result<Self> {
-        let stream = Self::from_mio(mio::net::TcpStream::connect(addr)?)?;
+        let mut stream = Self::from_mio(mio::net::TcpStream::connect(addr)?)?;
         loop {
-            Readiness::new(stream.token, Direction::Write).await;
+            stream.park(Direction::Write).await?;
             if let Some(err) = stream.inner.take_error()? {
                 return Err(err);
             }
@@ -99,18 +99,29 @@ impl AsyncTcpStream {
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
             match self.inner.read(buf) {
-                Err(e) if would_block(&e) => Readiness::new(self.token, Direction::Read).await,
+                Err(e) if would_block(&e) => self.park(Direction::Read).await?,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 other => return other,
             }
         }
     }
 
+    /// Re-arm the edge-triggered registration, then wait for one readiness edge.
+    ///
+    /// The re-arm (`reregister`) re-delivers readiness that was consumed while no
+    /// waker was parked — without it, a busy shard can lose the edge and the waiter
+    /// sleeps until its timeout even though the kernel already has the data.
+    async fn park(&mut self, direction: Direction) -> io::Result<()> {
+        rt_core::with_reactor(|r| r.reregister(&mut self.inner, self.token))?;
+        Readiness::new(self.token, direction).await;
+        Ok(())
+    }
+
     /// Write from `buf`, returning the number of bytes accepted (may be short).
     pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         loop {
             match self.inner.write(buf) {
-                Err(e) if would_block(&e) => Readiness::new(self.token, Direction::Write).await,
+                Err(e) if would_block(&e) => self.park(Direction::Write).await?,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 other => return other,
             }

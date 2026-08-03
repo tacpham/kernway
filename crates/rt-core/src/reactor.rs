@@ -29,6 +29,14 @@ pub enum Direction {
 struct Parked {
     read: Option<Waker>,
     write: Option<Waker>,
+    /// A readiness edge that arrived while no waker was parked for that direction.
+    /// `mio` is edge-triggered, so the OS will NOT re-deliver it — we remember it
+    /// and honour it at the next `park`, otherwise the waiter sleeps until its
+    /// timeout even though the kernel already has the data. This closes a
+    /// lost-wakeup that shows up under concurrent connect→read transitions (a
+    /// readable/writable edge coalesced onto a slot whose waker isn't parked yet).
+    read_ready: bool,
+    write_ready: bool,
 }
 
 /// I/O event demultiplexer for a single shard.
@@ -76,6 +84,24 @@ impl Reactor {
         Ok(token)
     }
 
+    /// Re-arm an already-registered source's interest.
+    ///
+    /// `mio` is edge-triggered: a readiness edge is delivered once and never
+    /// repeated. If it is consumed while no waker is parked (a busy shard polling
+    /// the reactor between a socket's read attempts, or the connect→read handoff),
+    /// the waiter would sleep on an edge that will never come again. Re-registering
+    /// with `EPOLL_CTL_MOD` re-evaluates the fd and re-delivers current readiness as
+    /// a fresh edge, so a `park` that follows a lost edge still gets woken.
+    pub fn reregister<S: Source + ?Sized>(
+        &mut self,
+        source: &mut S,
+        token: Token,
+    ) -> io::Result<()> {
+        self.poll
+            .registry()
+            .reregister(source, token, Interest::READABLE | Interest::WRITABLE)
+    }
+
     /// Drop a source's registration and any wakers parked on it.
     ///
     /// The token is not recycled — `next_token` only moves forward, so a stale
@@ -96,10 +122,19 @@ impl Reactor {
     /// skip the store when nothing changed.
     pub fn park(&mut self, token: Token, direction: Direction, waker: Waker) {
         let slot = self.parked.entry(token).or_default();
-        let target = match direction {
-            Direction::Read => &mut slot.read,
-            Direction::Write => &mut slot.write,
+        let (target, ready) = match direction {
+            Direction::Read => (&mut slot.read, &mut slot.read_ready),
+            Direction::Write => (&mut slot.write, &mut slot.write_ready),
         };
+        // A readiness edge already fired while nothing was parked here. Edge-triggered
+        // epoll won't re-deliver it, so consume the remembered edge and wake now: the
+        // task re-polls and retries its syscall (a stale flag just costs one retry).
+        if *ready {
+            *ready = false;
+            *target = None;
+            waker.wake();
+            return;
+        }
         match target {
             Some(existing) if existing.will_wake(&waker) => {}
             _ => *target = Some(waker),
@@ -137,15 +172,23 @@ impl Reactor {
             // whichever side it happens to be waiting.
             let failed = event.is_error() || event.is_read_closed() || event.is_write_closed();
             if event.is_readable() || failed {
-                if let Some(w) = slot.read.take() {
-                    w.wake();
-                    woken += 1;
+                match slot.read.take() {
+                    Some(w) => {
+                        w.wake();
+                        woken += 1;
+                    }
+                    // No waiter yet — remember the edge so the next `park` honours it
+                    // instead of sleeping on an edge that will never be re-delivered.
+                    None => slot.read_ready = true,
                 }
             }
             if event.is_writable() || failed {
-                if let Some(w) = slot.write.take() {
-                    w.wake();
-                    woken += 1;
+                match slot.write.take() {
+                    Some(w) => {
+                        w.wake();
+                        woken += 1;
+                    }
+                    None => slot.write_ready = true,
                 }
             }
         }
