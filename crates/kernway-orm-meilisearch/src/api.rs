@@ -425,6 +425,40 @@ pub async fn set_pagination(
     wait_for_task(base_url, api_key, task.task_uid).await
 }
 
+/// `PATCH /indexes/{uid}/settings` with `{ "faceting": { "maxValuesPerFacet": N } }`.
+/// Raises how many distinct values a `facetDistribution` returns (Meili default 100) — needed
+/// when a facet is used to count distinct values (e.g. distinct active users per day).
+pub async fn set_faceting(
+    base_url: &str,
+    api_key: &str,
+    index: &str,
+    max_values_per_facet: u64,
+) -> Result<(), OrmError> {
+    #[derive(Serialize)]
+    struct Faceting {
+        #[serde(rename = "maxValuesPerFacet")]
+        max_values_per_facet: u64,
+    }
+    #[derive(Serialize)]
+    struct Body {
+        faceting: Faceting,
+    }
+    let url = format!("{}/indexes/{}/settings", base_url, index);
+    let json = serde_json::to_vec(&Body { faceting: Faceting { max_values_per_facet } })
+        .map_err(|e| OrmError::TypeConversion(e.to_string()))?;
+    let resp = client()
+        .send(
+            Request::new(Method::Patch, Url::parse(&url).map_err(map_http)?)
+                .header("Authorization", bearer(api_key))
+                .body("application/json", json),
+        )
+        .await
+        .map_err(map_http)?;
+    let task: TaskEnqueued =
+        serde_json::from_slice(&resp.body).map_err(|e| OrmError::TypeConversion(e.to_string()))?;
+    wait_for_task(base_url, api_key, task.task_uid).await
+}
+
 /// Delete an index entirely (drops all documents and settings). Idempotent.
 ///
 /// `DELETE /indexes/{uid}`
