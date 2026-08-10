@@ -150,6 +150,12 @@ impl<T> MeilisearchQueryBuilder<T> {
     pub(crate) fn push_is_not_null(&mut self, field: &'static str) {
         self.filters.push(format!("{} IS NOT NULL", field));
     }
+    pub(crate) fn push_exists(&mut self, field: &'static str) {
+        self.filters.push(format!("{} EXISTS", field));
+    }
+    pub(crate) fn push_not_exists(&mut self, field: &'static str) {
+        self.filters.push(format!("{} NOT EXISTS", field));
+    }
 }
 
 impl<T: Entity + Serialize + DeserializeOwned + Send + 'static> QueryBuilder<T> for MeilisearchQueryBuilder<T> {
@@ -196,6 +202,14 @@ impl<T: Entity + Serialize + DeserializeOwned + Send + 'static> QueryBuilder<T> 
     }
     fn filter_is_not_null(mut self: Box<Self>, field: &'static str) -> Box<dyn QueryBuilder<T>> {
         self.push_is_not_null(field);
+        self
+    }
+    fn filter_exists(mut self: Box<Self>, field: &'static str) -> Box<dyn QueryBuilder<T>> {
+        self.push_exists(field);
+        self
+    }
+    fn filter_not_exists(mut self: Box<Self>, field: &'static str) -> Box<dyn QueryBuilder<T>> {
+        self.push_not_exists(field);
         self
     }
 

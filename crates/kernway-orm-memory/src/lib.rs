@@ -339,6 +339,11 @@ where
         self
     }
 
+    // EXISTS/NOT EXISTS are Meilisearch-specific (document-attribute presence); the in-memory backend
+    // has no equivalent, so no-op (used only in tests/dev).
+    fn filter_exists(self: Box<Self>, _field: &'static str) -> Box<dyn QueryBuilder<T>> { self }
+    fn filter_not_exists(self: Box<Self>, _field: &'static str) -> Box<dyn QueryBuilder<T>> { self }
+
     fn filter_spec(
         mut self: Box<Self>,
         spec: kernway_orm_core::spec::Spec,
