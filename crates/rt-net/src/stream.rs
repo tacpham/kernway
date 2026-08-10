@@ -106,13 +106,17 @@ impl AsyncTcpStream {
         }
     }
 
-    /// Re-arm the edge-triggered registration, then wait for one readiness edge.
+    /// Wait for one readiness edge on `direction`.
     ///
-    /// The re-arm (`reregister`) re-delivers readiness that was consumed while no
-    /// waker was parked — without it, a busy shard can lose the edge and the waiter
-    /// sleeps until its timeout even though the kernel already has the data.
+    /// A lost edge (readiness that fired while no waker was parked) is covered by
+    /// the reactor remembering it (`Parked::read_ready`/`write_ready`) and honouring
+    /// it at the next `park`. We deliberately do NOT `reregister` here: re-arming an
+    /// already-registered fd re-delivers its *current* readiness as a fresh edge on
+    /// every park, so an idle-but-signalled socket (`recvfrom` → `WouldBlock` while
+    /// the poller still reports readable — e.g. a Cloudflare keep-alive) would wake,
+    /// retry, `WouldBlock`, re-arm, wake … busy-looping a whole core. Register-once
+    /// plus the remembered edge is enough and never spins.
     async fn park(&mut self, direction: Direction) -> io::Result<()> {
-        rt_core::with_reactor(|r| r.reregister(&mut self.inner, self.token))?;
         Readiness::new(self.token, direction).await;
         Ok(())
     }

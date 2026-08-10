@@ -38,6 +38,11 @@ pub trait QueryBuilder<T: Entity>: Send {
     fn filter_is_null(self: Box<Self>, field: &'static str) -> Box<dyn QueryBuilder<T>>;
     /// `field IS NOT NULL`.
     fn filter_is_not_null(self: Box<Self>, field: &'static str) -> Box<dyn QueryBuilder<T>>;
+    /// `field EXISTS` — the attribute is PRESENT on the document (distinct from IS NOT NULL, which
+    /// also matches documents missing the field). Backends without native support no-op it.
+    fn filter_exists(self: Box<Self>, field: &'static str) -> Box<dyn QueryBuilder<T>>;
+    /// `field NOT EXISTS` — the attribute is ABSENT. Backends without support no-op it.
+    fn filter_not_exists(self: Box<Self>, field: &'static str) -> Box<dyn QueryBuilder<T>>;
 
     /// Filter by a composable [`Spec`] — the way to express
     /// `OR` and nested boolean logic. It combines with any fluent filters (which

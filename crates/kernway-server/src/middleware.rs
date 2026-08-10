@@ -103,15 +103,28 @@ impl Middleware for LoggingMiddleware {
             let method = req.method.clone();
             let path = req.path.clone();
             let resp = next.run(req, scope).await;
+            let status = resp.status.0;
+            let elapsed = start.elapsed().as_millis();
             // The access log line, through the framework logger (KW_LOG controls it).
             // The request id is added by the MDC context (RequestIdMiddleware), so it
             // prefixes this line and every other log of the request uniformly.
-            kernway_log::info!(
-                target: "kernway_server",
-                "{method} {path} -> {} ({}ms)",
-                resp.status.0,
-                start.elapsed().as_millis(),
-            );
+            //
+            // Successful read-only requests (GET/HEAD, status < 400) are high-frequency noise —
+            // health/presence polling (`/online`), page loads — that drown the access log, so they
+            // go to DEBUG. Mutations (POST/PUT/PATCH/DELETE) and ANY error (status >= 400) stay at
+            // INFO regardless of method, so the important lines are never hidden.
+            let read_only = method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD");
+            if read_only && status < 400 {
+                kernway_log::debug!(
+                    target: "kernway_server",
+                    "{method} {path} -> {status} ({elapsed}ms)",
+                );
+            } else {
+                kernway_log::info!(
+                    target: "kernway_server",
+                    "{method} {path} -> {status} ({elapsed}ms)",
+                );
+            }
             resp
         })
     }
