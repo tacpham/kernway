@@ -29,8 +29,10 @@ pub mod conn;
 pub mod error;
 pub mod resp;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Mutex;
+use std::thread::{self, ThreadId};
 
 pub use conn::Connection;
 pub use error::RedisError;
@@ -39,18 +41,27 @@ pub use resp::Value;
 /// How many idle connections a pool keeps around between bursts.
 const DEFAULT_MAX_IDLE: usize = 16;
 
-/// A pool of Redis connections behind a `&self`, safe to share across cores.
+/// A pool of Redis connections behind a `&self`, shared across cores as a DI bean.
 ///
 /// A Kernway task is pinned to its core, but a `SessionStore` bean is one instance
 /// shared by every core, so it needs `&self` access to connections. The pool keeps
-/// a stack of idle connections and hands one out per command. The `Mutex` is held
-/// only to pop or push a connection — **never across the `.await`** of the command
-/// itself — so a slow Redis round trip never blocks another core at the lock.
+/// idle connections and hands one out per command. The `Mutex` is held only to pop or
+/// push a connection — **never across the `.await`** of the command itself — so a slow
+/// Redis round trip never blocks another core at the lock.
+///
+/// **Per-shard, not shared across cores.** A socket is registered on the reactor of the
+/// shard (thread) that dialled it; its readiness events are delivered there and nowhere
+/// else. Reusing a pooled connection on a *different* shard would park the waiter on a
+/// reactor that never owns the socket, so the read is never woken (it dies at the request
+/// timeout) — the source of intermittent, shard-dependent hangs. Keying the idle bucket by
+/// the owning [`ThreadId`] keeps each connection on its home shard. (Mirrors the same fix
+/// in `kernway-http-client`.)
 pub struct Pool {
     addr: SocketAddr,
     /// `AUTH` credentials, applied once to each freshly-dialled connection.
     auth: Option<Auth>,
-    idle: Mutex<Vec<Connection>>,
+    /// Idle connections bucketed by the shard (thread) that owns them — never cross-shard.
+    idle: Mutex<HashMap<ThreadId, Vec<Connection>>>,
     max_idle: usize,
 }
 
@@ -67,7 +78,7 @@ impl Pool {
         Self {
             addr,
             auth: None,
-            idle: Mutex::new(Vec::new()),
+            idle: Mutex::new(HashMap::new()),
             max_idle: DEFAULT_MAX_IDLE,
         }
     }
@@ -99,11 +110,16 @@ impl Pool {
         self
     }
 
-    /// Check a connection out — an idle one if there is any, else a fresh dial
-    /// (authenticated if the pool carries credentials). The lock is released
-    /// before any dial or handshake happens.
+    /// Check a connection out — an idle one **owned by the current shard** if there is any,
+    /// else a fresh dial (authenticated if the pool carries credentials). The lock is
+    /// released before any dial or handshake happens.
     pub async fn checkout(&self) -> Result<Connection, RedisError> {
-        let idle = self.idle.lock().unwrap().pop();
+        let idle = self
+            .idle
+            .lock()
+            .unwrap()
+            .get_mut(&thread::current().id())
+            .and_then(|bucket| bucket.pop());
         if let Some(conn) = idle {
             return Ok(conn);
         }
@@ -114,13 +130,14 @@ impl Pool {
         Ok(conn)
     }
 
-    /// Return a healthy connection to the pool (dropped if the pool is full).
-    /// Only call this for a connection whose last command *succeeded* — a
+    /// Return a healthy connection to the pool, tagged to the current shard (dropped if the
+    /// bucket is full). Only call this for a connection whose last command *succeeded* — a
     /// connection that errored may be mid-reply and must be dropped instead.
     pub fn checkin(&self, conn: Connection) {
-        let mut idle = self.idle.lock().unwrap();
-        if idle.len() < self.max_idle {
-            idle.push(conn);
+        let mut map = self.idle.lock().unwrap();
+        let bucket = map.entry(thread::current().id()).or_default();
+        if bucket.len() < self.max_idle {
+            bucket.push(conn);
         }
     }
 

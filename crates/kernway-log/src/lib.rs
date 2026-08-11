@@ -32,6 +32,7 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::io::Write;
 use std::pin::Pin;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context as TaskCx, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -272,6 +273,52 @@ fn current() -> Option<Arc<Context>> {
     CURRENT.with(|current| current.borrow().clone())
 }
 
+/// A `Write` sink that **never blocks the caller**: each write hands the bytes to a
+/// background thread that owns the real sink and does the actual I/O. Wrap any sink with
+/// this so a slow or stalled destination (a full stderr pipe, a slow log-mount, a wedged
+/// disk) can't stall logging.
+///
+/// This matters because [`Logger::emit`] holds the sink `Mutex` across the write: a single
+/// blocking write would otherwise back up every other thread's log call — and since the
+/// server emits an **access log per request**, that stalls the whole request path. With
+/// this wrapper the lock is held only for the microseconds of a channel send.
+///
+/// ```no_run
+/// use kernway_log::{Logger, Filter, Format, Level, NonBlocking};
+/// let logger = Logger::new(Filter::new(Level::Info), Format::Pretty)
+///     .with_sink(NonBlocking::new(std::io::stderr()));
+/// ```
+pub struct NonBlocking {
+    tx: mpsc::Sender<Vec<u8>>,
+}
+
+impl NonBlocking {
+    /// Wrap `sink`, spawning the background writer thread that drains the queue.
+    #[must_use]
+    pub fn new(mut sink: impl Write + Send + 'static) -> Self {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            // Ends when the last `Sender` (this logger) is dropped.
+            while let Ok(buf) = rx.recv() {
+                let _ = sink.write_all(&buf);
+                let _ = sink.flush();
+            }
+        });
+        Self { tx }
+    }
+}
+
+impl Write for NonBlocking {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // Unbounded send → returns immediately; the writer thread does the real I/O.
+        let _ = self.tx.send(buf.to_vec());
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// The logger: a filter, a format, and a sink. Built once and installed with
 /// [`init`], or used directly via [`emit`](Logger::emit).
 pub struct Logger {
@@ -316,9 +363,10 @@ impl Logger {
 }
 
 impl Default for Logger {
-    /// Info level, Pretty, to stderr — sensible until [`init`] is called.
+    /// Info level, Pretty, to stderr — sensible until [`init`] is called. The stderr sink is
+    /// wrapped in [`NonBlocking`] so a stalled pipe can never back up the request path.
     fn default() -> Self {
-        Logger::new(Filter::from_env(), Format::Pretty)
+        Logger::new(Filter::from_env(), Format::Pretty).with_sink(NonBlocking::new(std::io::stderr()))
     }
 }
 
