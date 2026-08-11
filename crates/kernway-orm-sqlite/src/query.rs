@@ -348,6 +348,16 @@ where
         self
     }
 
+    // Existence filters. Sibling backends (memory/mysql) no-op these; SQLite theo cùng
+    // quy ước để trait khớp. TODO: render `col IS [NOT] NULL` qua một Filter variant.
+    fn filter_exists(self: Box<Self>, _field: &'static str) -> Box<dyn QueryBuilder<T>> {
+        self
+    }
+
+    fn filter_not_exists(self: Box<Self>, _field: &'static str) -> Box<dyn QueryBuilder<T>> {
+        self
+    }
+
     fn filter_like(
         mut self: Box<Self>,
         field: &'static str,
