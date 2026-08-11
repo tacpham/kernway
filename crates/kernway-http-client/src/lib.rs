@@ -21,7 +21,8 @@
 
 mod compress;
 mod cookie;
-mod tls;
+// Public: kernway-ws reuses the TLS transport (AsyncTlsStream + default_config) for wss://.
+pub mod tls;
 
 use std::collections::HashMap;
 use std::fmt;

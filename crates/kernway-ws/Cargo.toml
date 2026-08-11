@@ -1,0 +1,10 @@
+[package]
+name        = "kernway-ws"
+description = "Minimal RFC6455 WebSocket client on the Kernway runtime (rt-net + kernway-http-client TLS). Client-only, text frames + ping/pong."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rt-net              = { workspace = true }
+kernway-http-client = { workspace = true }
