@@ -100,7 +100,7 @@ impl AsyncTlsStream {
     }
 
     /// Read plaintext, pulling and decrypting more TLS from the socket as needed. Plaintext
-    /// is served from our own `inbox` (filled by [`pump_from_socket`], which drains `rustls`
+    /// is served from our own `inbox` (filled by `pump_from_socket`, which drains `rustls`
     /// eagerly so its bounded buffer never overflows on a large, fast body).
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
