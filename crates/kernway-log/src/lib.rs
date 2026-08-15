@@ -319,6 +319,84 @@ impl Write for NonBlocking {
     }
 }
 
+/// A size-rotating file sink — self-contained log archiving, no external `logrotate`.
+///
+/// Writes to `path`; when a write would push the live file past `max_bytes`, it rotates first:
+/// the oldest archive (`path.{max_keep}`) is dropped, each `path.{n}` shifts up to `path.{n+1}`,
+/// the live `path` becomes `path.1`, and a fresh empty `path` is opened. So the live file never
+/// exceeds ~`max_bytes` and at most `max_keep` archives are retained.
+///
+/// Rotation is **best-effort**: an I/O error while renaming is swallowed and logging continues to
+/// the current file — a failed rotation must never take the process down over a log line. Wrap in
+/// [`NonBlocking`] so the (rare) rotation I/O never blocks the request path.
+///
+/// ```no_run
+/// use kernway_log::{Logger, Filter, Format, Level, NonBlocking, RotatingFile};
+/// let file = RotatingFile::new("/logs/async-service.log", 10 * 1024 * 1024, 5).unwrap();
+/// let logger = Logger::new(Filter::new(Level::Info), Format::Json)
+///     .with_sink(NonBlocking::new(file));
+/// ```
+pub struct RotatingFile {
+    path: std::path::PathBuf,
+    max_bytes: u64,
+    max_keep: usize,
+    file: std::fs::File,
+    size: u64,
+}
+
+impl RotatingFile {
+    /// Open (creating + appending to) `path`, rotating once it passes `max_bytes` and keeping at
+    /// most `max_keep` numbered archives (`path.1` … `path.{max_keep}`). Both bounds are clamped
+    /// to a minimum of 1. Creates the parent directory if needed.
+    pub fn new(path: impl Into<std::path::PathBuf>, max_bytes: u64, max_keep: usize) -> std::io::Result<Self> {
+        let path = path.into();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+        Ok(Self { path, max_bytes: max_bytes.max(1), max_keep: max_keep.max(1), file, size })
+    }
+
+    /// The archive path for generation `n` (`path.n`).
+    fn archive(&self, n: usize) -> std::path::PathBuf {
+        let mut s = self.path.clone().into_os_string();
+        s.push(format!(".{n}"));
+        std::path::PathBuf::from(s)
+    }
+
+    /// Drop the oldest archive, shift the rest up, move the live file to `.1`, open a fresh one.
+    fn rotate(&mut self) -> std::io::Result<()> {
+        let _ = std::fs::remove_file(self.archive(self.max_keep));
+        for n in (1..self.max_keep).rev() {
+            let from = self.archive(n);
+            if from.exists() {
+                let _ = std::fs::rename(&from, self.archive(n + 1));
+            }
+        }
+        let _ = std::fs::rename(&self.path, self.archive(1));
+        self.file = std::fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
+        self.size = 0;
+        Ok(())
+    }
+}
+
+impl Write for RotatingFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // Rotate before this write would exceed the cap — but never rotate an empty live file
+        // (a single line longer than `max_bytes` would otherwise loop forever creating empties).
+        if self.size > 0 && self.size + buf.len() as u64 > self.max_bytes {
+            let _ = self.rotate(); // best-effort: keep writing to the current file if it failed
+        }
+        let n = self.file.write(buf)?;
+        self.size += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
 /// The logger: a filter, a format, and a sink. Built once and installed with
 /// [`init`], or used directly via [`emit`](Logger::emit).
 pub struct Logger {
@@ -650,6 +728,27 @@ mod tests {
         let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
         assert!(out.contains("app: shown"), "info passes: {out}");
         assert!(!out.contains("hidden"), "debug is filtered: {out}");
+    }
+
+    #[test]
+    fn rotating_file_caps_live_size_and_keeps_archives() {
+        let dir = std::env::temp_dir().join(format!("kw_rot_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.log");
+        // Rotate at 100 bytes, keep 2 archives.
+        let mut rf = RotatingFile::new(&path, 100, 2).unwrap();
+        // 8 writes of 30 bytes = 240 bytes total → several rotations.
+        for _ in 0..8 {
+            rf.write_all(&[b'x'; 30]).unwrap();
+        }
+        rf.flush().unwrap();
+        // Live file holds at most `max_bytes` (well under the 240 total written).
+        assert!(std::fs::metadata(&path).unwrap().len() <= 100);
+        // At most `max_keep` archives exist; the (max_keep+1)-th never does.
+        assert!(path.with_extension("log.1").exists() || dir.join("app.log.1").exists());
+        assert!(!dir.join("app.log.3").exists(), "only max_keep=2 archives kept");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
