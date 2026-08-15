@@ -85,7 +85,46 @@ impl Middleware for RequestIdMiddleware {
 }
 
 /// Built-in: logs method, path, status, duration.
-pub struct LoggingMiddleware;
+///
+/// High-frequency probe/beacon endpoints (container health checks, presence pings, play beacons)
+/// are pure access-log noise — they can outnumber real traffic 100:1 and bloat the log. Paths in
+/// the `quiet` set have their **successful** access line demoted to DEBUG (so it's hidden at the
+/// usual INFO level) regardless of method; errors (status ≥ 400) on them still log at INFO so a
+/// broken health check is never silent. `/health` is quieted by default; apps add their own
+/// (e.g. `/api/v1/session`, `/play`) via [`LoggingMiddleware::quiet`].
+pub struct LoggingMiddleware {
+    quiet: Vec<String>,
+}
+
+impl Default for LoggingMiddleware {
+    fn default() -> Self {
+        Self { quiet: vec!["/health".to_string()] }
+    }
+}
+
+impl LoggingMiddleware {
+    /// A logger with the default quiet paths (`/health`).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add paths whose successful access line is demoted to DEBUG (exact match) — presence pings,
+    /// beacons, and other high-frequency endpoints that would otherwise drown the log.
+    #[must_use]
+    pub fn quiet<I, S>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.quiet.extend(paths.into_iter().map(Into::into));
+        self
+    }
+
+    fn is_quiet(&self, path: &str) -> bool {
+        self.quiet.iter().any(|p| p == path)
+    }
+}
 
 impl Middleware for LoggingMiddleware {
     fn name(&self) -> &'static str {
@@ -111,10 +150,12 @@ impl Middleware for LoggingMiddleware {
             //
             // Successful read-only requests (GET/HEAD, status < 400) are high-frequency noise —
             // health/presence polling (`/online`), page loads — that drown the access log, so they
-            // go to DEBUG. Mutations (POST/PUT/PATCH/DELETE) and ANY error (status >= 400) stay at
-            // INFO regardless of method, so the important lines are never hidden.
+            // go to DEBUG. So do successful hits on an app-declared `quiet` path (e.g. POST
+            // `/api/v1/session` heartbeats, `/play` beacons), regardless of method. Mutations to
+            // non-quiet paths and ANY error (status >= 400) stay at INFO, so nothing important hides.
             let read_only = method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD");
-            if read_only && status < 400 {
+            let low_value = read_only || self.is_quiet(&path);
+            if low_value && status < 400 {
                 kernway_log::debug!(
                     target: "kernway_server",
                     "{method} {path} -> {status} ({elapsed}ms)",
@@ -181,7 +222,7 @@ mod tests {
 
     #[test]
     fn logging_middleware_passes_through() {
-        let middleware = LoggingMiddleware;
+        let middleware = LoggingMiddleware::new();
         let app = AppContext::new();
         let scope = RequestScope::new(&app);
 
