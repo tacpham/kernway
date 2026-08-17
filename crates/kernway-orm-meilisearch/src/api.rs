@@ -365,6 +365,34 @@ pub async fn set_filterable_attributes(
     wait_for_task(base_url, api_key, task.task_uid).await
 }
 
+/// Set the **searchable** attributes for an index — the fields a full-text query matches, in
+/// priority order (earlier fields rank higher via the `attribute` ranking rule). Restricting
+/// this to meaningful fields keeps opaque identifiers out of relevance: e.g. leaving a numeric
+/// `audioBookId` searchable makes a query like `1984` match hundreds of ids that merely *start*
+/// with those digits and bury the book actually titled "1984".
+///
+/// Triggers an index rebuild — waits for the task.
+pub async fn set_searchable_attributes(
+    base_url: &str,
+    api_key: &str,
+    index: &str,
+    fields: &[&str],
+) -> Result<(), OrmError> {
+    let url = format!("{}/indexes/{}/settings/searchable-attributes", base_url, index);
+    let json = serde_json::to_vec(fields).map_err(|e| OrmError::TypeConversion(e.to_string()))?;
+    let resp = client()
+        .send(
+            Request::new(Method::Put, Url::parse(&url).map_err(map_http)?)
+                .header("Authorization", bearer(api_key))
+                .body("application/json", json),
+        )
+        .await
+        .map_err(map_http)?;
+    let task: TaskEnqueued =
+        serde_json::from_slice(&resp.body).map_err(|e| OrmError::TypeConversion(e.to_string()))?;
+    wait_for_task(base_url, api_key, task.task_uid).await
+}
+
 /// Set the sortable attributes for an index.
 ///
 /// Fields listed here can be used in `order_by` / `order_by_desc`.
