@@ -4,7 +4,7 @@ use crate::{entity::Entity, error::OrmError, page::Page, spec::Spec, BoxFuture};
 /// Equivalent to CriteriaBuilder + TypedQuery in JPA.
 ///
 /// Chaining methods stay synchronous; terminal methods return boxed futures.
-pub trait QueryBuilder<T: Entity>: Send {
+pub trait QueryBuilder<T: Entity> {
     // --- Filters ---
     // Every fluent filter narrows the result; they combine with AND. For OR and
     // nested boolean logic, use [`filter_spec`](Self::filter_spec) with a

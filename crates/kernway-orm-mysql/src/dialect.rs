@@ -37,4 +37,8 @@ impl SqlDialect for MySqlDialect {
             ColumnType::Json => "JSON",
         }
     }
+
+    fn lock_for_update_suffix(&self) -> &'static str {
+        "FOR UPDATE"
+    }
 }

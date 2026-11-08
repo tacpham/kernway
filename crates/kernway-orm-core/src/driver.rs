@@ -56,7 +56,7 @@ pub struct DriverCapabilities {
 /// `Driver` is not object-safe by default. Use it as a concrete type or
 /// wrap it behind an application-specific factory when dynamic dispatch
 /// is needed.
-pub trait Driver: Send + Sync + 'static {
+pub trait Driver: 'static {
     /// Create a repository for the given entity type.
     ///
     /// For SQL backends this usually opens (or reuses) a connection, ensures

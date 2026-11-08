@@ -83,7 +83,16 @@ use std::pin::Pin;
 
 /// Async future alias used by all ORM traits.
 /// `'a` is the lifetime of the borrowed receiver.
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+///
+/// **Not `Send`** — by design. Kernway is a thread-per-core runtime: tasks are
+/// never stolen or migrated between shards, so a repository future is always
+/// polled on the shard that created it and never needs to cross a thread. That
+/// means a backend may be driven natively on the per-core reactor (`rt-net`,
+/// whose futures are `!Send`, like `kernway-redis`) *or* on the blocking pool
+/// (`spawn_blocking`, like `kernway-orm-sqlite`) — both satisfy this alias.
+/// Requiring `Send` would rule the native-async path out for no benefit on a
+/// runtime that has no work-stealing.
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 /// SQL syntax adapters shared by relational backends.
 pub mod dialect;
@@ -100,6 +109,8 @@ pub mod query;
 /// The CRUD contract a backend implements per entity type.
 pub mod repository;
 pub mod spec;
+/// Atomic units of work with row-level locking (optional backend capability).
+pub mod transaction;
 
 pub use dialect::SqlDialect;
 pub use driver::{Driver, DriverCapabilities};
@@ -109,3 +120,4 @@ pub use page::Page;
 pub use spec::Spec;
 pub use query::QueryBuilder;
 pub use repository::Repository;
+pub use transaction::{Transaction, TransactionalDriver, TxRepository};

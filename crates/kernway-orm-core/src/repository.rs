@@ -22,7 +22,7 @@ use crate::{entity::Entity, error::OrmError, query::QueryBuilder, BoxFuture};
 /// cheaper path (a batch endpoint, an exact count, …). This is the ORM's
 /// capability model: the spec gives correct-but-generic behaviour; each backend
 /// upgrades what it does well and leaves the rest to the default.
-pub trait Repository<T: Entity>: Send + Sync {
+pub trait Repository<T: Entity> {
     // --- Primitives (a driver must implement these) ---
 
     /// Find by primary key. Returns `None` if not found.
