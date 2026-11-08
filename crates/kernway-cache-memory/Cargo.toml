@@ -8,6 +8,10 @@ license.workspace = true
 [dependencies]
 kernway-cache-core = { path = "../kernway-cache-core" }
 
+[dev-dependencies]
+# Drives the async-cache tests on a real executor.
+rt-core = { path = "../rt-core" }
+
 [lints]
 workspace = true
 
