@@ -7,6 +7,11 @@ license.workspace = true
 
 [dependencies]
 kernway-core = { workspace = true }
+# For the pub/sub → SSE bridge (a live SSE fed by a message-bus subscription).
+kernway-cache-core = { path = "../kernway-cache-core" }
+
+[dev-dependencies]
+rt-core = { path = "../rt-core" }
 
 [lints]
 workspace = true

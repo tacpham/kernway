@@ -118,7 +118,7 @@ fn main() {
         .bind("0.0.0.0:8080")
         .context(ctx)
         .layer(RequestIdMiddleware)
-        .layer(LoggingMiddleware)
+        .layer(LoggingMiddleware::new())
         .get("/users/{id}", |req: Request, ctx: &RequestScope| {
             let svc = ctx.get::<UserService>().unwrap();
             async move {

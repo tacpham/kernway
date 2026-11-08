@@ -25,7 +25,7 @@ use kernway_core::{
     response::{Body, Response},
 };
 use kernway_http::{
-    encode_head, encode_response, encode_response_with, parse_head, Connection, ParsedHead,
+    encode_head, encode_head_chunked, encode_response, parse_head, Connection, ParsedHead,
 };
 use kernway_static::{mime_for, StaticFiles};
 use rt_core::Shutdown;
@@ -635,8 +635,10 @@ async fn serve_connection(
     upload: Arc<UploadConfig>,
     shutdown: Shutdown,
 ) {
-    let mut buf: Vec<u8> = Vec::with_capacity(READ_CHUNK);
-    let mut chunk = vec![0u8; READ_CHUNK];
+    // Read buffers come from the shard's free-list and return to it on drop, so
+    // connection churn reuses allocations instead of a fresh pair per connection.
+    let mut buf = crate::bufpool::PooledBuf::cleared(READ_CHUNK);
+    let mut chunk = crate::bufpool::PooledBuf::filled(READ_CHUNK);
     let mut served: u32 = 0;
     // The peer address is per-connection; stamp it on each request so the app can
     // resolve the real client (directly, or via forwarded headers behind a proxy).
@@ -938,20 +940,45 @@ async fn write_response(
             return stream_file(stream, path.clone(), *range, *len, file_chunk).await;
         }
         Body::Empty | Body::Bytes(_) => {
-            return stream
-                .write_all(&encode_response_with(response, connection))
-                .await;
+            // Head and body go out in one `writev` — the body is sent straight from
+            // the response, never copied into a coalesced buffer (a big saving for
+            // large in-memory bodies), yet still one syscall so keep-alive responses
+            // aren't split for Nagle to stall.
+            let head = encode_head(response, connection, response.body.len());
+            return stream.write_head_body(&head, response.body_bytes()).await;
         }
-        Body::Stream { .. } => {} // handled below with a fresh &mut borrow of the source
+        Body::Stream { .. } | Body::Chunked { .. } => {} // handled below with a fresh &mut borrow
     }
-    // A streamed body: write the head (framed by the known length), then pull
-    // chunks off the source and write them — nothing held whole in memory.
-    let head = encode_head(response, connection, response.body.len());
+    // A streamed body, pulled chunk by chunk — nothing held whole in memory.
+    // Compute the head first (immutable borrow of `response`), then take the
+    // source by `&mut` for the pull loop.
+    let chunked = matches!(response.body, Body::Chunked { .. });
+    let head = if chunked {
+        encode_head_chunked(response, connection)
+    } else {
+        encode_head(response, connection, response.body.len())
+    };
     stream.write_all(&head).await?;
-    if let Body::Stream { source, .. } = &mut response.body {
-        while let Some(chunk) = source.next().await? {
-            stream.write_all(&chunk).await?;
+    match &mut response.body {
+        // Known length: chunks written raw (Content-Length is already on the wire).
+        Body::Stream { source, .. } => {
+            while let Some(chunk) = source.next().await? {
+                stream.write_all(&chunk).await?;
+            }
         }
+        // Open-ended: each chunk framed `<hex-len>\r\n<data>\r\n`, closed by `0\r\n\r\n`.
+        Body::Chunked { source } => {
+            while let Some(chunk) = source.next().await? {
+                if chunk.is_empty() {
+                    continue; // a zero-length chunk would terminate the body early
+                }
+                stream.write_all(format!("{:x}\r\n", chunk.len()).as_bytes()).await?;
+                stream.write_all(&chunk).await?;
+                stream.write_all(b"\r\n").await?;
+            }
+            stream.write_all(b"0\r\n\r\n").await?;
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -2033,7 +2060,50 @@ mod keep_alive_tests {
             "/n",
             sync_handler(|_req, _ctx| Response::new(StatusCode::OK).body(b"ok".to_vec())),
         );
+        router.add(
+            "GET",
+            "/chunked",
+            sync_handler(|_req, _ctx| {
+                Response::new(StatusCode::OK)
+                    .chunked(Box::new(VecChunks(vec![b"AB".to_vec(), b"CDE".to_vec()])))
+            }),
+        );
         router
+    }
+
+    /// A BodyStream that drains a fixed list of chunks, for the chunked test.
+    struct VecChunks(Vec<Vec<u8>>);
+    impl kernway_core::response::BodyStream for VecChunks {
+        fn next(&mut self) -> kernway_core::layer::BoxFuture<'_, std::io::Result<Option<Vec<u8>>>> {
+            Box::pin(async move {
+                Ok(if self.0.is_empty() {
+                    None
+                } else {
+                    Some(self.0.remove(0))
+                })
+            })
+        }
+    }
+
+    #[test]
+    fn chunked_body_is_transfer_encoded_on_the_wire() {
+        use std::io::{Read, Write};
+        let got = with_server(
+            KeepAliveConfig { enabled: false, ..Default::default() },
+            |mut sock| {
+                sock.write_all(b"GET /chunked HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+                let mut s = String::new();
+                sock.read_to_string(&mut s).unwrap();
+                s
+            },
+        );
+        let lower = got.to_lowercase();
+        assert!(lower.contains("transfer-encoding: chunked"), "{got:?}");
+        assert!(!lower.contains("content-length"), "{got:?}");
+        // Each chunk framed `<hex-len>\r\n<data>\r\n`, terminated by `0\r\n\r\n`.
+        assert!(got.contains("2\r\nAB\r\n"), "{got:?}");
+        assert!(got.contains("3\r\nCDE\r\n"), "{got:?}");
+        assert!(got.ends_with("0\r\n\r\n"), "{got:?}");
     }
 
     /// Serve one connection with `keep_alive`, driving it from a client closure.

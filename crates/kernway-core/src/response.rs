@@ -9,7 +9,11 @@ use std::path::PathBuf;
 /// memory or on disk (a proxied upstream, a live feed). [`next`](BodyStream::next)
 /// yields the next chunk, `Ok(None)` at the end; an `Err` ends the stream. The
 /// connection task pulls chunks and writes them, so memory stays O(chunk).
-pub trait BodyStream: Send {
+///
+/// **Not `Send`** — the stream is created and polled on one shard (the
+/// connection's), so it may hold a `!Send` resource such as a per-core Redis
+/// subscription feeding a live SSE response.
+pub trait BodyStream {
     /// The next body chunk, or `None` when the stream is exhausted.
     fn next(&mut self) -> BoxFuture<'_, std::io::Result<Option<Vec<u8>>>>;
 }
@@ -47,6 +51,15 @@ pub enum Body {
         /// The async chunk source.
         source: Box<dyn BodyStream>,
     },
+    /// An **open-ended** streamed body of unknown length, framed with
+    /// `Transfer-Encoding: chunked` (RFC 9112 §7.1) — for a live feed like
+    /// Server-Sent Events, where the server keeps pushing until the client
+    /// disconnects. Keep-alive is preserved: the terminating `0\r\n\r\n` closes
+    /// the body, not the connection.
+    Chunked {
+        /// The async chunk source; each `next()` is one chunk, `None` ends it.
+        source: Box<dyn BodyStream>,
+    },
 }
 
 impl std::fmt::Debug for Body {
@@ -61,6 +74,7 @@ impl std::fmt::Debug for Body {
                 .field("range", range)
                 .finish(),
             Body::Stream { len, .. } => write!(f, "Stream({len} bytes)"),
+            Body::Chunked { .. } => f.write_str("Chunked(open-ended)"),
         }
     }
 }
@@ -76,6 +90,8 @@ impl Body {
             Body::Bytes(b) => b.len() as u64,
             Body::File { len, range, .. } => range.map_or(*len, |(s, e)| e - s),
             Body::Stream { len, .. } => *len,
+            // Open-ended: length is unknown; it is framed chunked, not by length.
+            Body::Chunked { .. } => 0,
         }
     }
 
@@ -135,7 +151,7 @@ impl Response {
     pub fn body_bytes(&self) -> &[u8] {
         match &self.body {
             Body::Bytes(b) => b,
-            Body::Empty | Body::File { .. } | Body::Stream { .. } => &[],
+            Body::Empty | Body::File { .. } | Body::Stream { .. } | Body::Chunked { .. } => &[],
         }
     }
 
@@ -143,6 +159,15 @@ impl Response {
     /// The connection task pulls chunks and writes them; nothing is buffered whole.
     pub fn stream(mut self, len: u64, source: Box<dyn BodyStream>) -> Self {
         self.body = Body::Stream { len, source };
+        self
+    }
+
+    /// Set the body to an **open-ended** chunked stream of unknown length — a live
+    /// feed (e.g. Server-Sent Events). Framed with `Transfer-Encoding: chunked`,
+    /// so keep-alive survives; the connection task pulls chunks until the source
+    /// ends or the client disconnects.
+    pub fn chunked(mut self, source: Box<dyn BodyStream>) -> Self {
+        self.body = Body::Chunked { source };
         self
     }
 
@@ -157,7 +182,7 @@ impl Response {
 ///
 /// Equivalent to `HttpMessageConverter` in Spring.
 /// `Json<T>`, `Html<T>`, `StatusCode`, and `(StatusCode, Json<T>)` all implement this trait.
-pub trait IntoResponse: Send {
+pub trait IntoResponse {
     /// Convert self into a [`Response`].
     fn into_response(self) -> Response;
 }

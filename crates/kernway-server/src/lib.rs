@@ -39,6 +39,8 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+/// Per-shard free-list of connection I/O buffers (internal).
+mod bufpool;
 /// JWT bearer authentication middleware (`BearerAuth`, feature = `jwt`).
 #[cfg(feature = "jwt")]
 pub mod auth;
