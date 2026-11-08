@@ -25,8 +25,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod cache;
 pub mod conn;
 pub mod error;
+pub mod pubsub;
 pub mod resp;
 
 use std::collections::HashMap;
@@ -34,8 +36,10 @@ use std::net::SocketAddr;
 use std::sync::Mutex;
 use std::thread::{self, ThreadId};
 
+pub use cache::RedisCache;
 pub use conn::Connection;
 pub use error::RedisError;
+pub use pubsub::{RedisConfig, RedisPubSub};
 pub use resp::Value;
 
 /// How many idle connections a pool keeps around between bursts.

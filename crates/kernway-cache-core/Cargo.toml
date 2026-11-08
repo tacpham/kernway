@@ -8,6 +8,11 @@ license.workspace = true
 [dependencies]
 thiserror = { workspace = true }
 
+[dev-dependencies]
+# Only to drive async single-flight tests on a real executor; the crate itself
+# stays runtime-agnostic.
+rt-core = { path = "../rt-core" }
+
 [lints]
 workspace = true
 

@@ -11,15 +11,20 @@ pub struct CacheEntry<V> {
     pub created_at: Instant,
     /// How long the entry stays valid.
     pub ttl: Ttl,
+    /// When the entry was last read or written. Drives LRU eviction — `created_at`
+    /// can't, since it must stay fixed for TTL while recency updates on every hit.
+    pub last_access: Instant,
 }
 
 impl<V> CacheEntry<V> {
     /// Wrap a value, stamping it with the current time.
     pub fn new(value: V, ttl: Ttl) -> Self {
+        let now = Instant::now();
         Self {
             value,
-            created_at: Instant::now(),
+            created_at: now,
             ttl,
+            last_access: now,
         }
     }
 
@@ -29,6 +34,12 @@ impl<V> CacheEntry<V> {
             None => false,
             Some(duration) => self.created_at.elapsed() >= duration,
         }
+    }
+
+    /// Record an access now, for LRU recency. Leaves `created_at`/`ttl` untouched,
+    /// so a read never extends an entry's lifetime.
+    pub fn touch(&mut self) {
+        self.last_access = Instant::now();
     }
 }
 

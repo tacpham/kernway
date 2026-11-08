@@ -77,12 +77,21 @@
 pub mod cache;
 /// The error type shared by every backend.
 pub mod error;
+/// Per-key coalescing of concurrent loads (cache-stampede protection).
+pub mod singleflight;
 /// Hit/miss accounting.
 pub mod stats;
 /// Entry lifetimes.
 pub mod ttl;
+/// Publish/subscribe message-bus abstraction.
+pub mod pubsub;
+/// The async-top cache contract (unifies sync + async backends).
+pub mod async_cache;
 
+pub use async_cache::AsyncCache;
 pub use cache::{Cache, CacheEntry, CacheManager};
 pub use error::CacheError;
+pub use pubsub::{Message, PubSub, Publisher, Subscriber, Subscription};
+pub use singleflight::{AsyncSingleFlight, SingleFlight};
 pub use stats::CacheStats;
 pub use ttl::Ttl;
