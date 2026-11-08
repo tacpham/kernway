@@ -55,6 +55,18 @@ pub trait SqlDialect: Send + Sync + 'static {
     /// Map a [`ColumnType`] to the SQL type keyword for this dialect.
     fn col_type_ddl(&self, col_type: &ColumnType) -> &'static str;
 
+    /// Clause appended to a `SELECT` to take a pessimistic row lock, or `""`
+    /// when the backend has none.
+    ///
+    /// PostgreSQL and MySQL/InnoDB return `"FOR UPDATE"`; SQLite (one writer,
+    /// serialised) returns `""`. The transaction layer appends this to lock the
+    /// rows a read-modify-write is about to change — see
+    /// [`TxRepository::find_by_id_for_update`](crate::transaction::TxRepository::find_by_id_for_update).
+    /// Default is `""`, so a dialect that omits it simply performs a plain read.
+    fn lock_for_update_suffix(&self) -> &'static str {
+        ""
+    }
+
     /// Build a `CREATE TABLE IF NOT EXISTS` statement.
     ///
     /// Default implementation uses [`Self::quote_identifier`],

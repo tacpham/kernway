@@ -23,11 +23,11 @@ pub struct Todo {
 }
 
 pub struct TodoRepository {
-    inner: Arc<dyn Repository<Todo>>,
+    inner: Arc<dyn Repository<Todo> + Send + Sync>,
 }
 
 impl TodoRepository {
-    pub fn new(inner: Arc<dyn Repository<Todo>>) -> Self {
+    pub fn new(inner: Arc<dyn Repository<Todo> + Send + Sync>) -> Self {
         Self { inner }
     }
 
@@ -104,10 +104,10 @@ fn main() {
     let db_info_path = db_path.clone();
 
     // --- BEFORE (InMemoryRepository) ---
-    // let repo: Arc<dyn Repository<Todo>> = Arc::new(InMemoryRepository::new());
+    // let repo: Arc<dyn Repository<Todo> + Send + Sync> = Arc::new(InMemoryRepository::new());
     //
     // --- AFTER (SqliteRepository) — zero service changes ---
-    let repo: Arc<dyn Repository<Todo>> =
+    let repo: Arc<dyn Repository<Todo> + Send + Sync> =
         Arc::new(SqliteRepository::<Todo>::open(&db_path).unwrap());
 
     let mut ctx = AppContext::new();
@@ -122,7 +122,7 @@ fn main() {
     KernwayApp::builder()
         .bind("0.0.0.0:8080")
         .context(ctx)
-        .layer(LoggingMiddleware)
+        .layer(LoggingMiddleware::new())
         .get("/todos", |_req: Request, ctx: &RequestScope| {
             let svc = ctx.get::<TodoService>().unwrap();
             async move { Json(svc.list()).into_response() }

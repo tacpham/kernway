@@ -48,7 +48,11 @@ pub trait IntoHandler<Marker>: Send + Sync + 'static {
 impl<F, Fut> IntoHandler<()> for F
 where
     F: Fn(Request, &RequestScope) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Response> + Send + 'static,
+    // The handler function is shared across shards (Send + Sync), but the future
+    // it returns is polled on one shard only — it need not be Send. Dropping that
+    // bound lets a handler hold a native per-core (`!Send`) DB/redis connection
+    // across an await.
+    Fut: Future<Output = Response> + 'static,
 {
     fn into_handler(self) -> Handler {
         Arc::new(move |req: Request, scope: &RequestScope| {

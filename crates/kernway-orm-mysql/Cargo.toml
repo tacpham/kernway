@@ -1,6 +1,6 @@
 [package]
 name = "kernway-orm-mysql"
-description = "MySQL backend for kernway-orm-core (backed by mysql_async)"
+description = "MySQL backend for kernway-orm-core — a self-written wire-protocol driver (no external client, no tokio)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,15 +10,23 @@ kernway-orm-core = { workspace = true }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
 thiserror        = { workspace = true }
-mysql_async      = { version = "0.33", optional = true }
+
+# Driver implementation (behind the `mysql` feature). Pure std::net wire
+# protocol — the only outside help is SHA-1 for mysql_native_password auth, and
+# rt-core's blocking pool so the sync socket work satisfies orm-core's Send futures.
+sha1    = { version = "0.10", optional = true }
+rt-core = { path = "../rt-core", optional = true }
+rt-net  = { path = "../rt-net", optional = true }
 
 [features]
 default = []
-mysql = ["mysql_async"]
+# Enable to compile the actual MySQL driver. Without it the crate still exports
+# `MySqlDialect` for shared SQL generation.
+mysql = ["sha1", "rt-core", "rt-net"]
 
 [dev-dependencies]
 kernway-orm-macro = { workspace = true }
-rt-core           = { workspace = true }
+rt-core           = { path = "../rt-core" }
 
 [lints]
 workspace = true

@@ -225,7 +225,7 @@ thread_local! {
 /// top of the chain, and the whole request's logs correlate.
 pub fn scope<'a, T>(
     context: Context,
-    future: Pin<Box<dyn Future<Output = T> + Send + 'a>>,
+    future: Pin<Box<dyn Future<Output = T> + 'a>>,
 ) -> Scoped<'a, T> {
     Scoped {
         context: Arc::new(context),
@@ -237,7 +237,7 @@ pub fn scope<'a, T>(
 /// of the wrapped future and restores the prior value after (so scopes nest).
 pub struct Scoped<'a, T> {
     context: Arc<Context>,
-    future: Pin<Box<dyn Future<Output = T> + Send + 'a>>,
+    future: Pin<Box<dyn Future<Output = T> + 'a>>,
 }
 
 impl<T> Future for Scoped<'_, T> {
