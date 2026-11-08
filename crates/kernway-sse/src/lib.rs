@@ -137,6 +137,82 @@ impl IntoResponse for SseStream {
     }
 }
 
+// --- Live (open-ended) SSE ---------------------------------------------------
+
+use kernway_cache_core::pubsub::Subscription;
+use kernway_core::layer::BoxFuture;
+use kernway_core::response::BodyStream;
+
+/// An async source of SSE events for a live stream: `next` yields the next event,
+/// or `None` to end the stream.
+pub trait SseSource {
+    /// The next event to push, or `None` when the stream is finished.
+    fn next(&mut self) -> BoxFuture<'_, Option<SseEvent>>;
+}
+
+/// A live, **open-ended** SSE response: events are pulled from an [`SseSource`]
+/// and written as they arrive over a chunked body, until the source ends or the
+/// client disconnects. Pair it with a message-bus subscription
+/// ([`LiveSse::from_subscription`]) for cross-node real-time fan-out — a POS
+/// kiosk check-in on one node reaching a front-desk screen on another.
+///
+/// ```rust,ignore
+/// .get("/location/42/events", |_req, scope| async move {
+///     let sub = bus.subscribe(&["pos:location:42"]).await?;
+///     LiveSse::from_subscription(sub).into_response()
+/// })
+/// ```
+pub struct LiveSse {
+    source: Box<dyn SseSource>,
+}
+
+impl LiveSse {
+    /// Build a live SSE stream from any event source.
+    pub fn new(source: Box<dyn SseSource>) -> Self {
+        Self { source }
+    }
+
+    /// Build a live SSE stream from a pub/sub [`Subscription`]: each message
+    /// becomes a `data:` event carrying its payload.
+    pub fn from_subscription(subscription: Box<dyn Subscription>) -> Self {
+        Self::new(Box::new(SubscriptionSource { subscription }))
+    }
+}
+
+impl BodyStream for LiveSse {
+    fn next(&mut self) -> BoxFuture<'_, std::io::Result<Option<Vec<u8>>>> {
+        Box::pin(async move { Ok(self.source.next().await.map(|ev| ev.to_wire().into_bytes())) })
+    }
+}
+
+impl IntoResponse for LiveSse {
+    fn into_response(self) -> Response {
+        let mut resp =
+            Response::new(StatusCode::OK).content_type("text/event-stream; charset=utf-8");
+        // Prevent proxy/browser buffering so events arrive promptly.
+        resp.headers.insert("cache-control", "no-cache");
+        resp.chunked(Box::new(self))
+    }
+}
+
+/// Adapts a pub/sub [`Subscription`] into an [`SseSource`]: each received message
+/// is emitted as a `data:` event (payload decoded lossily as UTF-8). A receive
+/// error ends the stream.
+struct SubscriptionSource {
+    subscription: Box<dyn Subscription>,
+}
+
+impl SseSource for SubscriptionSource {
+    fn next(&mut self) -> BoxFuture<'_, Option<SseEvent>> {
+        Box::pin(async move {
+            match self.subscription.recv().await {
+                Ok(msg) => Some(SseEvent::data(String::from_utf8_lossy(&msg.payload).into_owned())),
+                Err(_) => None,
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,5 +281,81 @@ mod tests {
         assert!(wire.contains("event: heartbeat\n"));
         assert!(wire.contains("data: {}\n"));
         assert!(!wire.contains("id:"));
+    }
+
+    // --- live SSE ---
+
+    use kernway_cache_core::pubsub::{Message, Subscription};
+    use kernway_cache_core::CacheError;
+    use kernway_core::response::{Body, BodyStream};
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        rt_core::Executor::new().unwrap().block_on(f).unwrap()
+    }
+
+    /// Event source that drains a fixed list, then ends.
+    struct VecSource(Vec<SseEvent>);
+    impl SseSource for VecSource {
+        fn next(&mut self) -> BoxFuture<'_, Option<SseEvent>> {
+            Box::pin(async move {
+                if self.0.is_empty() {
+                    None
+                } else {
+                    Some(self.0.remove(0))
+                }
+            })
+        }
+    }
+
+    /// Subscription that yields canned payloads, then errors (stream end).
+    struct MockSub {
+        msgs: Vec<Vec<u8>>,
+    }
+    impl Subscription for MockSub {
+        fn recv(&mut self) -> BoxFuture<'_, Result<Message, CacheError>> {
+            Box::pin(async move {
+                if self.msgs.is_empty() {
+                    Err(CacheError::Connection("end".into()))
+                } else {
+                    Ok(Message { channel: "c".into(), payload: self.msgs.remove(0) })
+                }
+            })
+        }
+    }
+
+    #[test]
+    fn live_sse_yields_wire_events_then_ends() {
+        let mut live = LiveSse::new(Box::new(VecSource(vec![
+            SseEvent::data("hello"),
+            SseEvent::named("turn", "x"),
+        ])));
+        block_on(async {
+            assert_eq!(live.next().await.unwrap(), Some(b"data: hello\n\n".to_vec()));
+            let c2 = live.next().await.unwrap().unwrap();
+            assert_eq!(String::from_utf8(c2).unwrap(), "event: turn\ndata: x\n\n");
+            assert_eq!(live.next().await.unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn subscription_becomes_data_events() {
+        let mut live = LiveSse::from_subscription(Box::new(MockSub {
+            msgs: vec![b"checkin:Jen".to_vec()],
+        }));
+        block_on(async {
+            let c = live.next().await.unwrap().unwrap();
+            assert_eq!(String::from_utf8(c).unwrap(), "data: checkin:Jen\n\n");
+            // next recv errors → stream ends
+            assert_eq!(live.next().await.unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn live_sse_into_response_is_chunked_event_stream() {
+        let resp = LiveSse::new(Box::new(VecSource(vec![]))).into_response();
+        assert_eq!(resp.status.0, 200);
+        assert!(resp.headers.get("content-type").unwrap().contains("text/event-stream"));
+        assert!(resp.headers.get("cache-control").unwrap().contains("no-cache"));
+        assert!(matches!(resp.body, Body::Chunked { .. }));
     }
 }

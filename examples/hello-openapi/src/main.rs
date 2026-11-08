@@ -148,7 +148,7 @@ fn main() {
         .bind("0.0.0.0:8080")
         .context(ctx)
         .layer(RequestIdMiddleware)
-        .layer(LoggingMiddleware)
+        .layer(LoggingMiddleware::new())
         .get("/openapi.json", {
             let json = Arc::clone(&openapi_json);
             move |_req: Request, _ctx: &RequestScope| {

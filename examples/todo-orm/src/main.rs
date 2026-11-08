@@ -107,7 +107,7 @@ fn main() {
         .bind("0.0.0.0:8080")
         .context(ctx)
         .layer(RequestIdMiddleware)
-        .layer(LoggingMiddleware)
+        .layer(LoggingMiddleware::new())
         .get("/todos", |_req: Request, ctx: &RequestScope| {
             let svc = ctx.get::<TodoService>().unwrap();
             async move { Json(svc.list()).into_response() }

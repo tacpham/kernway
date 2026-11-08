@@ -148,6 +148,44 @@ impl AsyncTcpStream {
         Ok(())
     }
 
+    /// Write a response head and body together in one vectored write (`writev`).
+    ///
+    /// `head` is a small owned buffer; `body` is borrowed straight from the response
+    /// — so, unlike coalescing into one buffer, the body is never copied. Handing the
+    /// kernel head+body as a single `writev` still keeps them in one syscall, so a
+    /// keep-alive response is not split for Nagle to stall (and `nodelay` is set
+    /// anyway). Partial writes advance across the two slices; a 0-return is a closed
+    /// peer. For an empty body this degenerates to writing just the head.
+    pub async fn write_head_body(&mut self, head: &[u8], body: &[u8]) -> io::Result<()> {
+        let total = head.len() + body.len();
+        let mut written = 0usize;
+        while written < total {
+            // Rebuild the remaining slices each round: once the head is fully sent,
+            // the first slice is empty and only the body tail remains.
+            let (h, b): (&[u8], &[u8]) = if written < head.len() {
+                (&head[written..], body)
+            } else {
+                (&[], &body[written - head.len()..])
+            };
+            let res = self
+                .inner
+                .write_vectored(&[io::IoSlice::new(h), io::IoSlice::new(b)]);
+            match res {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "connection accepted no more bytes",
+                    ))
+                }
+                Ok(n) => written += n,
+                Err(e) if would_block(&e) => self.park(Direction::Write).await?,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
     /// Flush the socket. A no-op for TCP (the kernel owns the send buffer), kept
     /// so callers can write runtime-agnostic code.
     pub async fn flush(&mut self) -> io::Result<()> {

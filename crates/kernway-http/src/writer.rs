@@ -55,6 +55,38 @@ pub fn encode_head(response: &Response, connection: Connection, content_length: 
     out
 }
 
+/// Encode the head for an **open-ended chunked** response — emits
+/// `Transfer-Encoding: chunked` (RFC 9112 §7.1) instead of `Content-Length`, for
+/// a live body of unknown length (Server-Sent Events). Keep-alive is preserved;
+/// the body is delimited by the terminating `0\r\n\r\n`, not by closing the
+/// connection.
+pub fn encode_head_chunked(response: &Response, connection: Connection) -> Vec<u8> {
+    let mut out = Vec::with_capacity(head_estimate(response));
+    out.extend_from_slice(b"HTTP/1.1 ");
+    out.extend_from_slice(itoa(u64::from(response.status.0)).as_bytes());
+    out.push(b' ');
+    out.extend_from_slice(status_text(response.status.0).as_bytes());
+    out.extend_from_slice(b"\r\n");
+
+    for (name, value) in response.headers.iter() {
+        // The transport owns connection / content-length / transfer-encoding.
+        if name.eq_ignore_ascii_case("connection")
+            || name.eq_ignore_ascii_case("content-length")
+            || name.eq_ignore_ascii_case("transfer-encoding")
+        {
+            continue;
+        }
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(b": ");
+        out.extend_from_slice(value.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(b"transfer-encoding: chunked\r\nconnection: ");
+    out.extend_from_slice(connection.header_value().as_bytes());
+    out.extend_from_slice(b"\r\n\r\n");
+    out
+}
+
 /// Append the head to an existing buffer.
 ///
 /// Split out so [`encode_response_with`] can size one buffer for head *and* body
