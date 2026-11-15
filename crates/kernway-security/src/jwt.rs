@@ -186,6 +186,36 @@ impl Claims {
             })
             .unwrap_or_default()
     }
+
+    /// Set an `authorities` array claim — non-role grants (a subscription tier, a
+    /// scope, a feature flag). Orthogonal to [`roles`](Self::roles): the shape a JWT
+    /// auth middleware reads into a `SecurityContext`'s authorities, which
+    /// `HttpSecurity::has_authority` then enforces.
+    #[must_use]
+    pub fn authorities<I, S>(mut self, authorities: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let array = authorities.into_iter().map(|a| Value::String(a.into())).collect();
+        self.custom.insert("authorities".into(), Value::Array(array));
+        self
+    }
+
+    /// Read the `authorities` array claim (empty if absent or not an array of strings).
+    #[must_use]
+    pub fn authority_list(&self) -> Vec<String> {
+        self.custom
+            .get("authorities")
+            .and_then(Value::as_array)
+            .map(|array| {
+                array
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 /// What to check when decoding, beyond the signature. Signature and algorithm are
@@ -482,6 +512,26 @@ mod tests {
             decoded.role_list(),
             vec!["ADMIN".to_string(), "USER".to_string()]
         );
+    }
+
+    #[test]
+    fn authorities_round_trip_and_default_empty() {
+        // The subscription/authority axis travels in the token just like roles, and is
+        // orthogonal to them: a USER-role token can still carry a PRO authority.
+        let claims = Claims::new()
+            .subject("bob")
+            .expires_at(NOW + 3600)
+            .roles(["USER"])
+            .authorities(["PRO", "ANNUAL"]);
+        let decoded = jwt().decode(&jwt().encode(&claims).unwrap(), NOW).unwrap();
+        assert_eq!(decoded.role_list(), vec!["USER".to_string()]);
+        assert_eq!(
+            decoded.authority_list(),
+            vec!["PRO".to_string(), "ANNUAL".to_string()]
+        );
+        // A token with no authorities claim reads back as an empty list, not an error.
+        let plain = jwt().decode(&jwt().encode(&Claims::new().subject("x")).unwrap(), NOW).unwrap();
+        assert!(plain.authority_list().is_empty());
     }
 
     #[test]

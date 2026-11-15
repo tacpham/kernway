@@ -106,9 +106,9 @@ pub use kernway_security::{BanList, Bans, RequestMeta};
 pub use tracking::{BanFilter, VisitorTracking};
 // Config-driven backend selection.
 pub use backends::{session_store_from_config, BackendError, BanBackend};
-// JWT bearer authentication (feature = `jwt`).
+// JWT authentication — header or cookie, roles + authorities (feature = `jwt`).
 #[cfg(feature = "jwt")]
-pub use auth::BearerAuth;
+pub use auth::{BearerAuth, JwtAuth, TokenSource};
 #[cfg(feature = "jwt")]
 pub use kernway_security::{Claims, Jwt, JwtError, Validation};
 // Live activity — the "who's on the site and where" middleware + store (feature =
