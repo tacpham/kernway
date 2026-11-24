@@ -21,7 +21,8 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use kernway_security::{InMemoryPresence, Presence};
 
 /// Drive a ready presence future (the in-memory tracker resolves on first poll).
-fn drive<T>(mut fut: Pin<Box<dyn Future<Output = T> + Send + '_>>) -> T {
+/// Not `Send`: Kernway is thread-per-core, so presence futures stay on one shard.
+fn drive<T>(mut fut: Pin<Box<dyn Future<Output = T> + '_>>) -> T {
     let waker = Waker::noop();
     let mut cx = Context::from_waker(waker);
     match fut.as_mut().poll(&mut cx) {

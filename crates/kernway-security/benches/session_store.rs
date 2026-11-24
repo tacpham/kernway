@@ -26,10 +26,11 @@ use kernway_security::token::{Claims, TokenCodec};
 const SID: &str = "8f14e45fceea167a5a36dedd4bea2543";
 const KEY: &[u8] = b"a-32-byte-signing-key-for-hmac!!";
 
-/// Drive a store future (a `Send` boxed future) to its ready value with a noop
-/// waker — the in-memory store does no I/O, so it resolves on the first poll. The
-/// future is already boxed by the trait, so this polls it directly: no extra box.
-fn drive<T>(mut fut: Pin<Box<dyn Future<Output = T> + Send + '_>>) -> T {
+/// Drive a store future (a boxed, `!Send` future — Kernway is thread-per-core, so
+/// store futures stay on one shard) to its ready value with a noop waker — the
+/// in-memory store does no I/O, so it resolves on the first poll. The future is
+/// already boxed by the trait, so this polls it directly: no extra box.
+fn drive<T>(mut fut: Pin<Box<dyn Future<Output = T> + '_>>) -> T {
     let waker = Waker::noop();
     let mut cx = Context::from_waker(waker);
     match fut.as_mut().poll(&mut cx) {
