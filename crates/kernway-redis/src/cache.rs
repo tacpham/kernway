@@ -48,7 +48,10 @@ impl RedisCache {
     /// Take the pooled connection out (or open one) — never held across an await
     /// under a RefCell borrow.
     async fn take_conn(&self) -> Result<Connection, CacheError> {
-        match self.conn.borrow_mut().take() {
+        // Bind first: a borrow in the `match` scrutinee would live through the
+        // `open().await` arm, and a second operation on this shard would panic.
+        let pooled = self.conn.borrow_mut().take();
+        match pooled {
             Some(c) => Ok(c),
             None => self.open().await,
         }
@@ -172,5 +175,78 @@ impl AsyncCache<String, Vec<u8>> for RedisCache {
     fn stats(&self) -> CacheStats {
         // Redis keeps server-side stats; this client does not track per-call hits.
         CacheStats::default()
+    }
+}
+
+#[cfg(test)]
+mod concurrency_tests {
+    use super::*;
+    use std::future::{poll_fn, Future};
+    use std::io::{Read, Write};
+    use std::pin::pin;
+    use std::task::Poll;
+
+    /// A fake Redis that answers every command with a nil bulk string.
+    fn nil_server(connections: usize) -> std::net::SocketAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..connections {
+                let (mut sock, _) = listener.accept().unwrap();
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 1024];
+                    while let Ok(n) = sock.read(&mut buf) {
+                        if n == 0 || sock.write_all(b"$-1\r\n").is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    /// Two operations on one shard while no connection is pooled: the first
+    /// awaits `connect`, the second must not find the pool slot still borrowed
+    /// (it used to panic with "already borrowed": the `RefCell` guard lived
+    /// across the `open().await` in `take_conn`).
+    #[test]
+    fn concurrent_operations_do_not_hold_the_pool_borrow_across_await() {
+        let addr = nil_server(2);
+        let cache = RedisCache::new(RedisConfig {
+            addr,
+            user: None,
+            password: None,
+        });
+        let ex = rt_core::Executor::new().unwrap();
+        let (a, b) = ex
+            .block_on(async {
+                let (ka, kb) = ("a".to_string(), "b".to_string());
+                let mut fa = pin!(cache.get(&ka));
+                let mut fb = pin!(cache.get(&kb));
+                let (mut ra, mut rb) = (None, None);
+                poll_fn(|cx| {
+                    if ra.is_none() {
+                        if let Poll::Ready(r) = fa.as_mut().poll(cx) {
+                            ra = Some(r);
+                        }
+                    }
+                    if rb.is_none() {
+                        if let Poll::Ready(r) = fb.as_mut().poll(cx) {
+                            rb = Some(r);
+                        }
+                    }
+                    if ra.is_some() && rb.is_some() {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+                (ra.unwrap(), rb.unwrap())
+            })
+            .unwrap();
+        assert_eq!(a.unwrap(), None);
+        assert_eq!(b.unwrap(), None);
     }
 }
