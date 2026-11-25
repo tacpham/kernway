@@ -6,7 +6,7 @@
 //! [`ActiveVisitor`] — the identity (a logged-in user, else the anonymous visitor
 //! id), the current path/method, the client IP, and the User-Agent — so an admin can
 //! see a live list of who is on the site and where. It is built straight from the
-//! [`RequestMeta`](crate::tracking::RequestMeta) a `VisitorTracking` middleware
+//! [`RequestMeta`] a `VisitorTracking` middleware
 //! already put in the scope, plus the `SecurityContext` for the identity.
 //!
 //! Like presence, an entry is live only within a window of its last request and is

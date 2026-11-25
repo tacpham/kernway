@@ -271,7 +271,7 @@ where
     /// `negative_ttl` so the next lookup is a hit, not another source query.
     /// Present values are cached for `ttl`. Single-flighted like
     /// [`get_or_load`](Cache::get_or_load), and the negative set is bounded by
-    /// [`NEGATIVE_CAPACITY`] so a flood of unique missing keys cannot grow it.
+    /// `NEGATIVE_CAPACITY` (10 000 entries) so a flood of unique missing keys cannot grow it.
     pub fn get_or_load_optional<F>(
         &self,
         key: K,

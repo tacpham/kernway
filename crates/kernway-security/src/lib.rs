@@ -103,7 +103,7 @@ pub use file_bans::FileBackedBans;
 pub mod file_sessions;
 #[cfg(feature = "persist")]
 pub use file_sessions::FileBackedSessionStore;
-/// File-backed (local disk) [`Activity`](activity::Activity) (features = `persist` + `presence`).
+/// File-backed (local disk) [`Activity`] (features = `persist` + `presence`).
 #[cfg(all(feature = "persist", feature = "presence"))]
 pub mod file_activity;
 #[cfg(all(feature = "persist", feature = "presence"))]

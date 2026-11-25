@@ -1,7 +1,7 @@
 //! JSON Web Tokens (RFC 7519), HS256 — a standards-compliant, stateless bearer token
 //! (feature = `jwt`).
 //!
-//! Distinct from the session [`token`](crate::token): that is a *stateful* ticket into
+//! Distinct from the session [`token`]: that is a *stateful* ticket into
 //! the session registry (so it can be revoked); a JWT is *stateless* — everything a
 //! verifier needs is inside it, verified by a shared secret, with nothing to look up.
 //! Use it for APIs, service-to-service calls, or interop with an issuer like Keycloak

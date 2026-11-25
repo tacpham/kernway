@@ -1,6 +1,6 @@
 //! Publish / subscribe — the message-bus abstraction, backend-agnostic.
 //!
-//! Where [`Cache`](crate::Cache) is request/reply key-value, pub/sub is a
+//! Where [`Cache`] is request/reply key-value, pub/sub is a
 //! one-to-many **stream**: a publisher sends to a channel, every current
 //! subscriber receives. It is the backbone of cross-instance fan-out — a POS
 //! kiosk check-in on one backend node reaching the front-desk screen on another
