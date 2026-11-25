@@ -1,4 +1,4 @@
-//! File-backed [`Activity`](crate::activity::Activity) (feature = `persist`).
+//! File-backed [`Activity`] (feature = `persist`).
 //!
 //! The live "who's on the site" map stays in memory, but every recorded request is
 //! also appended to a local log and the map snapshotted periodically, so the view

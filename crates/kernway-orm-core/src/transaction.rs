@@ -1,6 +1,6 @@
 //! Transactions — run a unit of work atomically, with row-level locking.
 //!
-//! The base [`Driver`](crate::Driver) / [`Repository`](crate::Repository) surface
+//! The base [`Driver`] / [`Repository`] surface
 //! is transaction-free: each `save` / `delete` is its own autocommit statement.
 //! That is enough for most CRUD, but **not** for money: a checkout or a turn
 //! assignment must read a row, decide, and write it back with no other writer
