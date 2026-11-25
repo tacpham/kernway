@@ -13,7 +13,7 @@
 //! whose per-call futures are `!Send` is exactly the handler model (the function
 //! is shared, each call's future is local).
 //!
-//! The matching sync [`Cache`](crate::Cache) trait stays, for code that is purely
+//! The matching sync [`Cache`] trait stays, for code that is purely
 //! synchronous and wants zero `.await`.
 
 use crate::{error::CacheError, stats::CacheStats, ttl::Ttl};

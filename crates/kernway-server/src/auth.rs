@@ -11,7 +11,7 @@
 //! The identity mapping covers **both** axes `HttpSecurity` checks — the `roles` claim →
 //! roles (`has_role`) and the `authorities` claim → authorities (`has_authority`, a
 //! non-role grant: a subscription tier, a scope, a feature flag). `sub` → principal.
-//! The full decoded [`Claims`] is also placed in the scope, so a handler reads any extra
+//! The full decoded [`kernway_security::Claims`] is also placed in the scope, so a handler reads any extra
 //! claim it minted (a tenant id, a user id) via `scope.get::<Claims>()` without decoding
 //! the token a second time.
 //!
@@ -35,7 +35,7 @@ pub enum TokenSource {
 }
 
 /// Authenticates requests from a JWT (header or cookie), setting a `SecurityContext`
-/// (roles **and** authorities) plus the decoded [`Claims`] in the request scope.
+/// (roles **and** authorities) plus the decoded [`kernway_security::Claims`] in the request scope.
 pub struct JwtAuth {
     jwt: Jwt,
     validation: Validation,
