@@ -1,0 +1,5 @@
+error: unsupported #[id] option
+ --> tests/ui/entity_bad_id_option.rs:6:10
+  |
+6 |     #[id(generated = "yes")]
+  |          ^^^^^^^^^

@@ -1,0 +1,5 @@
+error: #[entity] only supports structs with named fields
+ --> tests/ui/entity_tuple_struct.rs:5:1
+  |
+5 | struct Pair(u64, String);
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^

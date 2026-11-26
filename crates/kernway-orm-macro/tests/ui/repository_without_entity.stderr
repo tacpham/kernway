@@ -1,0 +1,7 @@
+error: #[repository] requires `entity = TypeName`
+ --> tests/ui/repository_without_entity.rs:4:1
+  |
+4 | #[repository]
+  | ^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `repository` (in Nightly builds, run with -Z macro-backtrace for more info)

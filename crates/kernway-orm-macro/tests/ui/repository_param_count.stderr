@@ -1,0 +1,13 @@
+error: derived query has 2 condition(s) but 1 parameter(s)
+  --> tests/ui/repository_param_count.rs:16:14
+   |
+16 |     async fn find_by_name_and_age(&self, name: &str) -> Result<Vec<User>, OrmError>;
+   |              ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `kernway_orm_core::error::OrmError`
+ --> tests/ui/repository_param_count.rs:2:5
+  |
+2 | use kernway_orm_core::error::OrmError;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

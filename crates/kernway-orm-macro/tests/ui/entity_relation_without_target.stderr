@@ -1,0 +1,5 @@
+error: relation requires `entity = "table"`
+ --> tests/ui/entity_relation_without_target.rs:8:5
+  |
+8 |     #[many_to_one(column = "user_id")]
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -210,13 +210,21 @@ fn extract_table_name(args: &Punctuated<Meta, Token![,]>) -> Option<String> {
     None
 }
 
+/// `#[id]`, `#[id()]` or `#[id(strategy = "auto" | "manual")]` → whether the
+/// key is assigned by the store.
 fn parse_id_attr(attr: &Attribute) -> syn::Result<bool> {
     let mut auto = false;
+    // A bare `#[id]` has no argument list to parse.
+    if matches!(attr.meta, Meta::Path(_)) {
+        return Ok(auto);
+    }
     attr.parse_nested_meta(|meta| {
         if meta.path.is_ident("strategy") {
             let value = meta.value()?.parse::<syn::LitStr>()?;
-            if value.value() == "auto" {
-                auto = true;
+            match value.value().as_str() {
+                "auto" => auto = true,
+                "manual" => auto = false,
+                _ => return Err(syn::Error::new_spanned(value, "expected strategy = \"auto\" or \"manual\"")),
             }
             return Ok(());
         }
@@ -231,6 +239,10 @@ fn parse_column_attr(
     nullable: &mut bool,
     unique: &mut bool,
 ) -> syn::Result<()> {
+    // A bare `#[column]` only marks the field; nothing to override.
+    if matches!(attr.meta, Meta::Path(_)) {
+        return Ok(());
+    }
     attr.parse_nested_meta(|meta| {
         if meta.path.is_ident("name") {
             *column_name = meta.value()?.parse::<syn::LitStr>()?.value();

@@ -16,6 +16,16 @@ proc-macro2 = { workspace = true }
 # token paths inside quote!{}; that crate is resolved in the USER's crate, not
 # here. (Same pattern as di-macro.) Adding it back would be a phantom dep.
 
+[dev-dependencies]
+# The tests compile real entities and repositories against the runtime the
+# emitted code names, and check the macro's compile errors.
+kernway-orm-core   = { workspace = true }
+kernway-orm-memory = { workspace = true }
+rt-core            = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+trybuild           = "1"
+
 [lints]
 workspace = true
 

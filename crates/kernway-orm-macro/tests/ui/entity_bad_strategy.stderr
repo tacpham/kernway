@@ -1,0 +1,5 @@
+error: expected strategy = "auto" or "manual"
+ --> tests/ui/entity_bad_strategy.rs:6:21
+  |
+6 |     #[id(strategy = "uuid")]
+  |                     ^^^^^^

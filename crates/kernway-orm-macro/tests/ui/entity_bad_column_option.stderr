@@ -1,0 +1,5 @@
+error: unsupported #[column] option
+ --> tests/ui/entity_bad_column_option.rs:8:14
+  |
+8 |     #[column(length = 10)]
+  |              ^^^^^^
