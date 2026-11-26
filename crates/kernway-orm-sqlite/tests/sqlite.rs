@@ -182,6 +182,7 @@ fn waiting_for_a_lock_queues_without_stalling_and_times_out_cleanly() {
         db.execute("CREATE TABLE t (n INTEGER)").await.unwrap();
     });
     // Another process-like holder of the write lock, on its own thread.
+    let (locked_tx, locked) = std::sync::mpsc::channel();
     let holder = {
         let path = path.clone();
         std::thread::spawn(move || {
@@ -190,6 +191,8 @@ fn waiting_for_a_lock_queues_without_stalling_and_times_out_cleanly() {
                 db.transaction(|tx| {
                     Box::pin(async move {
                         tx.execute_with("INSERT INTO t VALUES (1)", &[]).await?;
+                        // The write lock is held from here on.
+                        locked_tx.send(()).unwrap();
                         rt_core::sleep(Duration::from_millis(300)).await;
                         Ok(())
                     })
@@ -199,11 +202,11 @@ fn waiting_for_a_lock_queues_without_stalling_and_times_out_cleanly() {
             })
         })
     };
-    std::thread::sleep(Duration::from_millis(80));
     run(async {
         // Default 5 s busy timeout: the write waits for the holder, then runs;
         // meanwhile the reactor keeps going.
         let db = SqliteDriver::open(&path).await.unwrap();
+        locked.recv().expect("the holder took the lock");
         let ticks = ticker();
         let started = Instant::now();
         db.execute("INSERT INTO t VALUES (2)").await.unwrap();
@@ -214,6 +217,7 @@ fn waiting_for_a_lock_queues_without_stalling_and_times_out_cleanly() {
     holder.join().unwrap();
 
     // A short busy timeout gives up with "database is locked".
+    let (locked_tx, locked) = std::sync::mpsc::channel();
     let holder = {
         let path = path.clone();
         std::thread::spawn(move || {
@@ -222,6 +226,8 @@ fn waiting_for_a_lock_queues_without_stalling_and_times_out_cleanly() {
                 db.transaction(|tx| {
                     Box::pin(async move {
                         tx.execute_with("INSERT INTO t VALUES (3)", &[]).await?;
+                        // The write lock is held from here on.
+                        locked_tx.send(()).unwrap();
                         rt_core::sleep(Duration::from_millis(400)).await;
                         Ok(())
                     })
@@ -231,9 +237,9 @@ fn waiting_for_a_lock_queues_without_stalling_and_times_out_cleanly() {
             })
         })
     };
-    std::thread::sleep(Duration::from_millis(80));
     run(async {
         let db = SqliteDriver::with_config(SqliteConfig::file(&path).busy_timeout(Duration::from_millis(50))).await.unwrap();
+        locked.recv().expect("the holder took the lock");
         let e = db.execute("INSERT INTO t VALUES (4)").await.unwrap_err();
         assert!(e.to_string().contains("locked"), "{e}");
         // Readers are not blocked by the writer in WAL mode.
