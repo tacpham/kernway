@@ -46,6 +46,9 @@ macro_rules! in_tx {
     ($conn:expr, |$c:ident| $body:expr) => {{
         let conn = Rc::clone($conn);
         Box::pin(async move {
+            // One connection serves the whole transaction; its statements run
+            // one at a time, so the borrow is held for the call (a second
+            // concurrent call on the same transaction would be a bug).
             let mut slot = conn.borrow_mut();
             let $c: &mut C::Sql = &mut *slot.as_mut().ok_or_else(finished)?;
             $body.await
@@ -53,6 +56,7 @@ macro_rules! in_tx {
     }};
 }
 
+#[allow(clippy::await_holding_refcell_ref)]
 impl<T, C> TxRepository<T> for SqlTxRepository<T, C>
 where
     T: Entity + Serialize + DeserializeOwned,

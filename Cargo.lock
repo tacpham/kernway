@@ -1142,6 +1142,8 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "kernway-orm-core",
+ "kernway-orm-macro",
+ "kernway-orm-sql",
  "kernway-tls",
  "kernway-wire",
  "md-5",
@@ -1172,7 +1174,9 @@ name = "kernway-orm-sql"
 version = "0.1.0"
 dependencies = [
  "kernway-orm-core",
+ "kernway-orm-macro",
  "kernway-wire",
+ "rt-core",
  "serde",
  "serde_json",
 ]

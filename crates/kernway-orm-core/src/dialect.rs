@@ -75,6 +75,13 @@ pub trait SqlDialect: Send + Sync + 'static {
         ""
     }
 
+    /// Whether the database stores an empty string / empty binary value as
+    /// NULL (Oracle). Text and binary columns then get no `NOT NULL`, so an
+    /// empty `String` / `Vec<u8>` can be saved (and reads back empty).
+    fn empty_string_is_null(&self) -> bool {
+        false
+    }
+
     /// The row-window clause appended to a `SELECT` (empty when neither is
     /// set). Default: `LIMIT n` / `OFFSET m` as MySQL, PostgreSQL and SQLite
     /// write it; Oracle overrides with `OFFSET m ROWS FETCH NEXT n ROWS ONLY`.
@@ -115,7 +122,8 @@ pub trait SqlDialect: Send + Sync + 'static {
                     }
                 }
             } else {
-                if !col.nullable {
+                let text = matches!(col.col_type, ColumnType::Text | ColumnType::Unknown | ColumnType::Binary);
+                if !col.nullable && !(text && self.empty_string_is_null()) {
                     def.push_str(" NOT NULL");
                 }
                 if col.unique {

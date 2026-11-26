@@ -53,4 +53,14 @@ impl SqlDialect for MySqlDialect {
     fn lock_for_update_suffix(&self) -> &'static str {
         "FOR UPDATE"
     }
+
+    /// MySQL has no `OFFSET` without `LIMIT`; the documented idiom is the
+    /// largest row count.
+    fn limit_offset(&self, limit: Option<u64>, offset: u64) -> String {
+        match (limit, offset) {
+            (None, 0) => String::new(),
+            (Some(n), 0) => format!(" LIMIT {n}"),
+            (n, m) => format!(" LIMIT {} OFFSET {m}", n.unwrap_or(u64::MAX)),
+        }
+    }
 }

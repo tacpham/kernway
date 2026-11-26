@@ -2,7 +2,7 @@
 //!
 //! A database driver implements one small trait, [`SqlConn`] — run a query and
 //! decode its rows, execute a statement, insert and return the generated key,
-//! and transaction control — plus its [`SqlDialect`](kernway_orm_core::SqlDialect).
+//! and transaction control — plus its [`SqlDialect`].
 //! Everything above that is shared:
 //!
 //! - [`engine`]: CRUD SQL generation and execution (find, save, batch insert,
@@ -16,6 +16,8 @@
 //! entities through the shared row decoder (`kernway_orm_core::decode`), so
 //! every backend maps entity fields to SQL values the same way.
 
+#[cfg(feature = "conformance")]
+pub mod conformance;
 pub mod engine;
 mod param;
 mod query;

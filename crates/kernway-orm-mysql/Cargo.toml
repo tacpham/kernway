@@ -34,6 +34,8 @@ default = []
 mysql = ["sha1", "sha2", "kernway-tls", "kernway-wire", "kernway-orm-sql", "rt-core", "rt-net"]
 
 [dev-dependencies]
+# The shared SQL conformance suite this backend must pass.
+kernway-orm-sql = { workspace = true, features = ["conformance"] }
 # Checksums for the large-value write tests.
 md-5              = "0.11"
 kernway-orm-macro = { workspace = true }

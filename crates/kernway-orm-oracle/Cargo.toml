@@ -15,6 +15,8 @@ rt-net           = { workspace = true }
 kernway-wire     = { workspace = true }
 # TCPS: the shared async rustls stream and its certificate-check modes.
 kernway-tls      = { workspace = true }
+# The shared SQL ORM layer: CRUD engine, query builder, repositories, transactions.
+kernway-orm-sql  = { workspace = true }
 # Auth crypto (O5LOGON): PBKDF2-HMAC-SHA512, SHA-1/512 and randomness from ring
 # (already in the tree via rustls), AES for the zero-IV CBC Oracle uses, MD5 for
 # the 11g key combine.
@@ -23,6 +25,9 @@ aes   = "0.8"
 md-5  = "0.11"
 
 [dev-dependencies]
+# The shared SQL conformance suite this backend must pass.
+kernway-orm-sql = { workspace = true, features = ["conformance"] }
+kernway-orm-macro = { workspace = true }
 serde_json = { workspace = true }
 kernway-wire = { workspace = true }
 

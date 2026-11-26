@@ -197,6 +197,8 @@ pub struct Conn {
     pub(crate) max_string_size: u32,
     /// Server cursors to close with the next call (close-cursors piggyback).
     pub(crate) pending_close: Vec<u32>,
+    /// Inside an ORM transaction: statements are not committed on their own.
+    pub(crate) in_tx: bool,
 }
 
 /// Map a parse error to the driver's error type.
@@ -247,6 +249,7 @@ impl Conn {
             session: HashMap::new(),
             max_string_size: 4000,
             pending_close: Vec::new(),
+            in_tx: false,
         };
         conn.negotiate().await?;
         conn.authenticate(cfg).await?;

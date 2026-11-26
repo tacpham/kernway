@@ -11,6 +11,13 @@ kernway-orm-core = { workspace = true }
 kernway-wire     = { workspace = true }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
+# The conformance suite (feature `conformance`): its test entities and executor.
+kernway-orm-macro = { workspace = true, optional = true }
+rt-core           = { workspace = true, optional = true }
+
+[features]
+# The shared test suite every SQL backend must pass against a live database.
+conformance = ["kernway-orm-macro", "rt-core"]
 
 [lints]
 workspace = true

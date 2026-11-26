@@ -819,7 +819,7 @@ impl Conn {
 
         if num_params > 0 {
             // NULL bitmap.
-            let bitmap_len = (num_params as usize + 7) / 8;
+            let bitmap_len = (num_params as usize).div_ceil(8);
             let mut bitmap = vec![0u8; bitmap_len];
             for (i, p) in params.iter().enumerate() {
                 if matches!(p, BindValue::Null) {

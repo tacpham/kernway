@@ -25,8 +25,12 @@
 //! encryption, implicit result sets, object types.
 
 mod auth_crypto;
+mod backend;
 mod buf;
 mod conn;
+mod dialect;
+mod driver;
+mod pool;
 mod data_types_table;
 mod exec;
 mod stmt;
@@ -36,5 +40,8 @@ mod value;
 mod server_checks;
 
 pub use conn::{Conn, OracleConfig, SslMode};
+pub use dialect::OracleDialect;
+pub use driver::{OracleDriver, OracleRepository, OracleTx};
+pub use pool::OracleConnect;
 pub use exec::{Bind, Column, Executed, OutType};
 pub use value::{DateTime, ResultSet, Value};

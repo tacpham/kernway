@@ -1,5 +1,9 @@
 # kernway-orm — Multi-Database Driver Strategy
 
+> **Superseded for SQL databases by [kernway-orm-sql](kernway-orm-sql.md).**
+> kernway now ships self-written wire drivers (MySQL, Oracle thin) over one
+> shared SQL ORM layer; the sqlx / ODBC plan below is historical.
+
 > All drivers implement the `kernway-orm-core` traits.  
 > User code does NOT change when swapping databases.
 
