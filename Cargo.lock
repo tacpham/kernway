@@ -1298,6 +1298,7 @@ version = "0.1.0"
 dependencies = [
  "mio",
  "rt-core",
+ "socket2",
 ]
 
 [[package]]

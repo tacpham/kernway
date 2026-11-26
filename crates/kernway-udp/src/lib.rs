@@ -129,7 +129,7 @@ impl AsyncUdpSocket {
     /// discarded (UDP semantics) — size `buf` for the largest reply you expect.
     pub async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         loop {
-            match self.inner.recv_from(buf) {
+            match recv_from_truncating(&self.inner, buf) {
                 Err(e) if would_block(&e) => Readiness::new(self.token, Direction::Read).await,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 other => return other,
@@ -151,7 +151,7 @@ impl AsyncUdpSocket {
     /// Receive one datagram from the connected peer into `buf`.
     pub async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
-            match self.inner.recv(buf) {
+            match recv_from_truncating(&self.inner, buf).map(|(n, _)| n) {
                 Err(e) if would_block(&e) => Readiness::new(self.token, Direction::Read).await,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 other => return other,
@@ -184,6 +184,25 @@ impl std::fmt::Debug for AsyncUdpSocket {
 
 fn would_block(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::WouldBlock
+}
+
+/// `recv_from`, truncating a datagram longer than `buf` on every platform
+/// (what Unix does; Windows reports `WSAEMSGSIZE` instead).
+#[cfg(not(windows))]
+fn recv_from_truncating(sock: &mio::net::UdpSocket, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+    sock.recv_from(buf)
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn recv_from_truncating(sock: &mio::net::UdpSocket, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+    use std::mem::MaybeUninit;
+    // SAFETY: `MaybeUninit<u8>` has the layout of `u8`, and the buffer is
+    // already initialised; the OS only writes bytes into it.
+    let uninit = unsafe { &mut *(std::ptr::from_mut::<[u8]>(buf) as *mut [MaybeUninit<u8>]) };
+    let mut bufs = [socket2::MaybeUninitSlice::new(uninit)];
+    let (n, _flags, from) = socket2::SockRef::from(sock).recv_from_vectored(&mut bufs)?;
+    from.as_socket().map(|a| (n, a)).ok_or_else(|| io::Error::other("datagram from a non-IP address"))
 }
 
 #[cfg(test)]

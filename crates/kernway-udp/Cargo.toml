@@ -13,5 +13,10 @@ license.workspace  = true
 rt-core = { workspace = true }
 mio     = { workspace = true }   # UDP socket + readiness source (same primitive rt-core uses)
 
+# Windows reports a datagram longer than the buffer as an error (WSAEMSGSIZE);
+# socket2 turns it into the truncated read Unix gives, sender included.
+[target.'cfg(windows)'.dependencies]
+socket2 = "0.6"
+
 [lints]
 workspace = true
