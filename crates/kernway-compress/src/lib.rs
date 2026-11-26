@@ -120,6 +120,11 @@ pub fn is_compressible(content_type: &str) -> bool {
     if base.starts_with("text/") {
         return true;
     }
+    // Structured-syntax suffixes (RFC 6839): `application/problem+json`,
+    // `application/ld+json`, `application/soap+xml`, … are JSON / XML text.
+    if base.ends_with("+json") || base.ends_with("+xml") {
+        return true;
+    }
     matches!(
         base,
         "application/json"
@@ -225,6 +230,9 @@ mod tests {
     fn compressible_types() {
         assert!(is_compressible("text/html; charset=utf-8"));
         assert!(is_compressible("application/json"));
+        assert!(is_compressible("application/problem+json"));
+        assert!(is_compressible("application/ld+json; charset=utf-8"));
+        assert!(is_compressible("application/soap+xml"));
         assert!(is_compressible("image/svg+xml"));
         assert!(!is_compressible("image/png"));
         assert!(!is_compressible("application/octet-stream"));

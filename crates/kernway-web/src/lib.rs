@@ -174,40 +174,44 @@ pub struct ProblemDetail {
 impl ProblemDetail {
     /// Build a `404 Not Found` problem response.
     pub fn not_found(detail: impl Into<String>) -> Response {
-        let mut r = Json(ProblemDetail {
+        problem(StatusCode::NOT_FOUND, &ProblemDetail {
             status: 404,
             title: "Not Found",
             detail: detail.into(),
         })
-        .into_response();
-        r.status = StatusCode::NOT_FOUND;
-        r
     }
 
     /// Build a `400 Bad Request` problem response.
     pub fn bad_request(detail: impl Into<String>) -> Response {
-        let mut r = Json(ProblemDetail {
+        problem(StatusCode::BAD_REQUEST, &ProblemDetail {
             status: 400,
             title: "Bad Request",
             detail: detail.into(),
         })
-        .into_response();
-        r.status = StatusCode::BAD_REQUEST;
-        r
     }
 
     /// Build a `500 Internal Server Error` problem response.
     ///
     /// Keep `detail` free of internal specifics — it reaches the client.
     pub fn internal_error(detail: impl Into<String>) -> Response {
-        let mut r = Json(ProblemDetail {
+        problem(StatusCode::INTERNAL_SERVER_ERROR, &ProblemDetail {
             status: 500,
             title: "Internal Server Error",
             detail: detail.into(),
         })
-        .into_response();
-        r.status = StatusCode::INTERNAL_SERVER_ERROR;
-        r
+    }
+}
+
+/// The RFC 7807 media type (§6.1): clients tell a problem from a payload by it.
+const PROBLEM_JSON: &str = "application/problem+json";
+
+/// A problem body as a response with `status` and the problem media type.
+fn problem<T: Serialize>(status: StatusCode, body: &T) -> Response {
+    let r = json(status, body);
+    if r.status == status {
+        r.content_type(PROBLEM_JSON)
+    } else {
+        r // the serialize-failure fallback: a plain JSON 500
     }
 }
 
@@ -288,9 +292,7 @@ fn validation_response(errors: &ValidationErrors) -> Response {
             })
             .collect(),
     };
-    let mut response = Json(problem).into_response();
-    response.status = StatusCode::BAD_REQUEST;
-    response
+    self::problem(StatusCode::BAD_REQUEST, &problem)
 }
 
 #[cfg(test)]
