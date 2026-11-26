@@ -175,6 +175,37 @@ pub enum Value {
     /// UTC offset at that instant (minutes) and the region
     /// (`Asia/Ho_Chi_Minh`) — as the server computes them.
     TimestampTzRegion(DateTime, i16, String),
+    /// An object type instance or PL/SQL record: its type
+    /// (`SCHEMA.[PACKAGE.]NAME`) and attribute values in declaration order.
+    Object {
+        /// Full type name.
+        type_name: String,
+        /// Attribute name and value, in declaration order.
+        fields: Vec<(String, Value)>,
+    },
+    /// A VARRAY or nested table.
+    Collection {
+        /// Full type name.
+        type_name: String,
+        /// The elements in order.
+        elements: Vec<Value>,
+    },
+    /// A PL/SQL associative array (`INDEX BY PLS_INTEGER`), in key order.
+    AssocArray {
+        /// Full type name.
+        type_name: String,
+        /// Index and value.
+        entries: Vec<(i32, Value)>,
+    },
+    /// Internal: an object image as it arrives, before the driver decodes
+    /// it with the type's metadata.
+    #[doc(hidden)]
+    ObjectImage {
+        /// Full type name from the column / bind metadata.
+        type_name: String,
+        /// The pickled image.
+        image: Vec<u8>,
+    },
     /// Internal: a region-based value as it arrives (UTC time and Oracle's
     /// region id), before the driver resolves it into
     /// [`TimestampTzRegion`](Self::TimestampTzRegion).
@@ -228,6 +259,19 @@ impl Value {
             Value::Cursor(rs) => Some(format!("<cursor: {} rows>", rs.rows.len())),
             Value::Lob(_) => Some("<LOB locator>".into()),
             Value::TimestampTzRegion(d, _, region) => Some(format!("{d} {region}")),
+            Value::Object { type_name, fields } => Some(format!(
+                "{type_name}({})",
+                fields.iter().map(|(n, v)| format!("{n} => {}", v.to_text().unwrap_or_else(|| "NULL".into()))).collect::<Vec<_>>().join(", ")
+            )),
+            Value::Collection { type_name, elements } => Some(format!(
+                "{type_name}({})",
+                elements.iter().map(|v| v.to_text().unwrap_or_else(|| "NULL".into())).collect::<Vec<_>>().join(", ")
+            )),
+            Value::AssocArray { type_name, entries } => Some(format!(
+                "{type_name}({})",
+                entries.iter().map(|(k, v)| format!("{k} => {}", v.to_text().unwrap_or_else(|| "NULL".into()))).collect::<Vec<_>>().join(", ")
+            )),
+            Value::ObjectImage { type_name, .. } => Some(format!("<{type_name} image>")),
             Value::TimestampTzRegionId(d, id) => Some(format!("{d} UTC (region #{id})")),
         }
     }

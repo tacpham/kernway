@@ -45,6 +45,7 @@ mod pool;
 mod data_types_table;
 mod exec;
 mod lob;
+mod object;
 mod stmt;
 mod tns;
 mod value;

@@ -124,8 +124,6 @@ fn unsupported_types_are_refused_cleanly() {
         let db = OracleDriver::connect_with(kernway_orm_oracle::OracleConfig::from_url(&url).unwrap(), 1).await.unwrap();
         db.execute("CREATE OR REPLACE TYPE kwo_point AS OBJECT (x NUMBER, y NUMBER)").await.unwrap();
         for sql in [
-            "SELECT kwo_point(1, 2) FROM dual",
-            "SELECT XMLTYPE('<a>1</a>') FROM dual",
         ] {
             let e = db.query(sql, &[]).await.expect_err(sql);
             assert!(matches!(e, OrmError::Unsupported(_)), "{sql}: {e}");

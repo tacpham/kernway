@@ -109,6 +109,9 @@ pub struct Column {
     pub wire_type: u8,
     /// Character set form of [`wire_type`](Self::wire_type).
     pub wire_csfrm: u8,
+    /// For an object / collection / XMLType column: its type
+    /// (`SCHEMA.NAME`).
+    pub type_name: Option<String>,
 }
 
 impl Column {
@@ -192,6 +195,7 @@ fn value_meta(v: &Value) -> (u8, u8, u32) {
         Value::Bool(_) => (ora_type::BOOLEAN, 0, 4),
         Value::Cursor(_) => (ora_type::CURSOR, 0, 4),
         Value::TimestampTzRegion(..) | Value::TimestampTzRegionId(..) => (ora_type::TIMESTAMP_TZ, 0, 13),
+        Value::Object { .. } | Value::Collection { .. } | Value::AssocArray { .. } | Value::ObjectImage { .. } => (ora_type::OBJECT, 0, 0),
         Value::Lob(l) if l.blob => (ora_type::BLOB, 0, LOB_BIND_SIZE),
         Value::Lob(_) => (ora_type::CLOB, 1, LOB_BIND_SIZE),
     }
@@ -274,6 +278,13 @@ fn write_value(w: &mut Writer, ora_type_num: u8, v: Option<&Value>) -> Result<()
             w.bytes_wl(&value::encode_timestamp_tz(d, *off));
         }
         Value::TimestampTzRegionId(..) => return Err("an unresolved time-zone region cannot be bound".into()),
+        // Encoded (with its type) by the PL/SQL bind preparation.
+        Value::ObjectImage { image, .. } => {
+            w.raw(image);
+        }
+        Value::Object { .. } | Value::Collection { .. } | Value::AssocArray { .. } => {
+            return Err("an object value must be bound through a typed argument".into())
+        }
     }
     Ok(())
 }
@@ -456,7 +467,7 @@ fn unsupported_column(cols: &[Column]) -> Option<&Column> {
                 c.ora_type,
                 VARCHAR | NUMBER | BINARY_INTEGER | LONG | DATE | RAW | LONG_RAW | CHAR | BINARY_FLOAT
                     | BINARY_DOUBLE | TIMESTAMP | TIMESTAMP_TZ | TIMESTAMP_LTZ | BOOLEAN | JSON | VECTOR | INTERVAL_YM | INTERVAL_DS | ROWID | UROWID
-                    | CURSOR | BFILE
+                    | CURSOR | BFILE | OBJECT
             )
     })
 }
@@ -786,16 +797,20 @@ fn read_column(r: &mut Reader<'_>, c: &Column, fv: u8, nested: &mut Vec<(u16, Ve
         // response stays in step; the caller then reports them.
         match c.ora_type {
             OBJECT => {
+                // Type OID, OID, snapshot, version, image length, flags,
+                // image: decoded by the caller with the type's metadata.
                 for _ in 0..3 {
-                    skip_bytes_with_length(r)?; // type OID, OID, snapshot
+                    skip_bytes_with_length(r)?;
                 }
-                r.ub2()?; // version
+                r.ub2()?;
                 let n = r.ub4()?;
-                r.ub2()?; // flags
-                if n > 0 {
-                    r.skip_bytes()?;
+                r.ub2()?;
+                if n == 0 {
+                    return Ok(Value::Null);
                 }
-                return Ok(Value::Null);
+                let image = r.bytes()?.unwrap_or_default();
+                let type_name = c.type_name.clone().unwrap_or_default();
+                return Ok(Value::ObjectImage { type_name, image });
             }
             BFILE => {
                 // The locator only (a BFILE has no size / chunk size here);
@@ -910,8 +925,14 @@ fn parse_describe(r: &mut Reader<'_>, fv: u8) -> PResult<Vec<Column>> {
         c.nullable = r.u8()? != 0;
         r.u8()?; // v7 name length
         c.name = r.str_2l()?.unwrap_or_default();
-        r.str_2l()?; // schema
-        r.str_2l()?; // type name
+        let schema = r.str_2l()?;
+        let tname = r.str_2l()?;
+        if c.ora_type == ora_type::OBJECT {
+            c.type_name = match (schema, tname) {
+                (Some(s), Some(n)) if !s.is_empty() => Some(format!("{s}.{n}")),
+                (_, n) => n,
+            };
+        }
         r.skip_ub()?; // position
         r.skip_ub()?; // uds flags
         if fv >= 17 {
@@ -1437,6 +1458,9 @@ impl Conn {
                     // BFILE columns: read the file through its locator.
                     let lob = lob.clone();
                     *v = Box::pin(self.lob_read_all(&lob)).await?;
+                } else if let Value::ObjectImage { type_name, image } = v {
+                    let (name, image) = (std::mem::take(type_name), std::mem::take(image));
+                    *v = Box::pin(self.unpack_object(&name, &image)).await?;
                 } else if matches!(v, Value::TimestampTzRegionId(..)) && !self.resolving_tz {
                     Box::pin(self.resolve_region(v)).await?;
                 }

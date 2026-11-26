@@ -212,6 +212,8 @@ pub struct Conn {
     pub(crate) tz_regions: Option<HashMap<u16, String>>,
     /// Set while the driver runs its own region lookups (no recursion).
     pub(crate) resolving_tz: bool,
+    /// Object / collection / record types seen by this session.
+    pub(crate) types: crate::object::TypeCache,
 }
 
 /// Map a parse error to the driver's error type.
@@ -269,6 +271,7 @@ impl Conn {
             next_cursor: 1,
             tz_regions: None,
             resolving_tz: false,
+            types: Default::default(),
         };
         conn.negotiate().await?;
         conn.authenticate(cfg).await?;

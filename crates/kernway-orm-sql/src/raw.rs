@@ -46,6 +46,11 @@ pub enum Value {
     Interval(String),
     /// A result set returned as a value (a REF CURSOR).
     Rows(Box<Rows>),
+    /// A structured value — an Oracle object type instance, PL/SQL record or
+    /// associative array (keys as text): field name and value, in order.
+    Object(Vec<(String, Value)>),
+    /// A collection — an Oracle VARRAY / nested table: elements in order.
+    Array(Vec<Value>),
 }
 
 impl Value {

@@ -145,6 +145,40 @@ impl<'de> MapAccess<'de> for FieldsAccess<'_> {
     }
 }
 
+/// An object's fields as a map: in order, or (for a struct) by the struct's
+/// field names.
+struct PairsAccess<'a> {
+    fields: &'a [(String, Value)],
+    at: Option<(&'static [&'static str], Vec<Option<usize>>)>,
+    next: usize,
+}
+
+impl<'de> MapAccess<'de> for PairsAccess<'_> {
+    type Error = DeError;
+
+    fn next_key_seed<K: DeserializeSeed<'de>>(&mut self, seed: K) -> Result<Option<K::Value>, DeError> {
+        match &self.at {
+            Some((names, _)) => match names.get(self.next) {
+                Some(n) => seed.deserialize((*n).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
+            None => match self.fields.get(self.next) {
+                Some((n, _)) => seed.deserialize(n.as_str().into_deserializer()).map(Some),
+                None => Ok(None),
+            },
+        }
+    }
+
+    fn next_value_seed<V: DeserializeSeed<'de>>(&mut self, seed: V) -> Result<V::Value, DeError> {
+        let v = match &self.at {
+            Some((_, at)) => at[self.next].and_then(|i| self.fields.get(i)).map(|(_, v)| v),
+            None => self.fields.get(self.next).map(|(_, v)| v),
+        };
+        self.next += 1;
+        seed.deserialize(ValueDe(v.unwrap_or(&Value::Null)))
+    }
+}
+
 struct ValuesAccess<'a> {
     row: std::slice::Iter<'a, Value>,
 }
@@ -180,7 +214,7 @@ impl ValueDe<'_> {
             Value::Float(f) => Cow::Owned(f.to_string()),
             Value::Bool(b) => Cow::Owned(b.to_string()),
             Value::Bytes(b) => String::from_utf8_lossy(b),
-            Value::Null | Value::Rows(_) => return None,
+            Value::Null | Value::Rows(_) | Value::Object(_) | Value::Array(_) => return None,
         })
     }
 
@@ -267,6 +301,8 @@ impl<'de> Deserializer<'de> for ValueDe<'_> {
                 visitor.visit_str(s)
             }
             Value::Rows(_) => Err(self.mismatch("a scalar")),
+            Value::Object(fields) => visitor.visit_map(PairsAccess { fields, at: None, next: 0 }),
+            Value::Array(items) => visitor.visit_seq(ValuesAccess { row: items.iter() }),
         }
     }
 
@@ -350,6 +386,7 @@ impl<'de> Deserializer<'de> for ValueDe<'_> {
     /// `Vec<u8>` from binary data; a JSON array from a JSON document.
     fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
         match self.0 {
+            Value::Array(items) => visitor.visit_seq(ValuesAccess { row: items.iter() }),
             Value::Bytes(b) => visitor.visit_seq(SeqDeserializer::<_, DeError>::new(b.iter().copied())),
             Value::Rows(rows) => visitor.visit_seq(SeqDeserializer::<_, DeError>::new(
                 rows.rows.iter().map(|r| RowOwned { columns: rows.columns.clone(), row: r.clone() }),
@@ -362,6 +399,9 @@ impl<'de> Deserializer<'de> for ValueDe<'_> {
     }
 
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
+        if let Value::Object(fields) = self.0 {
+            return visitor.visit_map(PairsAccess { fields, at: None, next: 0 });
+        }
         match self.json() {
             Some(j) => j.deserialize_map(visitor).map_err(DeError::custom),
             None => Err(self.mismatch("a map")),
@@ -374,6 +414,11 @@ impl<'de> Deserializer<'de> for ValueDe<'_> {
         fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, DeError> {
+        if let Value::Object(pairs) = self.0 {
+            // Struct fields matched to attributes case-insensitively.
+            let at = fields.iter().map(|f| pairs.iter().position(|(n, _)| n.eq_ignore_ascii_case(f))).collect();
+            return visitor.visit_map(PairsAccess { fields: pairs, at: Some((fields, at)), next: 0 });
+        }
         match self.json() {
             Some(j) => j.deserialize_struct(name, fields, visitor).map_err(DeError::custom),
             None => Err(self.mismatch("a struct")),

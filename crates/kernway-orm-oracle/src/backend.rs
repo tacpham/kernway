@@ -53,7 +53,9 @@ fn cell<'a>(v: &'a Value, col: Option<&ColumnDef>) -> Cell<'a> {
         v @ (Value::IntervalYm { .. } | Value::IntervalDs { .. }) => Cell::Owned(fmt_interval(v, 2, 6)),
         Value::Raw(b) => Cell::Bytes(b),
         Value::Bool(b) => Cell::Bool(*b),
-        Value::Cursor(_) | Value::Lob(_) => Cell::Null,
+        Value::Cursor(_) | Value::Lob(_) | Value::ObjectImage { .. } => Cell::Null,
+        // An object / collection mapped onto an entity field: its text form.
+        v @ (Value::Object { .. } | Value::Collection { .. } | Value::AssocArray { .. }) => Cell::Owned(v.to_text().unwrap_or_default()),
     }
 }
 
@@ -114,7 +116,10 @@ pub(crate) fn to_shared(v: Value, col: Option<&Column>) -> kernway_orm_sql::Valu
         Value::Raw(b) => V::Bytes(b),
         Value::Bool(b) => V::Bool(b),
         Value::Cursor(rs) => V::Rows(Box::new(result_set(rs))),
-        Value::Lob(_) | Value::TimestampTzRegionId(..) => V::Null,
+        Value::Lob(_) | Value::TimestampTzRegionId(..) | Value::ObjectImage { .. } => V::Null,
+        Value::Object { fields, .. } => V::Object(fields.into_iter().map(|(n, v)| (n, to_shared(v, None))).collect()),
+        Value::Collection { elements, .. } => V::Array(elements.into_iter().map(|v| to_shared(v, None)).collect()),
+        Value::AssocArray { entries, .. } => V::Object(entries.into_iter().map(|(k, v)| (k.to_string(), to_shared(v, None))).collect()),
         Value::TimestampTzRegion(d, _, region) => V::DateTime(format!(
             "{} {region}",
             fmt_datetime(&d, if col.is_some() { frac } else if d.nanos == 0 { 0 } else { 9 })
