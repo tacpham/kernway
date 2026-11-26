@@ -77,8 +77,19 @@ impl AsyncTlsStream {
     }
 
     /// Write plaintext: buffer it into `rustls`, then flush the resulting TLS records.
-    pub async fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.conn.writer().write_all(buf)?;
+    /// rustls buffers at most a bounded amount of unsent plaintext (64 KiB by
+    /// default), so a large write is fed in pieces, flushing the encrypted
+    /// records to the socket whenever the buffer is full.
+    pub async fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
+        while !buf.is_empty() {
+            let n = self.conn.writer().write(buf)?;
+            if n == 0 {
+                // Buffer full: send what is queued, then keep writing.
+                self.flush_tls().await?;
+                continue;
+            }
+            buf = &buf[n..];
+        }
         self.flush_tls().await
     }
 

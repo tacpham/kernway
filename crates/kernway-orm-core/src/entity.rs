@@ -19,6 +19,8 @@ pub enum ColumnType {
     Timestamp,
     /// A JSON document, when the backend supports one.
     Json,
+    /// Arbitrary bytes (`Vec<u8>`): BLOB / BYTEA / LONGBLOB.
+    Binary,
     /// The macro could not infer a type from the Rust field.
     ///
     /// Not an error — a backend falls back to its own default mapping.

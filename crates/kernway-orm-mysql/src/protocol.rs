@@ -353,19 +353,25 @@ impl Conn {
     /// Write one packet, using (and advancing) the current sequence id. The frame
     /// is assembled in a reused buffer, so steady-state writes do not allocate.
     async fn write_packet(&mut self, payload: &[u8]) -> Result<(), OrmError> {
-        if payload.len() >= 0xFF_FFFF {
-            return Err(conn_err("outgoing packet too large (>16 MiB not split)"));
+        // A payload of 16 MiB - 1 or more is split into maximum-size packets,
+        // ended by a shorter one (empty if the size is an exact multiple).
+        let mut rest = payload;
+        loop {
+            let len = rest.len().min(0xFF_FFFF);
+            let seq = self.seq;
+            let frame = self.io.write_buf();
+            frame.extend_from_slice(&[len as u8, (len >> 8) as u8, (len >> 16) as u8, seq]);
+            frame.extend_from_slice(&rest[..len]);
+            self.seq = self.seq.wrapping_add(1);
+            self.io
+                .flush()
+                .await
+                .map_err(|e| conn_err(format!("write packet: {e}")))?;
+            rest = &rest[len..];
+            if len < 0xFF_FFFF {
+                return Ok(());
+            }
         }
-        let len = payload.len();
-        let seq = self.seq;
-        let frame = self.io.write_buf();
-        frame.extend_from_slice(&[len as u8, (len >> 8) as u8, (len >> 16) as u8, seq]);
-        frame.extend_from_slice(payload);
-        self.seq = self.seq.wrapping_add(1);
-        self.io
-            .flush()
-            .await
-            .map_err(|e| conn_err(format!("write packet: {e}")))
     }
 
     // --- Connection phase -------------------------------------------------
@@ -1239,6 +1245,8 @@ pub enum BindValue {
     Float(f64),
     /// UTF-8 text (sent as `VAR_STRING`).
     Str(String),
+    /// Binary data (sent as `BLOB`).
+    Bytes(Vec<u8>),
 }
 
 const MYSQL_TYPE_TINY: u8 = 0x01;
@@ -1254,6 +1262,7 @@ const MYSQL_TYPE_DATE: u8 = 0x0a;
 const MYSQL_TYPE_TIME: u8 = 0x0b;
 const MYSQL_TYPE_DATETIME: u8 = 0x0c;
 const MYSQL_TYPE_YEAR: u8 = 0x0d;
+const MYSQL_TYPE_BLOB: u8 = 0xfc;
 const MYSQL_TYPE_VAR_STRING: u8 = 0xfd;
 
 impl BindValue {
@@ -1265,6 +1274,7 @@ impl BindValue {
             BindValue::UInt(_) => (MYSQL_TYPE_LONGLONG, true),
             BindValue::Float(_) => (MYSQL_TYPE_DOUBLE, false),
             BindValue::Str(_) => (MYSQL_TYPE_VAR_STRING, false),
+            BindValue::Bytes(_) => (MYSQL_TYPE_BLOB, false),
         }
     }
 
@@ -1279,6 +1289,10 @@ impl BindValue {
             BindValue::Str(s) => {
                 write_lenenc_int(out, s.len() as u64);
                 out.extend_from_slice(s.as_bytes());
+            }
+            BindValue::Bytes(b) => {
+                write_lenenc_int(out, b.len() as u64);
+                out.extend_from_slice(b);
             }
         }
     }

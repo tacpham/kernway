@@ -9,7 +9,7 @@
 
 use crate::entity::{ColumnDef, ColumnType};
 use crate::error::OrmError;
-use serde::de::value::BorrowedStrDeserializer;
+use serde::de::value::{BorrowedStrDeserializer, SeqDeserializer};
 use serde::de::{
     DeserializeOwned, DeserializeSeed, Deserializer, Error as _, IntoDeserializer, MapAccess,
     Visitor,
@@ -145,6 +145,15 @@ struct CellDe<'r, 'a> {
 }
 
 impl CellDe<'_, '_> {
+    /// The cell's raw bytes (text as its UTF-8 bytes).
+    fn raw(&self) -> Vec<u8> {
+        match self.cell {
+            Cell::Bytes(b) => b.to_vec(),
+            Cell::Owned(s) => s.as_bytes().to_vec(),
+            other => other.to_text().map(String::into_bytes).unwrap_or_default(),
+        }
+    }
+
     /// The cell as text, borrowed when it already is UTF-8 text.
     fn text(&self) -> Option<std::borrow::Cow<'_, str>> {
         match self.cell {
@@ -219,7 +228,22 @@ impl<'de> Deserializer<'de> for CellDe<'_, '_> {
             ColumnType::Text | ColumnType::Timestamp | ColumnType::Unknown => {
                 visit_text(self.text().unwrap_or_default(), visitor)
             }
+            // `Vec<u8>` deserializes from a sequence; a `serde_bytes` buffer
+            // accepts one too.
+            ColumnType::Binary => visitor.visit_seq(SeqDeserializer::<_, DeError>::new(self.raw().into_iter())),
         }
+    }
+
+    fn deserialize_bytes<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
+        match self.cell {
+            Cell::Null => visitor.visit_unit(),
+            Cell::Bytes(b) => visitor.visit_bytes(b),
+            _ => visitor.visit_byte_buf(self.raw()),
+        }
+    }
+
+    fn deserialize_byte_buf<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
+        self.deserialize_bytes(visitor)
     }
 
     fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, DeError> {
@@ -258,8 +282,7 @@ impl<'de> Deserializer<'de> for CellDe<'_, '_> {
 
     forward_to_deserialize_any! {
         bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
-        bytes byte_buf unit unit_struct seq tuple tuple_struct map struct
-        identifier ignored_any
+        unit unit_struct seq tuple tuple_struct map struct identifier ignored_any
     }
 }
 
@@ -293,7 +316,7 @@ mod tests {
                 .unwrap_or_else(|_| serde_json::Value::String(s.clone())),
             ColumnType::Boolean => serde_json::Value::Bool(s == "1" || s.eq_ignore_ascii_case("true")),
             ColumnType::Json => serde_json::from_str(s).unwrap_or_else(|_| serde_json::Value::String(s.clone())),
-            ColumnType::Text | ColumnType::Timestamp | ColumnType::Unknown => {
+            ColumnType::Text | ColumnType::Timestamp | ColumnType::Unknown | ColumnType::Binary => {
                 serde_json::Value::String(s.clone())
             }
         }

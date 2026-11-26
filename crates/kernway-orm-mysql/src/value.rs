@@ -19,8 +19,12 @@ fn map_serde(e: serde_json::Error) -> OrmError {
 pub use kernway_orm_core::decode::{cells_to_entity, row_to_entity};
 
 /// Render a JSON value as a MySQL SQL literal for the given column.
-pub fn json_to_literal(v: &serde_json::Value, _col: &ColumnDef) -> String {
+pub fn json_to_literal(v: &serde_json::Value, col: &ColumnDef) -> String {
     match v {
+        serde_json::Value::Array(items) if col.col_type == ColumnType::Binary => {
+            let hex: String = items.iter().map(|v| format!("{:02X}", v.as_u64().unwrap_or(0) as u8)).collect();
+            if hex.is_empty() { "X''".to_string() } else { format!("X'{hex}'") }
+        }
         serde_json::Value::Null => "NULL".to_string(),
         serde_json::Value::Bool(b) => if *b { "1" } else { "0" }.to_string(),
         serde_json::Value::Number(n) => n.to_string(),
@@ -73,6 +77,9 @@ pub fn json_to_bind(v: &serde_json::Value, col: &ColumnDef) -> BindValue {
             }
         }
         serde_json::Value::String(s) => BindValue::Str(s.clone()),
+        serde_json::Value::Array(items) if col.col_type == ColumnType::Binary => {
+            BindValue::Bytes(items.iter().map(|v| v.as_u64().unwrap_or(0) as u8).collect())
+        }
         other => BindValue::Str(serde_json::to_string(other).unwrap_or_default()),
     }
 }

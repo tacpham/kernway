@@ -269,6 +269,7 @@ fn column_type_tokens(ty: &Type) -> proc_macro2::TokenStream {
         Some("String") | Some("str") => quote! { ::kernway_orm_core::ColumnType::Text },
         Some("bool") => quote! { ::kernway_orm_core::ColumnType::Boolean },
         Some("f32") | Some("f64") => quote! { ::kernway_orm_core::ColumnType::Float },
+        Some("Vec<u8>") => quote! { ::kernway_orm_core::ColumnType::Binary },
         _ => quote! { ::kernway_orm_core::ColumnType::Unknown },
     }
 }
@@ -283,6 +284,16 @@ fn rust_type_name(ty: &Type) -> Option<String> {
                 if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                     if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
                         return rust_type_name(inner);
+                    }
+                }
+            }
+            // `Vec<u8>` is binary data, not a list.
+            if segment.ident == "Vec" {
+                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                        if rust_type_name(inner).as_deref() == Some("u8") {
+                            return Some("Vec<u8>".to_string());
+                        }
                     }
                 }
             }

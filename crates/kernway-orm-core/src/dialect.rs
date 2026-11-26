@@ -55,6 +55,14 @@ pub trait SqlDialect: Send + Sync + 'static {
     /// Map a [`ColumnType`] to the SQL type keyword for this dialect.
     fn col_type_ddl(&self, col_type: &ColumnType) -> &'static str;
 
+    /// The SQL type for one column in `CREATE TABLE`. Defaults to
+    /// [`col_type_ddl`](Self::col_type_ddl); a backend overrides it when the
+    /// type depends on more than the column type (e.g. a key column that
+    /// cannot be an unbounded text type).
+    fn column_ddl(&self, col: &ColumnDef) -> String {
+        self.col_type_ddl(&col.col_type).to_string()
+    }
+
     /// Clause appended to a `SELECT` to take a pessimistic row lock, or `""`
     /// when the backend has none.
     ///
@@ -80,7 +88,7 @@ pub trait SqlDialect: Send + Sync + 'static {
 
         let mut parts = Vec::new();
         for col in cols {
-            let sql_type = self.col_type_ddl(&col.col_type);
+            let sql_type = self.column_ddl(col);
             let mut def = format!("{} {}", self.quote_identifier(col.name), sql_type);
             if col.primary_key {
                 if composite {

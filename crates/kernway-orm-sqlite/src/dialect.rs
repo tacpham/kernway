@@ -24,6 +24,7 @@ impl SqlDialect for SqliteDialect {
         match col_type {
             ColumnType::BigInt | ColumnType::Integer | ColumnType::Boolean => "INTEGER",
             ColumnType::Float => "REAL",
+            ColumnType::Binary => "BLOB",
             _ => "TEXT",
         }
     }

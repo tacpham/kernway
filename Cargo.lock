@@ -1125,6 +1125,7 @@ dependencies = [
  "kernway-orm-macro",
  "kernway-tls",
  "kernway-wire",
+ "md-5",
  "rt-core",
  "rt-net",
  "serde",

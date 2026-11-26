@@ -75,7 +75,7 @@ fn sql_to_json(v: SqlValue, col: &ColumnDef) -> serde_json::Value {
                 serde_json::Value::String(s)
             }
         }
-        SqlValue::Blob(bytes) => serde_json::Value::String(format!("<blob:{}>", bytes.len())),
+        SqlValue::Blob(bytes) => serde_json::Value::Array(bytes.into_iter().map(serde_json::Value::from).collect()),
     }
 }
 
@@ -114,6 +114,9 @@ fn json_to_sql(v: serde_json::Value, col: &ColumnDef) -> Result<SqlValue, OrmErr
             }
         }
         serde_json::Value::String(s) => SqlValue::Text(s),
+        serde_json::Value::Array(items) if col.col_type == ColumnType::Binary => {
+            SqlValue::Blob(items.iter().map(|v| v.as_u64().unwrap_or(0) as u8).collect())
+        }
         other => SqlValue::Text(serde_json::to_string(&other).unwrap_or_default()),
     })
 }
@@ -659,6 +662,33 @@ mod tests {
             name: name.to_string(),
             value,
         }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[entity(table = "files")]
+    struct File {
+        #[id(strategy = "auto")]
+        id: u64,
+        body: String,
+        data: Vec<u8>,
+        thumb: Option<Vec<u8>>,
+    }
+
+    #[test]
+    fn binary_columns_store_real_blobs() {
+        let repo = SqliteRepository::<File>::in_memory().unwrap();
+        let data: Vec<u8> = (0..=255u8).cycle().take(100_000).collect();
+        let body = "Việt ✓ ".repeat(10_000);
+        let saved = block_on(repo.save(File { id: 0, body: body.clone(), data: data.clone(), thumb: None })).unwrap();
+        let got = block_on(repo.find_by_id(&saved.id)).unwrap().unwrap();
+        assert_eq!(got.data, data);
+        assert_eq!(got.body, body);
+        assert_eq!(got.thumb, None);
+        let other = block_on(repo.save(File { id: 0, body: String::new(), data: vec![], thumb: Some(vec![9, 0, 255]) })).unwrap();
+        let got = block_on(repo.find_by_id(&other.id)).unwrap().unwrap();
+        assert_eq!(got.thumb, Some(vec![9, 0, 255]));
+        assert!(got.data.is_empty());
+        assert_eq!(block_on(repo.find_all()).unwrap().len(), 2);
     }
 
     #[test]

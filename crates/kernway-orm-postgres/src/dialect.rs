@@ -37,6 +37,7 @@ impl SqlDialect for PostgresDialect {
             ColumnType::Text | ColumnType::Unknown => "TEXT",
             ColumnType::Timestamp => "TIMESTAMPTZ",
             ColumnType::Json => "JSONB",
+            ColumnType::Binary => "BYTEA",
         }
     }
 }

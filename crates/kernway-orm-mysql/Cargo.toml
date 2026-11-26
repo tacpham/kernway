@@ -32,6 +32,8 @@ default = []
 mysql = ["sha1", "sha2", "kernway-tls", "kernway-wire", "rt-core", "rt-net"]
 
 [dev-dependencies]
+# Checksums for the large-value write tests.
+md-5              = "0.11"
 kernway-orm-macro = { workspace = true }
 rt-core           = { path = "../rt-core" }
 

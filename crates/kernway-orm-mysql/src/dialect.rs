@@ -1,6 +1,6 @@
 //! MySQL SQL dialect.
 
-use kernway_orm_core::{dialect::SqlDialect, entity::ColumnType};
+use kernway_orm_core::{dialect::SqlDialect, entity::{ColumnDef, ColumnType}};
 
 /// MySQL SQL dialect adapter.
 pub struct MySqlDialect;
@@ -26,15 +26,27 @@ impl SqlDialect for MySqlDialect {
         format!("`{}`", name)
     }
 
+    /// Text keys and unique columns become `VARCHAR(255)`: MySQL cannot index
+    /// an unbounded `LONGTEXT` without a prefix length.
+    fn column_ddl(&self, col: &ColumnDef) -> String {
+        let text = matches!(col.col_type, ColumnType::Text | ColumnType::Unknown);
+        if text && (col.primary_key || col.unique) {
+            "VARCHAR(255)".to_string()
+        } else {
+            self.col_type_ddl(&col.col_type).to_string()
+        }
+    }
+
     fn col_type_ddl(&self, col_type: &ColumnType) -> &'static str {
         match col_type {
             ColumnType::Integer => "INT",
             ColumnType::BigInt => "BIGINT",
             ColumnType::Boolean => "TINYINT(1)",
             ColumnType::Float => "DOUBLE",
-            ColumnType::Text | ColumnType::Unknown => "TEXT",
+            ColumnType::Text | ColumnType::Unknown => "LONGTEXT",
             ColumnType::Timestamp => "DATETIME",
             ColumnType::Json => "JSON",
+            ColumnType::Binary => "LONGBLOB",
         }
     }
 
