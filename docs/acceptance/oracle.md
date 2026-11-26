@@ -5,19 +5,19 @@
 
 | | |
 |---|---|
-| generated | 2026-11-26 11:46 UTC |
+| generated | 2026-11-26 14:02 UTC |
 | server | Oracle AI Database 26ai Free Release 23.26.4.0.0 - Develop, Learn, and Run for Free Version 23.26.4.0.0 |
 | image | gvenzl/oracle-free:23-slim |
 | container | kernway-oracle |
-| driver commit | 61c5a5f on feat/plsql-full |
+| driver commit | 94c9cc9 on feat/plsql-full |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
-| command | `cargo test -p kernway-orm-oracle  --lib --tests -- --test-threads=1 --nocapture` |
+| command | `cargo test -p kernway-orm-oracle  --lib --tests -- --test-threads=1 --nocapture ` |
 
-## Verdict: implemented features **PASSED** · completeness **30/40** — NOT complete
+## Verdict: implemented features **PASSED** · completeness **32/42** — NOT complete
 
 - *Implemented features* passes only if every test ran and passed (no skips) in this run.
 - *Completeness* counts 🚧 gaps (listed below) against the full feature catalog.
-- Features verified: **30 / 40** (10 not implemented yet, 0 failing; 0 not applicable to Oracle).
+- Features verified: **32 / 42** (10 not implemented yet, 0 failing; 0 not applicable to Oracle).
 - Tests run: 41 — 41 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
 - A feature is ✅ only when every test listed as its evidence ran and passed in this run.
 
@@ -65,15 +65,17 @@
 
 | Feature | Status | Evidence / note |
 |---|---|---|
-| Shared conformance suite (CRUD, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL) | ✅ PASS | `oracle_conforms` |
-| Query builder aggregates / GROUP BY / JOIN | 🚧 GAP | use hand-written SQL (query_as) for now |
+| Shared conformance suite (CRUD, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL, joins/aggregates, execute_many failure semantics) | ✅ PASS | `oracle_conforms` |
+| Select builder: INNER / LEFT JOIN, WHERE on any joined entity, GROUP BY, COUNT/COUNT DISTINCT/SUM/AVG/MIN/MAX, HAVING, ORDER BY, OFFSET/FETCH, counting groups, entity pairs from a join | ✅ PASS | `oracle_conforms` |
+| Results into any struct / tuple by column name (no entity needed), per-field conversion | ✅ PASS | `oracle_conforms` |
 
 ## Hand-written SQL
 
 | Feature | Status | Evidence / note |
 |---|---|---|
 | Streaming large results (150k rows); callback errors close the cursor | ✅ PASS | `large_results_stream_and_a_callback_error_stops_cleanly` |
-| Array DML (execute_many, 20k rows in one round trip; all-or-nothing in a transaction) | ✅ PASS | `array_dml_runs_many_rows_in_one_call` |
+| Array DML (execute_many, 20k rows in one round trip; same outcome as row by row on a failure part-way) | ✅ PASS | `array_dml_runs_many_rows_in_one_call`<br>`oracle_conforms` |
+| Server-side cursor API (open / fetch batches / close, statements in between) | 🚧 GAP | reports Unsupported (MySQL has it; planned with the Oracle phases) |
 
 ## PL/SQL
 

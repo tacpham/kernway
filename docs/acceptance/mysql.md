@@ -5,19 +5,19 @@
 
 | | |
 |---|---|
-| generated | 2026-11-26 14:01 UTC |
+| generated | 2026-11-26 14:02 UTC |
 | server | MySQL 8.0.46 |
 | image | mysql:8.0 |
 | container | kernway-mysql |
-| driver commit | f0c54fe on feat/plsql-full |
+| driver commit | 94c9cc9 on feat/plsql-full |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
 | command | `cargo test -p kernway-orm-mysql --features mysql --lib --tests -- --test-threads=1 --nocapture --skip unix_socket_; unix_socket_* inside kernway-mysql` |
 
-## Verdict: implemented features **FAILED** · completeness **37/38** — complete
+## Verdict: implemented features **PASSED** · completeness **38/38** — complete
 
 - *Implemented features* passes only if every test ran and passed (no skips) in this run.
 - *Completeness* counts 🚧 gaps (listed below) against the full feature catalog.
-- Features verified: **37 / 38** (0 not implemented yet, 1 failing; 2 not applicable to MySQL).
+- Features verified: **38 / 38** (0 not implemented yet, 0 failing; 2 not applicable to MySQL).
 - Tests run: 54 — 54 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
 - A feature is ✅ only when every test listed as its evidence ran and passed in this run.
 
@@ -66,7 +66,7 @@
 | Transactions: commit, rollback on error | ✅ PASS | `transaction_commit_with_row_lock`<br>`transaction_rolls_back_on_error` |
 | SELECT … FOR UPDATE under concurrency (no lost update) | ✅ PASS | `concurrent_for_update_no_lost_update` |
 | Select builder: INNER / LEFT JOIN, WHERE on any joined entity, GROUP BY, COUNT/COUNT DISTINCT/SUM/AVG/MIN/MAX, HAVING, ORDER BY, LIMIT, counting groups, entity pairs from a join | ✅ PASS | `mysql_conforms` |
-| Results into any struct / tuple by column name (no entity needed), per-field conversion | ❌ FAIL | `mysql_conforms`<br>`value_de::tests::structs_match_columns_by_name_and_convert_per_field` **NOT RUN**<br>`value_de::tests::tuples_take_values_by_position_and_single_columns_read_directly` **NOT RUN**<br>`value_de::tests::a_value_that_does_not_fit_is_an_error` **NOT RUN** |
+| Results into any struct / tuple by column name (no entity needed), per-field conversion | ✅ PASS | `mysql_conforms` |
 
 ## Hand-written SQL
 
