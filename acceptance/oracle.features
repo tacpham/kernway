@@ -24,7 +24,9 @@ Types | VECTOR — equal to VECTOR_SERIALIZE | every_column_type_is_typed_and_ma
 Types | BOOLEAN | every_column_type_is_typed_and_matches_the_servers_rendering
 Types | ROWID / UROWID (physical and logical) accepted back by the server | every_column_type_is_typed_and_matches_the_servers_rendering, logical_rowids_of_index_organized_tables_round_trip
 Types | CLOB / NCLOB / BLOB read and written, 0 B – 1 MB | clob_and_blob_read_and_write
-Types | Object types / XMLType / BFILE / nested CURSOR columns refused cleanly (session stays usable) | unsupported_types_are_refused_cleanly
+Types | Nested CURSOR(...) columns: each fetched to the end as a result set (120 rows x their own cursors) | nested_cursor_columns_come_back_as_result_sets
+Types | BFILE columns: the server file read through its locator (open / read / close), byte-exact vs the server's length; a missing file is the server's error | bfile_columns_are_read_from_the_server_file
+Types | Object types / XMLType columns decoded | GAP: refused with OrmError::Unsupported (planned: phase 3)
 Types | Object types / XMLType / BFILE / nested CURSOR columns decoded | GAP: refused with OrmError::Unsupported (planned: phase 3)
 Types | TIMESTAMP WITH TIME ZONE in a named region | GAP: refused with a clear message; use TO_CHAR / SYS_EXTRACT_UTC
 

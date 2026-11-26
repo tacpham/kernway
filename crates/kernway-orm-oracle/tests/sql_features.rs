@@ -126,7 +126,6 @@ fn unsupported_types_are_refused_cleanly() {
         for sql in [
             "SELECT kwo_point(1, 2) FROM dual",
             "SELECT XMLTYPE('<a>1</a>') FROM dual",
-            "SELECT BFILENAME('DATA_PUMP_DIR', 'x') FROM dual",
         ] {
             let e = db.query(sql, &[]).await.expect_err(sql);
             assert!(matches!(e, OrmError::Unsupported(_)), "{sql}: {e}");
@@ -572,5 +571,53 @@ fn nested_cursor_columns_come_back_as_result_sets() {
             .await;
         assert!(r.is_err(), "no such function: the session stays usable");
         assert_eq!(db.query_scalar("SELECT 7 FROM dual", &[]).await.unwrap(), Value::Int(7));
+    });
+}
+
+#[test]
+fn bfile_columns_are_read_from_the_server_file() {
+    let Some(url) = url() else { return eprintln!("skip: KERNWAY_ORACLE_HOST not set") };
+    run(async move {
+        // SYSTEM makes a directory and writes a file in it (UTL_FILE, binary).
+        let pw = std::env::var("KERNWAY_ORACLE_SYSTEM_PASSWORD").unwrap_or_else(|_| "oracle_pw".into());
+        let sys_url = url.replacen("kernway:kernway_pw", &format!("system:{pw}"), 1);
+        let sys = OracleDriver::connect_with(kernway_orm_oracle::OracleConfig::from_url(&sys_url).unwrap(), 1).await.unwrap();
+        sys.execute("CREATE OR REPLACE DIRECTORY kw_bfile_dir AS '/tmp'").await.unwrap();
+        sys.execute("GRANT READ ON DIRECTORY kw_bfile_dir TO kernway").await.unwrap();
+        sys.execute(
+            "DECLARE f UTL_FILE.FILE_TYPE; acc RAW(1024); chunk RAW(256);
+             BEGIN
+               FOR i IN 0 .. 255 LOOP acc := UTL_RAW.CONCAT(acc, UTL_RAW.CAST_FROM_BINARY_INTEGER(i, 1)); END LOOP;
+               chunk := UTL_RAW.SUBSTR(acc, 4, 256);
+               f := UTL_FILE.FOPEN('KW_BFILE_DIR', 'kw_bfile.bin', 'wb', 32767);
+               FOR i IN 1 .. 400 LOOP UTL_FILE.PUT_RAW(f, chunk); END LOOP;
+               UTL_FILE.FCLOSE(f);
+             END;",
+        )
+        .await
+        .unwrap();
+
+        let db = OracleDriver::connect_with(kernway_orm_oracle::OracleConfig::from_url(&url).unwrap(), 1).await.unwrap();
+        let r = db
+            .query(
+                "SELECT BFILENAME('KW_BFILE_DIR', 'kw_bfile.bin') AS f, DBMS_LOB.GETLENGTH(BFILENAME('KW_BFILE_DIR', 'kw_bfile.bin')) AS n FROM dual",
+                &[],
+            )
+            .await
+            .unwrap();
+        // CAST_FROM_BINARY_INTEGER(i, 1) is big-endian 4 bytes; bytes 4.. of
+        // the concatenation are 0 0 0 1 0 0 0 2 … — rebuild the same here.
+        let mut all = Vec::new();
+        for i in 0u32..256 {
+            all.extend(i.to_be_bytes());
+        }
+        let chunk = &all[3..259];
+        let want: Vec<u8> = chunk.repeat(400);
+        assert_eq!(r.rows[0][1], Value::Int(want.len() as i64), "server length");
+        assert_eq!(r.rows[0][0], Value::Bytes(want));
+        // A missing file is the server's error; the session stays usable.
+        let e = db.query("SELECT BFILENAME('KW_BFILE_DIR', 'no_such_file.bin') FROM dual", &[]).await.unwrap_err();
+        assert!(e.to_string().contains("ORA-22288") || e.to_string().contains("ORA-29283"), "{e}");
+        assert_eq!(db.query_scalar("SELECT 5 FROM dual", &[]).await.unwrap(), Value::Int(5));
     });
 }

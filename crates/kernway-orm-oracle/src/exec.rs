@@ -449,7 +449,7 @@ fn unsupported_column(cols: &[Column]) -> Option<&Column> {
                 c.ora_type,
                 VARCHAR | NUMBER | BINARY_INTEGER | LONG | DATE | RAW | LONG_RAW | CHAR | BINARY_FLOAT
                     | BINARY_DOUBLE | TIMESTAMP | TIMESTAMP_TZ | TIMESTAMP_LTZ | BOOLEAN | JSON | VECTOR | INTERVAL_YM | INTERVAL_DS | ROWID | UROWID
-                    | CURSOR
+                    | CURSOR | BFILE
             )
     })
 }
@@ -646,7 +646,7 @@ fn parse_response(
                                 r.ub8()?;
                                 r.ub4()?;
                                 let locator = r.bytes()?.unwrap_or_default();
-                                Value::Lob(crate::lob::Lob { locator, blob: ot == ora_type::BLOB })
+                                Value::Lob(crate::lob::Lob { locator, blob: ot == ora_type::BLOB, bfile: false })
                             } else {
                                 Value::Null
                             };
@@ -791,8 +791,13 @@ fn read_column(r: &mut Reader<'_>, c: &Column, fv: u8, nested: &mut Vec<(u16, Ve
                 return Ok(Value::Null);
             }
             BFILE => {
-                skip_bytes_with_length(r)?; // locator
-                return Ok(Value::Null);
+                // The locator only (a BFILE has no size / chunk size here);
+                // the caller reads the file through it.
+                if r.ub4()? == 0 {
+                    return Ok(Value::Null);
+                }
+                let locator = r.bytes()?.unwrap_or_default();
+                return Ok(Value::Lob(crate::lob::Lob { locator, blob: true, bfile: true }));
             }
             CURSOR => {
                 // A nested cursor: its columns and id; the caller fetches
@@ -1368,6 +1373,10 @@ impl Conn {
                     if let Some((id, cols)) = nested.next() {
                         *v = Value::Cursor(Box::pin(self.fetch_ref_cursor(id, cols)).await?);
                     }
+                } else if let Value::Lob(lob) = v {
+                    // BFILE columns: read the file through its locator.
+                    let lob = lob.clone();
+                    *v = Box::pin(self.lob_read_all(&lob)).await?;
                 }
             }
         }

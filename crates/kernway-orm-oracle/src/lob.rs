@@ -15,7 +15,12 @@ mod op {
     pub const WRITE: u32 = 0x0040;
     pub const CREATE_TEMP: u32 = 0x0110;
     pub const FREE_TEMP: u32 = 0x0111;
+    pub const FILE_OPEN: u32 = 0x0100;
+    pub const FILE_CLOSE: u32 = 0x0200;
 }
+
+/// FILE_OPEN mode: read only (the only mode a BFILE has).
+const OPEN_READ_ONLY: i64 = 11;
 
 /// Temporary LOBs live for the session (`OCI_DURATION_SESSION`).
 const DURATION_SESSION: u32 = 10;
@@ -42,6 +47,8 @@ pub struct Lob {
     pub locator: Vec<u8>,
     /// BLOB (bytes) rather than CLOB (text).
     pub blob: bool,
+    /// A BFILE: a read-only file on the database server (bytes).
+    pub bfile: bool,
 }
 
 impl Lob {
@@ -176,7 +183,7 @@ impl Conn {
 
     /// A new temporary CLOB (or BLOB) for the session.
     pub(crate) async fn lob_create_temp(&mut self, blob: bool) -> Result<Lob, OrmError> {
-        let mut lob = Lob { locator: vec![0; TEMP_LOCATOR_LEN], blob };
+        let mut lob = Lob { locator: vec![0; TEMP_LOCATOR_LEN], blob, bfile: false };
         let reply = self
             .lob_op(LobOp {
                 op: op::CREATE_TEMP,
@@ -216,8 +223,40 @@ impl Conn {
         Ok(())
     }
 
-    /// The whole content of `lob`: text for a CLOB, bytes for a BLOB.
+    /// The whole content of `lob`: text for a CLOB, bytes for a BLOB or a
+    /// BFILE (opened for the read and closed again).
     pub(crate) async fn lob_read_all(&mut self, lob: &Lob) -> Result<Value, OrmError> {
+        if lob.bfile {
+            // The open state lives in the locator: each operation hands back
+            // the locator to use for the next one.
+            let mut lob = lob.clone();
+            let open = self
+                .lob_op(LobOp {
+                    op: op::FILE_OPEN,
+                    lob: Some(&lob),
+                    dest_length: 0,
+                    source_offset: 0,
+                    dest_offset: 0,
+                    amount: Some(OPEN_READ_ONLY),
+                    data: None,
+                })
+                .await?;
+            if let Some(l) = open.locator {
+                lob.locator = l;
+            }
+            let read = self.lob_read_data(&mut lob).await;
+            let close = self
+                .lob_op(LobOp { op: op::FILE_CLOSE, lob: Some(&lob), dest_length: 0, source_offset: 0, dest_offset: 0, amount: None, data: None })
+                .await;
+            let data = read?;
+            close?;
+            return Ok(Value::Raw(data));
+        }
+        let data = self.lob_read_data(&mut lob.clone()).await?;
+        Ok(if lob.blob { Value::Raw(data) } else { Value::Str(lob.text(&data)?) })
+    }
+
+    async fn lob_read_data(&mut self, lob: &mut Lob) -> Result<Vec<u8>, OrmError> {
         let reply = self
             .lob_op(LobOp {
                 op: op::READ,
@@ -229,8 +268,10 @@ impl Conn {
                 data: None,
             })
             .await?;
-        let data = reply.data.unwrap_or_default();
-        Ok(if lob.blob { Value::Raw(data) } else { Value::Str(lob.text(&data)?) })
+        if let Some(l) = reply.locator {
+            lob.locator = l;
+        }
+        Ok(reply.data.unwrap_or_default())
     }
 
     /// Free a temporary LOB.
