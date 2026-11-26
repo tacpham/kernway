@@ -5,20 +5,20 @@
 
 | | |
 |---|---|
-| generated | 2026-11-26 23:23 UTC |
+| generated | 2026-11-26 23:40 UTC |
 | server | SQLite 3.45.0 |
 | image | bundled with the driver (libsqlite3-sys, compiled from source) |
 | container | none (embedded) |
-| driver commit | 7d10167 on feat/sqlite-full |
+| driver commit | 26efcd7 on feat/sqlite-full |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
-| command | `cargo test -p kernway-orm-sqlite  --lib --tests -- --test-threads=1 --nocapture ; CI run 45910145245 (Linux / macOS / Windows)` |
+| command | `cargo test -p kernway-orm-sqlite  --lib --tests -- --test-threads=1 --nocapture ; CI run 45911917012 (Linux / macOS / Windows)` |
 
-## Verdict: implemented features **PASSED** · completeness **41/41** — complete
+## Verdict: implemented features **PASSED** · completeness **42/42** — complete
 
 - *Implemented features* passes only if every test ran and passed (no skips) in this run.
 - *Completeness* counts 🚧 gaps (listed below) against the full feature catalog.
-- Features verified: **41 / 41** (0 not implemented yet, 0 failing; 4 not applicable to SQLite).
-- Tests run: 36 — 36 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
+- Features verified: **42 / 42** (0 not implemented yet, 0 failing; 4 not applicable to SQLite).
+- Tests run: 37 — 37 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
 - A feature is ✅ only when every test listed as its evidence ran and passed in this run.
 
 ## Opening & configuration
@@ -40,6 +40,7 @@
 |---|---|---|
 | Fully async: every SQLite call on the connection's own thread; a long query leaves the reactor running (proved by a timer ticking during it) | ✅ PASS | `a_long_query_does_not_stall_the_reactor` |
 | Waiting for another connection's lock (busy timeout) queues without stalling the reactor; a short timeout fails with "database is locked"; WAL readers unaffected | ✅ PASS | `waiting_for_a_lock_queues_without_stalling_and_times_out_cleanly` |
+| Opening never fails on a lock held for a moment: 8 drivers opening a fresh file at once (WAL switch, recovery) while others write, with a 1 ms busy timeout | ✅ PASS | `opening_never_fails_on_a_lock_held_for_a_moment` |
 | A cancelled / timed-out query is interrupted at once (sqlite3_interrupt) and the connection is free immediately | ✅ PASS | `a_cancelled_query_is_interrupted_and_the_connection_is_free_at_once` |
 | Writers serialised (BEGIN IMMEDIATE): concurrent read-modify-write transactions lose no update | ✅ PASS | `sqlite_conforms` |
 | Dropping the driver closes every connection and its file (the file can be deleted — strict on Windows) | ✅ PASS | `dropping_the_driver_closes_its_files` |
@@ -130,6 +131,7 @@
 | `incremental_blob_io_reads_and_writes_pieces_in_place` | PASS | yes |
 | `journal_mode_and_pragmas_are_applied_to_every_connection` | PASS | yes |
 | `online_backup_copies_a_consistent_database` | PASS | yes |
+| `opening_never_fails_on_a_lock_held_for_a_moment` | PASS | yes |
 | `parameters_are_checked` | PASS | yes |
 | `read_only_mode_reads_and_refuses_writes` | PASS | yes |
 | `rust_functions_are_callable_from_sql` | PASS | yes |
@@ -139,6 +141,6 @@
 | `waiting_for_a_lock_queues_without_stalling_and_times_out_cleanly` | PASS | yes |
 | `ci::service_backed_tests_Redis,_Meilisearch,_network` | PASS | no |
 | `ci::test_windows_latest` | PASS | yes |
-| `ci::test_macos_latest` | PASS | yes |
 | `ci::test_ubuntu_latest` | PASS | yes |
+| `ci::test_macos_latest` | PASS | yes |
 
