@@ -15,6 +15,7 @@ const OPT_DEFINE: u32 = 0x10;
 const OPT_BIND: u32 = 0x08;
 const OPT_EXECUTE: u32 = 0x20;
 const OPT_FETCH: u32 = 0x40;
+const OPT_COMMIT: u32 = 0x100;
 const OPT_PLSQL_BIND: u32 = 0x400;
 const OPT_NOT_PLSQL: u32 = 0x8000;
 const EXEC_FLAG_IMPLICIT_RESULTSET: u32 = 0x8000;
@@ -187,6 +188,7 @@ fn write_execute(
     sql: &str,
     kind: Kind,
     binds: &[Bind],
+    autocommit: bool,
 ) -> Result<(), String> {
     let is_query = kind == Kind::Query;
     let num_params = binds.len() as u64;
@@ -203,6 +205,9 @@ fn write_execute(
     }
     if num_params > 0 {
         options |= OPT_BIND;
+    }
+    if autocommit {
+        options |= OPT_COMMIT;
     }
     w.ub(u64::from(options)).ub(0); // options, cursor id (new)
     w.u8(1).ub(sql.len() as u64); // SQL pointer + length
@@ -652,6 +657,16 @@ impl Conn {
     /// (one per placeholder: every occurrence in SQL, each distinct name once
     /// in PL/SQL). Queries return all rows; PL/SQL returns OUT values.
     pub async fn execute(&mut self, sql: &str, binds: &[Bind]) -> Result<Executed, OrmError> {
+        self.execute_opts(sql, binds, false).await
+    }
+
+    /// [`execute`](Self::execute), committing the transaction as part of the
+    /// same call (Oracle's autocommit): one round trip instead of two.
+    pub async fn execute_autocommit(&mut self, sql: &str, binds: &[Bind]) -> Result<Executed, OrmError> {
+        self.execute_opts(sql, binds, true).await
+    }
+
+    async fn execute_opts(&mut self, sql: &str, binds: &[Bind], autocommit: bool) -> Result<Executed, OrmError> {
         let kind = stmt::classify(sql);
         let names = stmt::bind_names(sql, kind);
         if names.len() != binds.len() {
@@ -667,7 +682,7 @@ impl Conn {
         }
         let mut w = Writer::new();
         self.begin_call(&mut w, func::EXECUTE);
-        write_execute(&mut w, self.field_version, self.max_string_size, sql, kind, binds)
+        write_execute(&mut w, self.field_version, self.max_string_size, sql, kind, binds, autocommit)
             .map_err(OrmError::TypeConversion)?;
         self.send_data(&w.buf).await?;
 
@@ -861,7 +876,7 @@ mod tests {
     #[test]
     fn execute_of_a_query_matches_the_golden_bytes() {
         let mut w = header(6);
-        write_execute(&mut w, 24, 32767, "SELECT 1 FROM DUAL", Kind::Query, &[]).unwrap();
+        write_execute(&mut w, 24, 32767, "SELECT 1 FROM DUAL", Kind::Query, &[], false).unwrap();
         assert_eq!(
             hex(&w.buf),
             "03 5E 06 00 02 80 61 00 01 01 12 01 01 0D 00 00 00 01 02 04 7F FF FF FF 00 00 00 00 00 00 \
@@ -874,7 +889,7 @@ mod tests {
     fn execute_of_plsql_with_out_bind_matches_the_golden_bytes() {
         let mut w = header(7);
         let binds = [Bind::Out(OutType::Number), Bind::In(Value::from(5))];
-        write_execute(&mut w, 24, 32767, "BEGIN :R := F(:A); END;", Kind::PlSql, &binds).unwrap();
+        write_execute(&mut w, 24, 32767, "BEGIN :R := F(:A); END;", Kind::PlSql, &binds, false).unwrap();
         assert_eq!(
             hex(&w.buf),
             "03 5E 07 00 02 04 29 00 01 01 17 01 01 0D 00 00 00 01 01 04 7F FF FF FF 01 01 02 00 00 00 \
