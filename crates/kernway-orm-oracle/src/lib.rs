@@ -54,7 +54,7 @@ mod server_checks;
 
 pub use conn::{Conn, OracleConfig, SslMode};
 pub use dialect::OracleDialect;
-pub use driver::{OracleDriver, OracleRepository, OracleTx};
+pub use driver::{OracleDriver, OracleRepository, OracleScrollable, OracleTx};
 pub use pool::OracleConnect;
-pub use exec::{Bind, Column, Executed, OpenCursor, OutType};
+pub use exec::{Bind, Column, Executed, OpenCursor, OutType, Scroll, ScrollCursor};
 pub use value::{DateTime, ResultSet, Value};

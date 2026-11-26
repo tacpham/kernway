@@ -44,7 +44,7 @@ fn param_value(p: &Param) -> Value {
     }
 }
 
-fn binds(params: &[Param]) -> Vec<Bind> {
+pub(crate) fn binds(params: &[Param]) -> Vec<Bind> {
     params.iter().map(bind).collect()
 }
 

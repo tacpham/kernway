@@ -13,7 +13,7 @@ Protocol & encoding | Statement classification and bind discovery (literals, com
 Protocol & encoding | NUMBER / DATE / BINARY_DOUBLE codecs (reference tables, round trips) | value::tests::numbers_encode_like_the_reference_table, value::tests::numbers_round_trip, value::tests::dates_and_doubles_round_trip
 Protocol & encoding | DML, commit / rollback, server errors mapped (unique violation names the constraint) | dml_commit_rollback_and_errors, exec::tests::unique_violation_names_the_constraint
 Protocol & encoding | Statement cache: a repeated SQL / PL/SQL statement re-executes its parsed cursor (20 per session; no re-parse, no re-describe, defines kept) — server parse counter +24 vs +170 without it for 150 executions | repeated_statements_reuse_their_parsed_cursor
-Protocol & encoding | Scrollable cursors | GAP: not implemented
+Protocol & encoding | Scrollable cursors: first / last / absolute / relative / next / prior over one open cursor (binds kept, CLOB columns defined), other statements in between; through the driver as shared rows | scrollable_cursor_moves_anywhere_in_the_result, scrollable_cursor_through_the_driver_returns_shared_rows
 
 Types | NUMBER typed by precision/scale (Int / Decimal / Float), BINARY_FLOAT/DOUBLE | every_column_type_is_typed_and_matches_the_servers_rendering, backend::tests::values_are_typed_by_their_column
 Types | VARCHAR2 / NVARCHAR2 / CHAR / RAW | every_column_type_is_typed_and_matches_the_servers_rendering

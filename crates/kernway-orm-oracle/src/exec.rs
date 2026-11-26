@@ -20,6 +20,27 @@ const OPT_COMMIT: u32 = 0x100;
 const OPT_PLSQL_BIND: u32 = 0x400;
 const OPT_NOT_PLSQL: u32 = 0x8000;
 const EXEC_FLAG_IMPLICIT_RESULTSET: u32 = 0x8000;
+const EXEC_FLAG_SCROLLABLE: u32 = 0x02;
+const EXEC_FLAG_NO_CANCEL_ON_EOF: u32 = 0x80;
+/// Fetch orientations of a scrollable cursor.
+const ORIENT_CURRENT: u32 = 0x01;
+const ORIENT_FIRST: u32 = 0x04;
+const ORIENT_LAST: u32 = 0x08;
+const ORIENT_ABSOLUTE: u32 = 0x20;
+
+/// How an EXECUTE runs: a new cursor or a parsed one again, scrollable,
+/// or a scroll (positioned fetch) of an open scrollable cursor.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ExecMode {
+    /// Re-execute this cursor (no parse, no SQL text).
+    reuse: Option<u16>,
+    /// A scrollable cursor.
+    scrollable: bool,
+    /// Fetch from (orientation, row) instead of executing.
+    scroll: Option<(u32, u32)>,
+    /// Rows to fetch (queries).
+    rows: Option<u32>,
+}
 const BIND_USE_INDICATORS: u8 = 0x01;
 const BIND_DIR_INPUT: u8 = 32;
 const ERR_NO_DATA_FOUND: u32 = 1403;
@@ -148,6 +169,50 @@ pub(crate) const STMT_CACHE_SIZE: usize = 20;
 pub(crate) struct CachedStmt {
     pub(crate) cursor_id: u16,
     pub(crate) columns: Vec<Column>,
+}
+
+/// Where to move a [`ScrollCursor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scroll {
+    /// The first row.
+    First,
+    /// The last row.
+    Last,
+    /// Row `n` (1-based).
+    Absolute(u64),
+    /// `n` rows from the first row of the previous batch (negative: back).
+    Relative(i64),
+    /// The row after the previous batch.
+    Next,
+    /// The batch before the previous one (as many rows back as were fetched).
+    Prior,
+}
+
+/// A scrollable query cursor (see [`Conn::open_scrollable`]): rows read at
+/// any position, forwards or backwards, while the cursor stays open.
+#[derive(Debug, Clone)]
+pub struct ScrollCursor {
+    id: u16,
+    columns: Vec<Column>,
+    binds: Vec<Bind>,
+    sql: String,
+    /// Row number of the first row of the last batch (0 = none yet).
+    first: u64,
+    /// Rows in the last batch.
+    count: u64,
+}
+
+impl ScrollCursor {
+    /// Result columns.
+    pub fn columns(&self) -> &[Column] {
+        &self.columns
+    }
+
+    /// Row number (1-based) of the first row of the last batch; 0 before
+    /// the first fetch or after one past the end.
+    pub fn position(&self) -> u64 {
+        self.first
+    }
 }
 
 /// A query cursor left open on the server (see [`Conn::open_cursor`]).
@@ -367,17 +432,27 @@ fn write_execute(
     rows: &[&[Bind]],
     autocommit: bool,
     objects: &ObjectBindTypes,
-    reuse: Option<u16>,
+    mode: ExecMode,
 ) -> Result<(), String> {
+    let reuse = mode.reuse;
     let is_query = kind == Kind::Query;
+    // A scroll fetches from the open cursor: its binds stay as executed.
+    let rows: &[&[Bind]] = if mode.scroll.is_some() { &[] } else { rows };
     let binds: &[Bind] = rows.first().copied().unwrap_or(&[]);
     let num_params = binds.len() as u64;
     let executions = rows.len().max(1) as u64;
     let metas: Vec<(u8, u8, u32)> = (0..binds.len()).map(|i| merged_meta(rows, i)).collect::<Result<_, _>>()?;
     // A cached cursor is executed again by id: no parse, no SQL text.
-    let mut options = if reuse.is_some() { OPT_EXECUTE } else { OPT_EXECUTE | OPT_PARSE };
-    let exec_flags = EXEC_FLAG_IMPLICIT_RESULTSET;
-    let num_iters = if is_query { PREFETCH_ROWS } else { 1 };
+    let mut options = match (reuse, mode.scroll) {
+        (_, Some(_)) => 0, // a scroll only fetches
+        (Some(_), None) => OPT_EXECUTE,
+        (None, None) => OPT_EXECUTE | OPT_PARSE,
+    };
+    let mut exec_flags = EXEC_FLAG_IMPLICIT_RESULTSET;
+    if mode.scrollable {
+        exec_flags |= EXEC_FLAG_SCROLLABLE | EXEC_FLAG_NO_CANCEL_ON_EOF;
+    }
+    let num_iters = if is_query { mode.rows.unwrap_or(PREFETCH_ROWS) } else { 1 };
     if is_query {
         options |= OPT_FETCH;
     }
@@ -386,7 +461,7 @@ fn write_execute(
     } else if num_params > 0 {
         options |= OPT_PLSQL_BIND;
     }
-    if num_params > 0 {
+    if num_params > 0 && mode.scroll.is_none() {
         options |= OPT_BIND;
     }
     if autocommit {
@@ -436,7 +511,9 @@ fn write_execute(
     w.ub(u64::from(is_query)); // [7]
     w.ub(0); // [8]
     w.ub(u64::from(exec_flags)); // [9]
-    w.ub(0).ub(0).ub(0); // [10..12]
+    // [10] fetch orientation, [11] row: where a scrollable cursor reads.
+    let (orient, pos) = mode.scroll.unwrap_or(if mode.scrollable { (ORIENT_CURRENT, 1) } else { (0, 0) });
+    w.ub(u64::from(orient)).ub(u64::from(pos)).ub(0); // [10..12]
     if num_params > 0 {
         for (i, &(t, csfrm, size)) in metas.iter().enumerate() {
             w.u8(t).u8(BIND_USE_INDICATORS).u8(0).u8(0);
@@ -627,7 +704,7 @@ fn needs_define(cols: &[Column]) -> bool {
 }
 
 /// An EXECUTE that only (re)defines the output columns of an open cursor.
-fn write_define(w: &mut Writer, fv: u8, cursor_id: u16, cols: &[Column]) {
+fn write_define(w: &mut Writer, fv: u8, cursor_id: u16, cols: &[Column], scrollable: bool) {
     w.ub(u64::from(OPT_DEFINE | OPT_NOT_PLSQL)).ub(u64::from(cursor_id));
     w.u8(0).ub(0); // no SQL
     w.u8(1).ub(13); // al8i4
@@ -655,8 +732,13 @@ fn write_define(w: &mut Writer, fv: u8, cursor_id: u16, cols: &[Column]) {
     w.ub(0).ub(0).ub(0).ub(0).ub(0); // [2..6]
     w.ub(1); // [7] is query
     w.ub(0); // [8]
-    w.ub(0); // [9] exec flags
-    w.ub(0).ub(0).ub(0); // [10..12]
+    // [9] exec flags — a scrollable cursor stays scrollable — [10..12].
+    w.ub(if scrollable { u64::from(EXEC_FLAG_SCROLLABLE | EXEC_FLAG_NO_CANCEL_ON_EOF) } else { 0 });
+    if scrollable {
+        w.ub(u64::from(ORIENT_CURRENT)).ub(1).ub(0);
+    } else {
+        w.ub(0).ub(0).ub(0);
+    }
     for c in cols {
         let (t, csfrm, size) = define_type(c);
         // JSON / VECTOR come as LOBs whose whole content is prefetched.
@@ -1345,7 +1427,7 @@ impl Conn {
         // handed out to the caller).
         let cacheable = matches!(kind, Kind::Query | Kind::Dml | Kind::PlSql) && open.is_none();
         let cached = if cacheable { self.stmt_cache.remove(sql) } else { None };
-        write_execute(&mut w, self.field_version, self.max_string_size, sql, kind, rows, autocommit, &objects, cached.as_ref().map(|c| c.cursor_id))
+        write_execute(&mut w, self.field_version, self.max_string_size, sql, kind, rows, autocommit, &objects, ExecMode { reuse: cached.as_ref().map(|c| c.cursor_id), ..Default::default() })
             .map_err(OrmError::TypeConversion)?;
         self.send_data(&w.buf).await?;
 
@@ -1396,7 +1478,7 @@ impl Conn {
             // INTERVAL). The server sends no rows before the define.
             let mut w = Writer::new();
             self.begin_call(&mut w, func::EXECUTE);
-            write_define(&mut w, self.field_version, cursor_id, &result.columns);
+            write_define(&mut w, self.field_version, cursor_id, &result.columns, false);
             self.send_data(&w.buf).await?;
             apply_define(&mut result.columns);
             let cols = result.columns.clone();
@@ -1492,7 +1574,7 @@ impl Conn {
         if needs_define(&columns) {
             let mut w = Writer::new();
             self.begin_call(&mut w, func::EXECUTE);
-            write_define(&mut w, fv, cursor_id, &columns);
+            write_define(&mut w, fv, cursor_id, &columns, false);
             self.send_data(&w.buf).await?;
             apply_define(&mut columns);
             let r = self.read_call(Some(&columns), &[], &[]).await?;
@@ -1566,6 +1648,106 @@ impl Conn {
             }
             None => Ok(false),
         }
+    }
+
+    /// Open a scrollable cursor over a query: nothing is fetched until
+    /// [`scroll`](Self::scroll).
+    pub async fn open_scrollable(&mut self, sql: &str, binds: &[Bind]) -> Result<ScrollCursor, OrmError> {
+        if stmt::classify(sql) != Kind::Query {
+            return Err(OrmError::Query("a scrollable cursor needs a query".into()));
+        }
+        let mut w = Writer::new();
+        self.begin_call(&mut w, func::EXECUTE);
+        let mode = ExecMode { scrollable: true, ..Default::default() };
+        write_execute(&mut w, self.field_version, self.max_string_size, sql, Kind::Query, &[binds], false, &ObjectBindTypes::new(), mode)
+            .map_err(OrmError::TypeConversion)?;
+        self.send_data(&w.buf).await?;
+        let resp = self.read_call(None, binds, &[]).await?;
+        let id = resp.status.cursor_id;
+        if let Some(e) = resp.status.error.as_ref().filter(|e| e.code != ERR_NO_DATA_FOUND) {
+            self.queue_close(id);
+            return Err(server_error(e));
+        }
+        let mut columns = resp.columns.unwrap_or_default();
+        if let Some(c) = unsupported_column(&columns) {
+            let e = unsupported_error(c);
+            self.queue_close(id);
+            return Err(e);
+        }
+        if needs_define(&columns) {
+            let mut w = Writer::new();
+            self.begin_call(&mut w, func::EXECUTE);
+            write_define(&mut w, self.field_version, id, &columns, true);
+            self.send_data(&w.buf).await?;
+            apply_define(&mut columns);
+            let cols = columns.clone();
+            let r = self.read_call(Some(&cols), &[], &[]).await?;
+            if let Some(e) = r.status.error.as_ref().filter(|e| e.code != ERR_NO_DATA_FOUND) {
+                self.queue_close(id);
+                return Err(server_error(e));
+            }
+        }
+        Ok(ScrollCursor { id, columns, binds: binds.to_vec(), sql: sql.to_string(), first: 0, count: 0 })
+    }
+
+    /// Move a scrollable cursor and fetch up to `max_rows` rows from there;
+    /// none when the position is outside the result.
+    pub async fn scroll(&mut self, cur: &mut ScrollCursor, to: Scroll, max_rows: u32) -> Result<Vec<Vec<Value>>, OrmError> {
+        let n = max_rows.max(1);
+        let target = |row: i64| -> Option<u32> { u32::try_from(row).ok().filter(|r| *r >= 1) };
+        let (orient, pos) = match to {
+            Scroll::First => (ORIENT_FIRST, 1),
+            Scroll::Last => (ORIENT_LAST, 0),
+            Scroll::Absolute(r) => match u32::try_from(r).ok().filter(|r| *r >= 1) {
+                Some(r) => (ORIENT_ABSOLUTE, r),
+                None => return Ok(self.scrolled_out(cur)),
+            },
+            Scroll::Relative(k) => match target(cur.first as i64 + k) {
+                Some(r) => (ORIENT_ABSOLUTE, r),
+                None => return Ok(self.scrolled_out(cur)),
+            },
+            Scroll::Next => match target((cur.first + cur.count) as i64) {
+                Some(r) => (ORIENT_ABSOLUTE, r.max(1)),
+                None => (ORIENT_ABSOLUTE, 1),
+            },
+            Scroll::Prior => match target(cur.first as i64 - i64::from(n)) {
+                Some(r) => (ORIENT_ABSOLUTE, r),
+                None if cur.first > 1 => (ORIENT_ABSOLUTE, 1),
+                None => return Ok(self.scrolled_out(cur)),
+            },
+        };
+        let n = if to == Scroll::Last { 1 } else if matches!(to, Scroll::Prior) && cur.first > 1 && cur.first <= u64::from(n) { (cur.first - 1) as u32 } else { n };
+        let mut w = Writer::new();
+        self.begin_call(&mut w, func::EXECUTE);
+        let mode = ExecMode { reuse: Some(cur.id), scrollable: true, scroll: Some((orient, pos)), rows: Some(n) };
+        let binds: Vec<&[Bind]> = vec![cur.binds.as_slice()];
+        write_execute(&mut w, self.field_version, self.max_string_size, &cur.sql, Kind::Query, &binds, false, &ObjectBindTypes::new(), mode)
+            .map_err(OrmError::TypeConversion)?;
+        self.send_data(&w.buf).await?;
+        let cols = cur.columns.clone();
+        let r = self.read_call(Some(&cols), &[], &[]).await?;
+        if let Some(e) = r.status.error.as_ref().filter(|e| e.code != ERR_NO_DATA_FOUND) {
+            return Err(server_error(e));
+        }
+        let rows = r.rows;
+        if rows.is_empty() {
+            return Ok(self.scrolled_out(cur));
+        }
+        // The server reports the row number of the last row it sent.
+        cur.count = rows.len() as u64;
+        cur.first = r.status.row_count.saturating_sub(cur.count) + 1;
+        Ok(rows)
+    }
+
+    fn scrolled_out(&mut self, cur: &mut ScrollCursor) -> Vec<Vec<Value>> {
+        cur.first = 0;
+        cur.count = 0;
+        Vec::new()
+    }
+
+    /// Close a scrollable cursor (with the next call).
+    pub fn close_scrollable(&mut self, cur: ScrollCursor) {
+        self.queue_close(cur.id);
     }
 
     /// Close an open cursor (with the next call).
@@ -1699,7 +1881,7 @@ mod tests {
     #[test]
     fn execute_of_a_query_matches_the_golden_bytes() {
         let mut w = header(6);
-        write_execute(&mut w, 24, 32767, "SELECT 1 FROM DUAL", Kind::Query, &[&[]], false, &Default::default(), None).unwrap();
+        write_execute(&mut w, 24, 32767, "SELECT 1 FROM DUAL", Kind::Query, &[&[]], false, &Default::default(), ExecMode::default()).unwrap();
         assert_eq!(
             hex(&w.buf),
             "03 5E 06 00 02 80 61 00 01 01 12 01 01 0D 00 00 00 01 02 04 7F FF FF FF 00 00 00 00 00 00 \
@@ -1712,7 +1894,7 @@ mod tests {
     fn execute_of_plsql_with_out_bind_matches_the_golden_bytes() {
         let mut w = header(7);
         let binds = [Bind::Out(OutType::Number), Bind::In(Value::from(5))];
-        write_execute(&mut w, 24, 32767, "BEGIN :R := F(:A); END;", Kind::PlSql, &[&binds], false, &Default::default(), None).unwrap();
+        write_execute(&mut w, 24, 32767, "BEGIN :R := F(:A); END;", Kind::PlSql, &[&binds], false, &Default::default(), ExecMode::default()).unwrap();
         assert_eq!(
             hex(&w.buf),
             "03 5E 07 00 02 04 29 00 01 01 17 01 01 0D 00 00 00 01 01 04 7F FF FF FF 01 01 02 00 00 00 \

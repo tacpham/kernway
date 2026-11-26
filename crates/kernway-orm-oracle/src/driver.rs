@@ -37,6 +37,70 @@ impl OracleDriver {
     }
 }
 
+impl OracleDriver {
+    /// Open a scrollable cursor over a query on a pooled connection of its
+    /// own: move with [`OracleScrollable::fetch`] (first / last / absolute /
+    /// relative / next / prior), forwards and backwards.
+    pub async fn scrollable(&self, sql: &str, params: &[kernway_orm_sql::Param]) -> Result<OracleScrollable, OrmError> {
+        let mut conn = self.pool().acquire().await?;
+        let cur = conn.open_scrollable(sql, &crate::backend::binds(params)).await;
+        match cur {
+            Ok(cur) => Ok(OracleScrollable { conn, cur: Some(cur) }),
+            Err(e) => {
+                if matches!(e, OrmError::Connection(_)) {
+                    conn.poison();
+                }
+                Err(e)
+            }
+        }
+    }
+}
+
+/// A scrollable cursor holding its pooled connection (see
+/// [`OracleDriver::scrollable`]); closed when dropped.
+pub struct OracleScrollable {
+    conn: kernway_wire::Pooled<OracleConnect>,
+    cur: Option<crate::exec::ScrollCursor>,
+}
+
+impl OracleScrollable {
+    /// Move to `to` and fetch up to `max_rows` rows from there (none outside
+    /// the result).
+    pub async fn fetch(&mut self, to: crate::exec::Scroll, max_rows: u32) -> Result<kernway_orm_sql::Rows, OrmError> {
+        let cur = self.cur.as_mut().ok_or_else(|| OrmError::Query("cursor closed".into()))?;
+        let rows = match self.conn.scroll(cur, to, max_rows).await {
+            Ok(r) => r,
+            Err(e) => {
+                if matches!(e, OrmError::Connection(_)) {
+                    self.conn.poison();
+                }
+                return Err(e);
+            }
+        };
+        let cols = cur.columns().to_vec();
+        Ok(kernway_orm_sql::Rows {
+            columns: cols.iter().map(|c| c.name.clone()).collect(),
+            rows: rows
+                .into_iter()
+                .map(|row| row.into_iter().zip(&cols).map(|(v, c)| crate::backend::to_shared(v, Some(c))).collect())
+                .collect(),
+        })
+    }
+
+    /// Row number (1-based) of the first row of the last batch.
+    pub fn position(&self) -> u64 {
+        self.cur.as_ref().map_or(0, crate::exec::ScrollCursor::position)
+    }
+}
+
+impl Drop for OracleScrollable {
+    fn drop(&mut self) {
+        if let Some(cur) = self.cur.take() {
+            self.conn.close_scrollable(cur);
+        }
+    }
+}
+
 impl Deref for OracleDriver {
     type Target = SqlDb<OracleConnect>;
 
