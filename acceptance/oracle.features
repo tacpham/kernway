@@ -3,9 +3,9 @@
 Connection & security | Login with user / password (O5LOGON, 11g and 12c verifiers) | logs_in_with_user_and_password, auth_crypto::tests::verifier_11g_matches_the_reference_vectors, auth_crypto::tests::verifier_12c_matches_the_reference_vectors, auth_crypto::tests::cbc_padding_always_adds_a_block_on_exact_multiples
 Connection & security | TCPS (TLS) with each certificate check, incl. listener TLS renegotiation | tcps_connections_with_each_certificate_check
 Connection & security | Mutual TLS: client certificate (ssl-cert / ssl-key, or one PEM wallet) presented to a server that requires it (SSL_CLIENT_AUTHENTICATION = TRUE); refused without it | tcps_client_certificate_is_required_and_presented
-Connection & security | Native network encryption (SQLNET.ENCRYPTION) | GAP: use TCPS
+Connection & security | Native network encryption (SQLNET.ENCRYPTION) | N/A: out of scope for a thin driver (python-oracledb thin does not do it either) — use TCPS / mutual TLS
 Connection & security | Proxy authentication (user[target] / ?proxy-user=): the server reports USER = target, PROXY_USER = the connecting user; refused without the grant | proxy_authentication_connects_on_behalf_of_another_user
-Connection & security | Kerberos authentication | GAP: not in thin mode (python-oracledb thin lacks it too)
+Connection & security | Kerberos authentication | N/A: out of scope for a thin driver (python-oracledb thin does not do it either) — use password, proxy or certificate authentication
 
 Protocol & encoding | NUMBER / DATE / TIMESTAMP / BINARY_DOUBLE encodings checked against the server's own bytes | server_checks::number_encoding_matches_the_servers_own_bytes, server_checks::dates_timestamps_and_floats_compare_equal_on_the_server
 Protocol & encoding | Queries with binds; fetches in rounds | select_with_binds_and_types, many_rows_are_fetched_in_rounds
@@ -52,7 +52,7 @@ PL/SQL | Object, collection, RECORD and associative-array (index-by) arguments: 
 
 Other Oracle features | Two-phase commit (XA): begin / end / prepare / commit (two- and one-phase) / rollback, recovery from another session, suspend / resume, read-only branch | two_phase_commit_prepare_commit_recover_and_rollback
 Other Oracle features | Advanced Queuing: RAW / JSON / object-type queues; enqueue with correlation / priority / delay, dequeue by correlation, browse, wait with timeout, visibility with commit (one round trip each through DBMS_AQ) | advanced_queuing_raw_json_and_object_queues
-Other Oracle features | Continuous Query Notification, SODA | GAP: not in thin mode (python-oracledb thin lacks them too)
+Other Oracle features | Continuous Query Notification, SODA | N/A: out of scope for a thin driver (python-oracledb thin does not do them either) — use triggers / Advanced Queuing, and SQL/JSON
 
 Platform & runtime | Runs on Linux: whole live suite against Oracle Database Free, no test skipped (CI) | ci::oracle_live_ubuntu_latest
 Platform & runtime | Builds and passes its unit / protocol tests on macOS and Windows (CI; Oracle ships no server for those runners — the sockets are rt-net's, proven live there by the MySQL jobs) | ci::drivers_macos_latest, ci::drivers_windows_latest
