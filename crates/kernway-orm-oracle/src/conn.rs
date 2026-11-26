@@ -217,6 +217,8 @@ pub struct Conn {
     /// Temporary LOBs made for the call in flight (LOB attributes of IN
     /// objects): freed when it completes.
     pub(crate) call_temp_lobs: Vec<crate::lob::Lob>,
+    /// Parsed cursors kept open for re-execution, by SQL text.
+    pub(crate) stmt_cache: kernway_wire::StmtCache<crate::exec::CachedStmt>,
 }
 
 /// Map a parse error to the driver's error type.
@@ -276,6 +278,7 @@ impl Conn {
             resolving_tz: false,
             types: Default::default(),
             call_temp_lobs: Vec::new(),
+            stmt_cache: kernway_wire::StmtCache::new(crate::exec::STMT_CACHE_SIZE),
         };
         conn.negotiate().await?;
         conn.authenticate(cfg).await?;

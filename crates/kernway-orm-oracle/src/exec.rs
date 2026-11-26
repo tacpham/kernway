@@ -139,6 +139,17 @@ impl Column {
     }
 }
 
+/// Statements kept parsed per session (as python-oracledb's default).
+pub(crate) const STMT_CACHE_SIZE: usize = 20;
+
+/// A parsed cursor kept for re-execution: its id and (queries) the result
+/// columns as defined — the server neither re-parses nor re-describes it.
+#[derive(Debug, Clone)]
+pub(crate) struct CachedStmt {
+    pub(crate) cursor_id: u16,
+    pub(crate) columns: Vec<Column>,
+}
+
 /// A query cursor left open on the server (see [`Conn::open_cursor`]).
 #[derive(Debug, Clone)]
 pub struct OpenCursor {
@@ -356,13 +367,15 @@ fn write_execute(
     rows: &[&[Bind]],
     autocommit: bool,
     objects: &ObjectBindTypes,
+    reuse: Option<u16>,
 ) -> Result<(), String> {
     let is_query = kind == Kind::Query;
     let binds: &[Bind] = rows.first().copied().unwrap_or(&[]);
     let num_params = binds.len() as u64;
     let executions = rows.len().max(1) as u64;
     let metas: Vec<(u8, u8, u32)> = (0..binds.len()).map(|i| merged_meta(rows, i)).collect::<Result<_, _>>()?;
-    let mut options = OPT_EXECUTE | OPT_PARSE;
+    // A cached cursor is executed again by id: no parse, no SQL text.
+    let mut options = if reuse.is_some() { OPT_EXECUTE } else { OPT_EXECUTE | OPT_PARSE };
     let exec_flags = EXEC_FLAG_IMPLICIT_RESULTSET;
     let num_iters = if is_query { PREFETCH_ROWS } else { 1 };
     if is_query {
@@ -379,8 +392,12 @@ fn write_execute(
     if autocommit {
         options |= OPT_COMMIT;
     }
-    w.ub(u64::from(options)).ub(0); // options, cursor id (new)
-    w.u8(1).ub(sql.len() as u64); // SQL pointer + length
+    w.ub(u64::from(options)).ub(u64::from(reuse.unwrap_or(0))); // options, cursor id (0 = new)
+    if reuse.is_some() {
+        w.u8(0).ub(0); // no SQL
+    } else {
+        w.u8(1).ub(sql.len() as u64); // SQL pointer + length
+    }
     w.u8(1).ub(13); // al8i4
     w.u8(0).u8(0); // al8o4, al8o4l
     w.ub(0); // prefetch buffer size
@@ -405,9 +422,16 @@ fn write_execute(
             w.u8(0).ub(0); // chunk ids
         }
     }
-    w.bytes_wl(sql.as_bytes());
-    w.ub(1); // al8i4[0]: parse
-    w.ub(if is_query { 0 } else { executions }); // al8i4[1]: executions
+    if reuse.is_none() {
+        w.bytes_wl(sql.as_bytes());
+    }
+    w.ub(u64::from(reuse.is_none())); // al8i4[0]: parse
+    // al8i4[1]: executions (a re-executed query: rows to prefetch).
+    w.ub(match (is_query, reuse) {
+        (true, None) => 0,
+        (true, Some(_)) => u64::from(num_iters),
+        (false, _) => executions,
+    });
     w.ub(0).ub(0).ub(0).ub(0).ub(0); // [2..6]
     w.ub(u64::from(is_query)); // [7]
     w.ub(0); // [8]
@@ -1317,11 +1341,16 @@ impl Conn {
                 }
             }
         }
-        write_execute(&mut w, self.field_version, self.max_string_size, sql, kind, rows, autocommit, &objects)
+        // Re-execute a cached cursor of this SQL (not a DDL, not a cursor
+        // handed out to the caller).
+        let cacheable = matches!(kind, Kind::Query | Kind::Dml | Kind::PlSql) && open.is_none();
+        let cached = if cacheable { self.stmt_cache.remove(sql) } else { None };
+        write_execute(&mut w, self.field_version, self.max_string_size, sql, kind, rows, autocommit, &objects, cached.as_ref().map(|c| c.cursor_id))
             .map_err(OrmError::TypeConversion)?;
         self.send_data(&w.buf).await?;
 
-        let mut resp = self.read_call(None, binds, &[]).await?;
+        let cached_cols = cached.as_ref().map(|c| c.columns.clone());
+        let mut resp = self.read_call(cached_cols.as_deref(), binds, &[]).await?;
         while resp.flush_out_binds {
             self.send_data(&[msg::FLUSH_OUT_BINDS]).await?;
             let more = self.read_call(None, binds, &[]).await?;
@@ -1337,7 +1366,7 @@ impl Conn {
         }
 
         let cursor_id = resp.status.cursor_id;
-        let mut result = Executed { columns: resp.columns.take().unwrap_or_default(), ..Default::default() };
+        let mut result = Executed { columns: resp.columns.take().or(cached_cols).unwrap_or_default(), ..Default::default() };
         let mut status = resp.status.clone();
         let mut fetched = 0u64;
         let mut last_row: Vec<Value> = Vec::new();
@@ -1362,7 +1391,7 @@ impl Conn {
                 return Err(e);
             }
         }
-        if kind == Kind::Query && status.error.is_none() && needs_define(&result.columns) {
+        if kind == Kind::Query && status.error.is_none() && cached.is_none() && needs_define(&result.columns) {
             // Redefine converted columns (LOB / JSON / VECTOR / ROWID /
             // INTERVAL). The server sends no rows before the define.
             let mut w = Writer::new();
@@ -1418,7 +1447,14 @@ impl Conn {
             self.queue_close(cursor_id);
             return Err(server_error(e));
         }
-        self.queue_close(cursor_id);
+        if cacheable && cursor_id != 0 {
+            if let Some(old) = self.stmt_cache.evict_for_insert() {
+                self.queue_close(old.cursor_id);
+            }
+            self.stmt_cache.insert(sql, CachedStmt { cursor_id, columns: result.columns.clone() });
+        } else {
+            self.queue_close(cursor_id);
+        }
         result.row_count = if kind == Kind::Query { fetched } else { status.row_count };
         result.warning = status.warning.clone().or_else(|| resp.status.warning.clone());
         // REF CURSORs: fetch each to the end and hand back its rows.
@@ -1663,7 +1699,7 @@ mod tests {
     #[test]
     fn execute_of_a_query_matches_the_golden_bytes() {
         let mut w = header(6);
-        write_execute(&mut w, 24, 32767, "SELECT 1 FROM DUAL", Kind::Query, &[&[]], false, &Default::default()).unwrap();
+        write_execute(&mut w, 24, 32767, "SELECT 1 FROM DUAL", Kind::Query, &[&[]], false, &Default::default(), None).unwrap();
         assert_eq!(
             hex(&w.buf),
             "03 5E 06 00 02 80 61 00 01 01 12 01 01 0D 00 00 00 01 02 04 7F FF FF FF 00 00 00 00 00 00 \
@@ -1676,7 +1712,7 @@ mod tests {
     fn execute_of_plsql_with_out_bind_matches_the_golden_bytes() {
         let mut w = header(7);
         let binds = [Bind::Out(OutType::Number), Bind::In(Value::from(5))];
-        write_execute(&mut w, 24, 32767, "BEGIN :R := F(:A); END;", Kind::PlSql, &[&binds], false, &Default::default()).unwrap();
+        write_execute(&mut w, 24, 32767, "BEGIN :R := F(:A); END;", Kind::PlSql, &[&binds], false, &Default::default(), None).unwrap();
         assert_eq!(
             hex(&w.buf),
             "03 5E 07 00 02 04 29 00 01 01 17 01 01 0D 00 00 00 01 01 04 7F FF FF FF 01 01 02 00 00 00 \

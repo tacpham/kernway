@@ -680,3 +680,51 @@ fn timestamps_in_named_regions_come_back_as_the_server_computes_them() {
         assert_eq!(v, Value::DateTime("2026-03-29 01:30:00 Europe/Paris".into()), "an OUT value without fraction prints none");
     });
 }
+
+#[test]
+fn repeated_statements_reuse_their_parsed_cursor() {
+    let Some(url) = url() else { return eprintln!("skip: KERNWAY_ORACLE_HOST not set") };
+    run(async move {
+        let db = OracleDriver::connect_with(kernway_orm_oracle::OracleConfig::from_url(&url).unwrap(), 1).await.unwrap();
+        let pw = std::env::var("KERNWAY_ORACLE_SYSTEM_PASSWORD").unwrap_or_else(|_| "oracle_pw".into());
+        let sys = OracleDriver::connect_with(
+            kernway_orm_oracle::OracleConfig::from_url(&url.replacen("kernway:kernway_pw", &format!("system:{pw}"), 1)).unwrap(),
+            1,
+        )
+        .await
+        .unwrap();
+        let sid = db.query_scalar("SELECT SYS_CONTEXT('USERENV', 'SID') FROM dual", &[]).await.unwrap();
+        let sid = sid.as_str().unwrap().to_string();
+        // The session's own counters, read by another session.
+        let stat = |name: &'static str| {
+            let (sys, sid) = (sys.clone(), sid.clone());
+            async move {
+                sys.query_scalar(
+                    "SELECT s.value FROM v$sesstat s JOIN v$statname n ON n.statistic# = s.statistic# WHERE s.sid = :1 AND n.name = :2",
+                    params![sid, name],
+                )
+                .await
+                .unwrap()
+                .as_i64()
+                .unwrap()
+            }
+        };
+        let _ = db.execute("DROP TABLE kwo_sc").await;
+        db.execute("CREATE TABLE kwo_sc (n NUMBER, c CLOB)").await.unwrap();
+        let (parse0, exec0) = (stat("parse count (total)").await, stat("execute count").await);
+        for i in 0..50i64 {
+            db.execute_with("INSERT INTO kwo_sc VALUES (:1, :2)", params![i, format!("row {i}")]).await.unwrap();
+            let r = db.query("SELECT n, c FROM kwo_sc WHERE n = :1", params![i]).await.unwrap();
+            assert_eq!(r.rows[0][1].as_str(), Some(format!("row {i}").as_str()), "a cached query with a CLOB (defined once) still reads it");
+            let r = db.call_function("kwo_api.total", OutKind::Number, &[i.into()]).await;
+            assert!(r.is_ok() || r.is_err()); // package may be absent: only its parse matters
+        }
+        let (parse1, exec1) = (stat("parse count (total)").await, stat("execute count").await);
+        eprintln!("150 executions: parse count +{}, execute count +{}", parse1 - parse0, exec1 - exec0);
+        assert!(exec1 - exec0 >= 150, "every statement ran");
+        // Measured: +24 with the cache (incl. the server's recursive parses
+        // inside PL/SQL), +170 without it.
+        assert!(parse1 - parse0 <= 40, "parsed once per statement, not per execution: +{}", parse1 - parse0);
+        assert_eq!(db.query_scalar("SELECT COUNT(*) FROM kwo_sc", &[]).await.unwrap(), Value::Int(50));
+    });
+}

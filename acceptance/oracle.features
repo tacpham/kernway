@@ -12,7 +12,7 @@ Protocol & encoding | TTC primitives: universal integers, byte strings, incomple
 Protocol & encoding | Statement classification and bind discovery (literals, comments, := skipped) | stmt::tests::classifies_by_first_keyword, stmt::tests::finds_binds_and_skips_literals_comments_and_assignment
 Protocol & encoding | NUMBER / DATE / BINARY_DOUBLE codecs (reference tables, round trips) | value::tests::numbers_encode_like_the_reference_table, value::tests::numbers_round_trip, value::tests::dates_and_doubles_round_trip
 Protocol & encoding | DML, commit / rollback, server errors mapped (unique violation names the constraint) | dml_commit_rollback_and_errors, exec::tests::unique_violation_names_the_constraint
-Protocol & encoding | Statement cache (re-use parsed cursors) | GAP: every execute parses
+Protocol & encoding | Statement cache: a repeated SQL / PL/SQL statement re-executes its parsed cursor (20 per session; no re-parse, no re-describe, defines kept) — server parse counter +24 vs +170 without it for 150 executions | repeated_statements_reuse_their_parsed_cursor
 Protocol & encoding | Scrollable cursors | GAP: not implemented
 
 Types | NUMBER typed by precision/scale (Int / Decimal / Float), BINARY_FLOAT/DOUBLE | every_column_type_is_typed_and_matches_the_servers_rendering, backend::tests::values_are_typed_by_their_column
