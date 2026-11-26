@@ -90,7 +90,7 @@ jobs:
           done
           docker exec kw-oracle /opt/oracle/healthcheck.sh
 
-      - name: Oracle driver — whole suite, live (TCPS needs a wallet: verified by acceptance/run.sh)
+      - name: "Oracle driver — whole suite, live (TCPS needs a wallet: verified by acceptance/run.sh)"
         shell: bash
         env:
           KERNWAY_ORACLE_HOST: 127.0.0.1
