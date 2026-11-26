@@ -1141,6 +1141,7 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "kernway-orm-core",
+ "kernway-tls",
  "kernway-wire",
  "md-5",
  "ring",

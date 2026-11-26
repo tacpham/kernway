@@ -299,3 +299,38 @@ fn ref_cursors_from_procedures_and_functions() {
         c.execute("DROP FUNCTION kw_cursor_fn", &[]).await.unwrap();
     });
 }
+
+#[test]
+fn tcps_connections_with_each_certificate_check() {
+    let (Ok(host), Ok(ca)) = (std::env::var("KERNWAY_ORACLE_HOST"), std::env::var("KERNWAY_ORACLE_CA")) else { return };
+    let url = |q: &str| OracleConfig::from_url(&format!("oracle://kernway:kernway_pw@{host}:2484/FREEPDB1?{q}")).unwrap();
+    run(async move {
+        for q in [
+            "ssl-mode=required".to_string(),
+            format!("ssl-mode=verify_ca&ssl-ca={ca}"),
+            format!("ssl-mode=verify_identity&ssl-ca={ca}"),
+        ] {
+            let mut c = Conn::connect(&url(&q)).await.unwrap_or_else(|e| panic!("{q}: {e}"));
+            let r = c
+                .execute("SELECT SYS_CONTEXT('USERENV', 'NETWORK_PROTOCOL') FROM dual", &[])
+                .await
+                .unwrap();
+            assert_eq!(s(&r.rows[0][0]).to_lowercase(), "tcps", "{q}");
+            // A 300 KB CLOB round trip over TLS (writes well past rustls's buffer).
+            let big = "ü".repeat(150_000);
+            let _ = c.execute("DROP TABLE kw_tls_lob PURGE", &[]).await;
+            c.execute("CREATE TABLE kw_tls_lob (c CLOB)", &[]).await.unwrap();
+            c.execute("INSERT INTO kw_tls_lob VALUES (:t)", &[Bind::from(big.clone())]).await.unwrap();
+            let r = c.execute("SELECT c, DBMS_LOB.GETLENGTH(c) FROM kw_tls_lob", &[]).await.unwrap();
+            assert_eq!(r.rows[0][1].as_i64(), Some(150_000), "{q}");
+            assert_eq!(r.rows[0][0], Value::Str(big), "{q}");
+            c.execute("DROP TABLE kw_tls_lob PURGE", &[]).await.unwrap();
+            c.close().await.unwrap();
+        }
+        // The server certificate is self-signed: public roots must reject it.
+        let e = Conn::connect(&url("ssl-mode=verify_ca")).await.err().expect("untrusted certificate");
+        assert!(e.to_string().contains("TLS handshake"), "{e}");
+        // Plain TCP to the TLS port is refused / fails cleanly, never hangs.
+        assert!(Conn::connect(&url("ssl-mode=disabled")).await.is_err());
+    });
+}

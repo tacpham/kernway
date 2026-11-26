@@ -85,16 +85,58 @@ pub struct OracleConfig {
     pub user: String,
     /// Account password.
     pub password: String,
+    /// TLS (TCPS) policy (URL: `?ssl-mode=`). Default [`SslMode::Disabled`]:
+    /// Oracle serves TCPS on its own listener port (often 2484).
+    pub ssl_mode: SslMode,
+    /// PEM file with the CA(s) to trust (URL: `?ssl-ca=`); `None` = Mozilla's roots.
+    pub ssl_ca: Option<std::path::PathBuf>,
+}
+
+/// TCPS policy, named like MySQL's `--ssl-mode` for consistency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SslMode {
+    /// Plain TCP.
+    #[default]
+    Disabled,
+    /// TLS, without checking the server certificate (encryption only).
+    Required,
+    /// TLS, certificate must chain to a trusted CA (any host name).
+    VerifyCa,
+    /// TLS, trusted chain and a certificate naming the host.
+    VerifyIdentity,
+}
+
+impl SslMode {
+    fn parse(s: &str) -> Result<Self, OrmError> {
+        match s.to_ascii_lowercase().replace('-', "_").as_str() {
+            "disabled" => Ok(Self::Disabled),
+            "required" => Ok(Self::Required),
+            "verify_ca" => Ok(Self::VerifyCa),
+            "verify_identity" | "verify_full" => Ok(Self::VerifyIdentity),
+            other => Err(conn_err(format!("unknown ssl-mode '{other}'"))),
+        }
+    }
 }
 
 impl OracleConfig {
-    /// Parse `oracle://user:password@host[:port]/service_name`.
+    /// Parse `oracle://user:password@host[:port]/service_name[?ssl-mode=…&ssl-ca=…]`.
     pub fn from_url(url: &str) -> Result<Self, OrmError> {
         let rest = url
             .strip_prefix("oracle://")
             .ok_or_else(|| conn_err("Oracle URL must start with oracle://"))?;
         let (creds, hostpart) = rest.rsplit_once('@').ok_or_else(|| conn_err("Oracle URL needs user@host"))?;
         let (user, password) = creds.split_once(':').unwrap_or((creds, ""));
+        let (hostpart, options) = hostpart.split_once('?').unwrap_or((hostpart, ""));
+        let mut ssl_mode = SslMode::default();
+        let mut ssl_ca = None;
+        for pair in options.split('&').filter(|p| !p.is_empty()) {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            match k.to_ascii_lowercase().replace('_', "-").as_str() {
+                "ssl-mode" | "sslmode" => ssl_mode = SslMode::parse(v)?,
+                "ssl-ca" => ssl_ca = Some(std::path::PathBuf::from(v)),
+                other => return Err(conn_err(format!("unknown Oracle URL option '{other}'"))),
+            }
+        }
         let (hostport, service) = hostpart
             .split_once('/')
             .ok_or_else(|| conn_err("Oracle URL needs /service_name"))?;
@@ -108,13 +150,18 @@ impl OracleConfig {
             service_name: service.to_string(),
             user: user.to_string(),
             password: password.to_string(),
+            ssl_mode,
+            ssl_ca,
         })
     }
 
     fn connect_descriptor(&self) -> String {
         format!(
-            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST={})(PORT={}))(CONNECT_DATA=(SERVICE_NAME={})(CID=(PROGRAM=kernway)(HOST=localhost)(USER=kernway))))",
-            self.host, self.port, self.service_name
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL={})(HOST={})(PORT={}))(CONNECT_DATA=(SERVICE_NAME={})(CID=(PROGRAM=kernway)(HOST=localhost)(USER=kernway))))",
+            if self.ssl_mode == SslMode::Disabled { "tcp" } else { "tcps" },
+            self.host,
+            self.port,
+            self.service_name
         )
     }
 }
@@ -172,8 +219,26 @@ impl Conn {
         let tcp = AsyncTcpStream::connect(addr)
             .await
             .map_err(|e| conn_err(format!("connect {}:{}: {e}", cfg.host, cfg.port)))?;
-        let mut tns = Tns::new(BufStream::new(tcp));
-        tns.connect(&cfg.connect_descriptor()).await?;
+        let mut io = BufStream::new(tcp);
+        let mut tls_config = None;
+        if cfg.ssl_mode != SslMode::Disabled {
+            let ca = match &cfg.ssl_ca {
+                Some(p) => Some(std::fs::read(p).map_err(|e| conn_err(format!("read ssl-ca {}: {e}", p.display())))?),
+                None => None,
+            };
+            let check = match cfg.ssl_mode {
+                SslMode::VerifyIdentity => kernway_tls::CertCheck::Full,
+                SslMode::VerifyCa => kernway_tls::CertCheck::CaOnly,
+                _ => kernway_tls::CertCheck::None,
+            };
+            let tls = kernway_tls::client_config(ca.as_deref(), check).map_err(|e| conn_err(format!("TLS config: {e}")))?;
+            io.upgrade_tls(tls.clone(), &cfg.host)
+                .await
+                .map_err(|e| conn_err(format!("TLS handshake with {}: {e}", cfg.host)))?;
+            tls_config = Some(tls);
+        }
+        let mut tns = Tns::new(io);
+        tns.connect(&cfg.connect_descriptor(), tls_config.map(|c| (c, cfg.host.as_str()))).await?;
         let mut conn = Self {
             tns,
             seq: 0,

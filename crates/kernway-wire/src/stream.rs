@@ -167,6 +167,25 @@ impl BufStream {
     }
 }
 
+impl BufStream {
+    /// Start TLS over again on the same TCP connection: drop the current TLS
+    /// session (without close_notify) and run a fresh handshake. Oracle TCPS
+    /// listeners ask for this after the first CONNECT (a RESEND with the
+    /// TLS-renegotiation flag). Nothing may be buffered.
+    pub async fn renegotiate_tls(&mut self, config: Arc<ClientConfig>, server_name: &str) -> io::Result<()> {
+        if self.buffered() != 0 {
+            return Err(io::Error::other("unread bytes buffered at the TLS renegotiation"));
+        }
+        let Socket::Tls(tls) = std::mem::replace(&mut self.socket, Socket::Upgrading) else {
+            return Err(io::Error::other("TLS renegotiation on a connection that is not TLS"));
+        };
+        let tcp = tls.into_inner();
+        let tls = AsyncTlsStream::connect(tcp, config, server_name).await?;
+        self.socket = Socket::Tls(Box::new(tls));
+        Ok(())
+    }
+}
+
 fn lost() -> io::Error {
     io::Error::other("connection lost during TLS upgrade")
 }

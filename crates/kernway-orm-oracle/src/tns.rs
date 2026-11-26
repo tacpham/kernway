@@ -41,6 +41,8 @@ const GSO_DONT_CARE: u16 = 0x0001;
 const NSI_NA_DISABLED: u8 = 0x04;
 const NSI_NA_REQUIRED: u8 = 0x10;
 const NSI_SUPPORT_SECURITY_RENEG: u8 = 0x80;
+/// Packet flag on a RESEND over TCPS: redo the TLS handshake first.
+const PACKET_FLAG_TLS_RENEG: u8 = 0x08;
 const PROTOCOL_CHARACTERISTICS: u16 = 0x4f98;
 /// Connect data longer than this goes in a separate DATA packet.
 const MAX_CONNECT_DATA: usize = 230;
@@ -119,9 +121,13 @@ impl Tns {
     /// Send CONNECT for `connect_data` (a connect descriptor) and process the
     /// listener's answer until ACCEPT. RESEND is honoured; REFUSE becomes an
     /// error carrying the listener's message; REDIRECT is not supported yet.
-    pub(crate) async fn connect(&mut self, connect_data: &str) -> Result<(), OrmError> {
+    pub(crate) async fn connect(
+        &mut self,
+        connect_data: &str,
+        tls: Option<(std::sync::Arc<kernway_tls::rustls::ClientConfig>, &str)>,
+    ) -> Result<(), OrmError> {
         let data = connect_data.as_bytes();
-        let mut flags = 0u8;
+        let flags = 0u8;
         for _ in 0..4 {
             let nsi = NSI_SUPPORT_SECURITY_RENEG | NSI_NA_DISABLED;
             let mut p = Vec::with_capacity(74 + data.len());
@@ -159,7 +165,18 @@ impl Tns {
             match ptype {
                 packet_type::ACCEPT => return self.accept(payload),
                 packet_type::RESEND => {
-                    flags = pflags;
+                    // Over TCPS the listener may ask for a brand-new TLS
+                    // handshake on the same socket before the CONNECT is
+                    // repeated.
+                    if pflags & PACKET_FLAG_TLS_RENEG != 0 {
+                        let (config, name) = tls.clone().ok_or_else(|| {
+                            conn_err("listener asked for TLS renegotiation on a plain TCP connection")
+                        })?;
+                        self.io
+                            .renegotiate_tls(config, name)
+                            .await
+                            .map_err(|e| conn_err(format!("TLS renegotiation: {e}")))?;
+                    }
                     continue;
                 }
                 packet_type::REFUSE => {

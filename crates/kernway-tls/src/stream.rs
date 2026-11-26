@@ -76,6 +76,13 @@ impl AsyncTlsStream {
         self.flush_tls().await // drain any final records
     }
 
+    /// Abandon the TLS session (no close_notify) and return the TCP socket, for
+    /// protocols that restart TLS from scratch on the same connection (Oracle
+    /// TCPS renegotiation). Any undelivered plaintext is discarded.
+    pub fn into_inner(self) -> AsyncTcpStream {
+        self.tcp
+    }
+
     /// Write plaintext: buffer it into `rustls`, then flush the resulting TLS records.
     /// rustls buffers at most a bounded amount of unsent plaintext (64 KiB by
     /// default), so a large write is fed in pieces, flushing the encrypted

@@ -17,10 +17,12 @@
 //!     .out;
 //! ```
 //!
-//! Scope today: plain TCP, user/password logon (11g and 12c verifiers), SQL and
+//! Scope today: TCP or TCPS, user/password logon (11g and 12c verifiers), SQL and
 //! PL/SQL with IN / OUT / IN OUT binds, NUMBER, VARCHAR2 / NVARCHAR2, DATE,
-//! TIMESTAMP, BINARY_FLOAT / DOUBLE, RAW and BOOLEAN. Not yet: LOBs, REF
-//! CURSOR, TLS (TCPS), native network encryption.
+//! TIMESTAMP, BINARY_FLOAT / DOUBLE, RAW, BOOLEAN, CLOB / NCLOB / BLOB (read
+//! inline; written as long binds), REF CURSOR OUT parameters, and TCPS (TLS,
+//! including the listener's TLS renegotiation). Not yet: native network
+//! encryption, implicit result sets, object types.
 
 mod auth_crypto;
 mod buf;
@@ -30,7 +32,9 @@ mod exec;
 mod stmt;
 mod tns;
 mod value;
+#[cfg(test)]
+mod server_checks;
 
-pub use conn::{Conn, OracleConfig};
+pub use conn::{Conn, OracleConfig, SslMode};
 pub use exec::{Bind, Column, Executed, OutType};
 pub use value::{DateTime, ResultSet, Value};
