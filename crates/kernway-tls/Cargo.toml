@@ -13,5 +13,11 @@ rt-net       = { workspace = true }
 rustls       = { workspace = true }
 webpki-roots = { workspace = true }
 
+[dev-dependencies]
+rt-core = { workspace = true }
+# Certificates minted per test run (a private CA, server and client leaves,
+# expired and wrong-name variants) — ring only, so no C toolchain on any OS.
+rcgen   = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+
 [lints]
 workspace = true

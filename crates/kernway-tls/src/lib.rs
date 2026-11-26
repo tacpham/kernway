@@ -109,7 +109,8 @@ pub fn client_config_with_identity(
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "no certificate in the client certificate PEM"));
             }
             let key = PrivateKeyDer::from_pem_slice(id.key_pem).map_err(|e| bad("client key PEM", &e))?;
-            wants_cert.with_client_auth_cert(certs, key).map_err(io::Error::other)?
+            // An unparseable key body, or a key that is not the certificate's.
+            wants_cert.with_client_auth_cert(certs, key).map_err(|e| bad("client certificate / key pair", &e))?
         }
     };
     Ok(Arc::new(config))
