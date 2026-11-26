@@ -1231,11 +1231,12 @@ version = "0.1.0"
 dependencies = [
  "kernway-orm-core",
  "kernway-orm-macro",
+ "kernway-orm-sql",
+ "kernway-wire",
  "rt-core",
  "rusqlite",
  "serde",
  "serde_json",
- "thiserror",
 ]
 
 [[package]]
@@ -2157,7 +2158,6 @@ dependencies = [
  "kernway-orm-sqlite",
  "kernway-server",
  "kernway-web",
- "rt-core",
  "serde",
  "serde_json",
 ]

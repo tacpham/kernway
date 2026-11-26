@@ -246,7 +246,7 @@ kernway (meta-crate — one dependency, feature-gated)
 ├── kernway-orm-core      — Entity, Repository<T>, QueryBuilder<T> traits (JPA-inspired)
 ├── kernway-orm-macro     — #[entity], #[id], #[column]
 ├── kernway-orm-memory    — InMemoryRepository<T> for testing
-├── kernway-orm-sqlite    — SQLite driver (rusqlite)
+├── kernway-orm-sqlite    — SQLite driver (shared SQL layer, bundled engine, per-connection threads)
 ├── kernway-cache-core    — Cache<K,V>, Ttl, CacheStats traits
 ├── kernway-cache-macro   — #[cacheable], #[cache_evict], #[cache_update]
 ├── kernway-cache-memory  — InMemoryCache<K,V> for testing

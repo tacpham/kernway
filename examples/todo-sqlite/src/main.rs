@@ -1,96 +1,52 @@
-use di_core::{AppContext, RequestScope};
+//! todo-sqlite — a REST todo list stored in a SQLite file.
+//!
+//! Run: `cargo run -p todo-sqlite` (file: `TODO_SQLITE_DB`, default
+//! `examples/todo-sqlite/todos.db`; address: `TODO_ADDR`, default
+//! `0.0.0.0:8080`), then
+//! `curl -X POST localhost:8080/todos -d '{"title":"buy milk"}'`.
+//!
+//! The driver is per shard (`!Send`, like every kernway driver): each worker
+//! thread opens it on first use and keeps it in a `thread_local`. Handlers
+//! only capture the path. Every call is async — SQLite runs on the driver's
+//! connection threads, never on the shard.
+
 use kernway_core::{error::StatusCode, request::Request, response::IntoResponse};
-use kernway_orm_core::repository::Repository;
+use kernway_orm_core::Driver;
 use kernway_orm_macro::entity;
-use kernway_orm_sqlite::SqliteRepository;
+use kernway_orm_sqlite::SqliteDriver;
 use kernway_server::{middleware::LoggingMiddleware, KernwayApp};
 use kernway_web::{Json, Path, ProblemDetail};
 use serde::{Deserialize, Serialize};
-use std::future::Future;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
-
-fn block_on<F: Future>(future: F) -> F::Output {
-    rt_core::Executor::new().unwrap().block_on(future).unwrap()
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[entity(table = "todos")]
 pub struct Todo {
     #[id(strategy = "auto")]
-    pub id: u64,
+    pub id: i64,
     pub title: String,
     pub done: bool,
 }
 
-pub struct TodoRepository {
-    inner: Arc<dyn Repository<Todo> + Send + Sync>,
+thread_local! {
+    static DB: RefCell<Option<Rc<SqliteDriver>>> = const { RefCell::new(None) };
 }
 
-impl TodoRepository {
-    pub fn new(inner: Arc<dyn Repository<Todo> + Send + Sync>) -> Self {
-        Self { inner }
+/// This shard's driver, opened (and the table created) on first use.
+async fn db(path: &str) -> Rc<SqliteDriver> {
+    if let Some(d) = DB.with(|c| c.borrow().clone()) {
+        return d;
     }
-
-    pub fn find_all(&self) -> Vec<Todo> {
-        block_on(self.inner.find_all()).unwrap_or_default()
-    }
-
-    pub fn find_by_id(&self, id: u64) -> Option<Todo> {
-        block_on(self.inner.find_by_id(&id)).unwrap_or(None)
-    }
-
-    pub fn save(&self, todo: Todo) -> Todo {
-        block_on(self.inner.save(todo)).unwrap()
-    }
-
-    pub fn delete_by_id(&self, id: u64) -> bool {
-        if block_on(self.inner.exists_by_id(&id)).unwrap_or(false) {
-            block_on(self.inner.delete_by_id(&id)).unwrap();
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn count(&self) -> u64 {
-        block_on(self.inner.count()).unwrap_or(0)
-    }
+    let d = Rc::new(SqliteDriver::open(path).await.expect("open the SQLite file"));
+    d.ensure_table::<Todo>().await.expect("create the todos table");
+    DB.with(|c| *c.borrow_mut() = Some(Rc::clone(&d)));
+    d
 }
 
-pub struct TodoService {
-    repo: Arc<TodoRepository>,
-}
-
-impl TodoService {
-    pub fn new(repo: Arc<TodoRepository>) -> Self {
-        Self { repo }
-    }
-
-    pub fn list(&self) -> Vec<Todo> {
-        self.repo.find_all()
-    }
-
-    pub fn create(&self, title: String) -> Todo {
-        self.repo.save(Todo {
-            id: 0,
-            title,
-            done: false,
-        })
-    }
-
-    pub fn mark_done(&self, id: u64) -> Option<Todo> {
-        let mut todo = self.repo.find_by_id(id)?;
-        todo.done = true;
-        Some(self.repo.save(todo))
-    }
-
-    pub fn delete(&self, id: u64) -> bool {
-        self.repo.delete_by_id(id)
-    }
-
-    pub fn count(&self) -> u64 {
-        self.repo.count()
-    }
+fn id_of(req: &Request) -> Result<i64, kernway_core::response::Response> {
+    Path::<i64>::from_request(req, "id").map(|p| *p).map_err(ProblemDetail::bad_request)
 }
 
 #[derive(Deserialize)]
@@ -99,86 +55,94 @@ struct CreateTodo {
 }
 
 fn main() {
-    let db_path = std::env::var("TODO_SQLITE_DB")
-        .unwrap_or_else(|_| "examples/todo-sqlite/todos.db".to_string());
-    let db_info_path = db_path.clone();
-
-    // --- BEFORE (InMemoryRepository) ---
-    // let repo: Arc<dyn Repository<Todo> + Send + Sync> = Arc::new(InMemoryRepository::new());
-    //
-    // --- AFTER (SqliteRepository) — zero service changes ---
-    let repo: Arc<dyn Repository<Todo> + Send + Sync> =
-        Arc::new(SqliteRepository::<Todo>::open(&db_path).unwrap());
-
-    let mut ctx = AppContext::new();
-    let todo_repo = Arc::new(TodoRepository::new(repo));
-    ctx.register_instance::<TodoRepository>(Arc::clone(&todo_repo))
-        .unwrap();
-    ctx.register_instance::<TodoService>(Arc::new(TodoService::new(todo_repo)))
-        .unwrap();
-
-    println!("🗃️  SQLite file: {}", db_path);
+    let path: Arc<str> = std::env::var("TODO_SQLITE_DB").unwrap_or_else(|_| "examples/todo-sqlite/todos.db".to_string()).into();
+    println!("SQLite file: {path}");
+    let p = |path: &Arc<str>| Arc::clone(path);
 
     KernwayApp::builder()
-        .bind("0.0.0.0:8080")
-        .context(ctx)
+        .bind(&std::env::var("TODO_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string()))
         .layer(LoggingMiddleware::new())
-        .get("/todos", |_req: Request, ctx: &RequestScope| {
-            let svc = ctx.get::<TodoService>().unwrap();
-            async move { Json(svc.list()).into_response() }
-        })
-        .post("/todos", |req: Request, ctx: &RequestScope| {
-            let svc = ctx.get::<TodoService>().unwrap();
-            async move {
-                let body = match Json::<CreateTodo>::from_request(&req) {
-                    Ok(Json(body)) => body,
-                    Err(err) => return ProblemDetail::bad_request(err),
-                };
-
-                (StatusCode::CREATED, Json(svc.create(body.title))).into_response()
-            }
-        })
-        .patch("/todos/{id}/done", |req: Request, ctx: &RequestScope| {
-            let svc = ctx.get::<TodoService>().unwrap();
-            async move {
-                let id = match Path::<u64>::from_request(&req, "id") {
-                    Ok(path) => *path,
-                    Err(err) => return ProblemDetail::bad_request(err),
-                };
-
-                match svc.mark_done(id) {
-                    Some(todo) => Json(todo).into_response(),
-                    None => ProblemDetail::not_found(format!("todo {} not found", id)),
+        .get("/todos", {
+            let path = p(&path);
+            move |_req: Request, _ctx: &kernway_server::RequestScope| {
+                let path = Arc::clone(&path);
+                async move {
+                    match db(&path).await.repository::<Todo>().find_all().await {
+                        Ok(all) => Json(all).into_response(),
+                        Err(e) => ProblemDetail::internal_error(e.to_string()),
+                    }
                 }
             }
         })
-        .delete("/todos/{id}", |req: Request, ctx: &RequestScope| {
-            let svc = ctx.get::<TodoService>().unwrap();
-            async move {
-                let id = match Path::<u64>::from_request(&req, "id") {
-                    Ok(path) => *path,
-                    Err(err) => return ProblemDetail::bad_request(err),
-                };
-
-                if svc.delete(id) {
-                    StatusCode::NO_CONTENT.into_response()
-                } else {
-                    ProblemDetail::not_found(format!("todo {} not found", id))
+        .post("/todos", {
+            let path = p(&path);
+            move |req: Request, _ctx: &kernway_server::RequestScope| {
+                let path = Arc::clone(&path);
+                async move {
+                    let body = match Json::<CreateTodo>::from_request(&req) {
+                        Ok(Json(body)) => body,
+                        Err(err) => return ProblemDetail::bad_request(err),
+                    };
+                    let todo = Todo { id: 0, title: body.title, done: false };
+                    match db(&path).await.repository::<Todo>().save(todo).await {
+                        Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
+                        Err(e) => ProblemDetail::internal_error(e.to_string()),
+                    }
+                }
+            }
+        })
+        .patch("/todos/{id}/done", {
+            let path = p(&path);
+            move |req: Request, _ctx: &kernway_server::RequestScope| {
+                let path = Arc::clone(&path);
+                async move {
+                    let id = match id_of(&req) {
+                        Ok(id) => id,
+                        Err(r) => return r,
+                    };
+                    let repo = db(&path).await.repository::<Todo>();
+                    match repo.find_by_id(&id).await {
+                        Ok(Some(mut todo)) => {
+                            todo.done = true;
+                            match repo.save(todo).await {
+                                Ok(t) => Json(t).into_response(),
+                                Err(e) => ProblemDetail::internal_error(e.to_string()),
+                            }
+                        }
+                        Ok(None) => ProblemDetail::not_found(format!("todo {id} not found")),
+                        Err(e) => ProblemDetail::internal_error(e.to_string()),
+                    }
+                }
+            }
+        })
+        .delete("/todos/{id}", {
+            let path = p(&path);
+            move |req: Request, _ctx: &kernway_server::RequestScope| {
+                let path = Arc::clone(&path);
+                async move {
+                    let id = match id_of(&req) {
+                        Ok(id) => id,
+                        Err(r) => return r,
+                    };
+                    let repo = db(&path).await.repository::<Todo>();
+                    match repo.exists_by_id(&id).await {
+                        Ok(true) => match repo.delete_by_id(&id).await {
+                            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                            Err(e) => ProblemDetail::internal_error(e.to_string()),
+                        },
+                        Ok(false) => ProblemDetail::not_found(format!("todo {id} not found")),
+                        Err(e) => ProblemDetail::internal_error(e.to_string()),
+                    }
                 }
             }
         })
         .get("/db-info", {
-            let db_path = db_info_path.clone();
-            move |_req: Request, ctx: &RequestScope| {
-                let svc = ctx.get::<TodoService>().unwrap();
-                let db_path = db_path.clone();
+            let path = p(&path);
+            move |_req: Request, _ctx: &kernway_server::RequestScope| {
+                let path = Arc::clone(&path);
                 async move {
-                    Json(serde_json::json!({
-                        "backend": "sqlite",
-                        "db_path": db_path,
-                        "count": svc.count(),
-                    }))
-                    .into_response()
+                    let count = db(&path).await.repository::<Todo>().count().await.unwrap_or(0);
+                    Json(serde_json::json!({ "backend": "sqlite", "db_path": &*path, "count": count })).into_response()
                 }
             }
         })

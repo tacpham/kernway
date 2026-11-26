@@ -5,13 +5,16 @@
 #
 #   acceptance/run.sh mysql
 #   acceptance/run.sh oracle
+#   acceptance/run.sh sqlite   (embedded: no container, real database files)
 #
 # Containers (created if missing; existing ones and their data are reused):
 #   kernway-mysql   mysql:8.0                  host port 3307, root password "secret"
 #   kernway-oracle  gvenzl/oracle-free:23-slim host ports 1521 / 2484 (TCPS)
 # Oracle TCPS needs a wallet once: crates/kernway-orm-oracle/tests/support/oracle-tcps-setup.sh
 set -euo pipefail
-DB="${1:?usage: $0 mysql|oracle}"
+DB="${1:?usage: $0 mysql|oracle|sqlite}"
+# CI workflow whose jobs for this commit are the cross-OS evidence.
+WORKFLOW=drivers.yml; IMAGE=""
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/docs/acceptance"
 WORK="$(mktemp -d)"
@@ -92,7 +95,15 @@ SET LINESIZE 400
 SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1521/FREEPDB1" | tr -s ' \n' ' ' | sed 's/^ //; s/ $//')"
     CRATE=kernway-orm-oracle; FEATURES=(); TITLE=Oracle; SKIP=()
     ;;
-  *) echo "unknown database: $DB (mysql | oracle)" >&2; exit 2 ;;
+  sqlite)
+    # Embedded: the engine is compiled into the driver, the tests open real
+    # database files in the temp directory. Nothing to start.
+    C=""; IMAGE="bundled with the driver (libsqlite3-sys, compiled from source)"; VERSION=""
+    CRATE=kernway-orm-sqlite; FEATURES=(); TITLE=SQLite; SKIP=()
+    # The workspace CI runs every crate's tests on Linux, macOS and Windows.
+    WORKFLOW=workspace.yml
+    ;;
+  *) echo "unknown database: $DB (mysql | oracle | sqlite)" >&2; exit 2 ;;
 esac
 
 CMD="cargo test -p $CRATE ${FEATURES[*]+${FEATURES[*]}} --lib --tests -- --test-threads=1 --nocapture ${SKIP[*]+${SKIP[*]}}"
@@ -100,6 +111,10 @@ log "running: $CMD"
 ( cd "$ROOT" && cargo test -p "$CRATE" ${FEATURES[@]+"${FEATURES[@]}"} --lib --tests -- --test-threads=1 --nocapture ${SKIP[@]+"${SKIP[@]}"} ) > "$WORK/test.log" 2>&1 || true
 if ! grep -q "^test result:" "$WORK/test.log"; then
   log "cargo test did not run any test binary:"; tail -20 "$WORK/test.log" >&2
+fi
+
+if [ "$DB" = sqlite ]; then
+  VERSION="SQLite $(sed -n 's/^SQLite engine: //p' "$WORK/test.log" | head -1)"
 fi
 
 # Tests that must run next to the server (its Unix socket): build a static
@@ -129,15 +144,15 @@ if [ "$DB" = mysql ]; then
   CMD="$CMD; local_socket_* inside $C"
 fi
 
-# Every-OS evidence: the `drivers` CI workflow runs the driver's tests against
-# a real server on Linux, macOS and Windows. Its jobs for exactly this commit
+# Every-OS evidence: the CI workflow ($WORKFLOW) runs the driver's tests on
+# Linux, macOS and Windows. Its jobs for exactly this commit
 # join the log as tests `ci::<job>`; no run for this commit = not run = FAIL.
 ci_evidence() {
   local sha run
   sha="$(cd "$ROOT" && git rev-parse HEAD)"
-  run="$(cd "$ROOT" && gh run list --workflow drivers.yml --commit "$sha" --status completed --limit 1 \
+  run="$(cd "$ROOT" && gh run list --workflow "$WORKFLOW" --commit "$sha" --status completed --limit 1 \
       --json databaseId -q '.[0].databaseId' 2>/dev/null || true)"
-  if [ -z "$run" ]; then log "no completed 'drivers' CI run for $sha: cross-OS evidence missing"; return; fi
+  if [ -z "$run" ]; then log "no completed $WORKFLOW CI run for $sha: cross-OS evidence missing"; return; fi
   log "cross-OS evidence: CI run $run for $sha"
   (cd "$ROOT" && gh run view "$run" --json jobs \
       -q '.jobs[] | "test ci::" + (.name | gsub("[ ()-]+"; "_") | sub("_$"; "")) + " ... " + (if .conclusion == "success" then "ok" else "FAILED" end)') \
@@ -155,8 +170,8 @@ dirty = " (uncommitted changes)" if sh("git", "status", "--porcelain", "--", "."
 json.dump({
   "generated": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
   "server": """$VERSION""",
-  "image": sh("docker", "inspect", "-f", "{{.Config.Image}}", "$C"),
-  "container": "$C",
+  "image": """$IMAGE""" or sh("docker", "inspect", "-f", "{{.Config.Image}}", "$C"),
+  "container": "$C" or "none (embedded)",
   "driver commit": sh("git", "rev-parse", "--short", "HEAD") + " on " + sh("git", "rev-parse", "--abbrev-ref", "HEAD") + dirty,
   "rustc": sh("rustc", "--version"),
   "command": "\`$CMD\`",

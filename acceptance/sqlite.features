@@ -1,0 +1,57 @@
+# SQLite feature catalog for the acceptance report.
+# area | feature | evidence
+# evidence = comma-separated test names (all must pass), or
+#            GAP: <why>  (not implemented — counted against completeness)
+#            N/A: <why> (the database has no such feature)
+#
+# SQLite is embedded: the engine is compiled into the driver and every test
+# opens real database files (or SQLite's own in-memory databases). There is no
+# server to fake, so nothing is mocked.
+
+Opening & configuration | Database file, created on first open; data survives a restart | a_file_database_persists_uses_wal_and_enforces_foreign_keys
+Opening & configuration | In-memory database shared by every pooled connection, private to its driver | an_in_memory_database_is_shared_by_the_pool_and_private_to_its_driver, config::tests::two_memory_databases_are_distinct
+Opening & configuration | Read-only mode: reads and transactions work, writes refused, no file created; rw mode never creates | read_only_mode_reads_and_refuses_writes, config::tests::setup_skips_writes_when_read_only
+Opening & configuration | WAL journal by default (readers never wait for the writer); other journal modes, extra PRAGMAs on every connection | a_file_database_persists_uses_wal_and_enforces_foreign_keys, journal_mode_and_pragmas_are_applied_to_every_connection
+Opening & configuration | Foreign keys enforced by default, can be turned off | a_file_database_persists_uses_wal_and_enforces_foreign_keys
+Opening & configuration | URL forms (sqlite::memory:, relative, absolute, Windows drive paths) and options (mode, journal_mode, busy_timeout, foreign_keys, synchronous, pool) | config::tests::urls
+Opening & configuration | Same engine on every OS (bundled SQLite ≥ 3.38, FTS5 compiled in) | the_bundled_engine_is_the_same_everywhere
+Opening & configuration | Network, authentication, TLS | N/A: SQLite is an embedded library reading a local file — no server, no login, nothing on the wire
+
+Concurrency & async | Fully async: every SQLite call on the connection's own thread; a long query leaves the reactor running (proved by a timer ticking during it) | a_long_query_does_not_stall_the_reactor
+Concurrency & async | Waiting for another connection's lock (busy timeout) queues without stalling the reactor; a short timeout fails with "database is locked"; WAL readers unaffected | waiting_for_a_lock_queues_without_stalling_and_times_out_cleanly
+Concurrency & async | A cancelled / timed-out query is interrupted at once (sqlite3_interrupt) and the connection is free immediately | a_cancelled_query_is_interrupted_and_the_connection_is_free_at_once
+Concurrency & async | Writers serialised (BEGIN IMMEDIATE): concurrent read-modify-write transactions lose no update | sqlite_conforms
+Concurrency & async | Dropping the driver closes every connection and its file (the file can be deleted — strict on Windows) | dropping_the_driver_closes_its_files
+
+Types | Values typed by declared column type: BOOLEAN, DATE, DATETIME/TIMESTAMP, TIME, JSON, DECIMAL/NUMERIC, INTEGER (i64 min/max), REAL, TEXT (UTF-8, emoji), BLOB, NULL; expressions by stored type; invalid UTF-8 text returned as bytes | values_are_typed_by_the_declared_column_type
+Types | Parameters: count checked, u64 beyond i64 refused (no silent rounding), arrays / objects bound as JSON text | parameters_are_checked, values_are_typed_by_the_declared_column_type
+Types | Errors: UNIQUE / PRIMARY KEY violations name the column (incl. multi-column keys); foreign key violations; NOT NULL / CHECK as query errors | unique_violations_name_the_column, a_file_database_persists_uses_wal_and_enforces_foreign_keys
+
+ORM (shared layer) | Shared conformance suite (CRUD, values, batch, query builder, binary and long text, unique violation, transactions, row locks, raw SQL, joins/aggregates, execute_many failure semantics, cursors) | sqlite_conforms
+ORM (shared layer) | Batch insert with generated keys (one multi-row INSERT) | sqlite_conforms
+ORM (shared layer) | Select builder: INNER / LEFT JOIN, GROUP BY, aggregates, HAVING, ORDER BY, LIMIT / OFFSET (incl. OFFSET without LIMIT) | sqlite_conforms
+ORM (shared layer) | Transactions: commit, rollback on error, hand-written SQL inside them | sqlite_conforms
+ORM (shared layer) | Row-level locks (SELECT … FOR UPDATE) | N/A: SQLite locks the whole database; IMMEDIATE transactions give the same no-lost-update guarantee (sqlite_conforms)
+
+Hand-written SQL | Any query with bound parameters, results typed by column, mapped onto entities by name | sqlite_conforms
+Hand-written SQL | UPSERT (ON CONFLICT … DO UPDATE), RETURNING, window functions | hand_written_sql_has_upsert_returning_and_window_functions
+Hand-written SQL | Cursors: batches on demand, two open at once in one transaction, other statements in between, released with the transaction | cursors_and_streams_never_hold_the_whole_result, sqlite_conforms
+Hand-written SQL | Streaming 200k rows without collecting; a callback error stops cleanly and the connection works on | cursors_and_streams_never_hold_the_whole_result
+Hand-written SQL | execute_many under one savepoint: same outcome as row by row on a failure part-way, one commit for the batch | sqlite_conforms, online_backup_copies_a_consistent_database
+Hand-written SQL | Scripts (several statements, triggers with BEGIN … END); an error stops the script | execute_script_runs_triggers_and_multi_statement_scripts
+
+SQLite features | Full-text search (FTS5, Unicode tokenizer with diacritics folded, ranking, highlight) | full_text_search_and_json_functions_are_built_in
+SQLite features | JSON functions (json_extract, json_each) over bound JSON parameters | full_text_search_and_json_functions_are_built_in
+SQLite features | Rust functions callable from SQL (fixed and variadic arguments, deterministic — usable in an index; errors reach the caller); call_function | rust_functions_are_callable_from_sql
+SQLite features | Online backup of a live database (file or in-memory) to a file | online_backup_copies_a_consistent_database
+SQLite features | Stored procedures | N/A: SQLite has no procedural language — Rust functions take their place (call() answers Unsupported: rust_functions_are_callable_from_sql)
+SQLite features | Incremental BLOB I/O: a 5 MiB BLOB filled 64 KiB at a time in place, a piece read across chunks; never grows; names are not SQL | incremental_blob_io_reads_and_writes_pieces_in_place
+SQLite features | Change hooks: every inserted / updated / deleted row through any pooled connection, commits and rollbacks | change_hooks_report_every_row_and_transaction_end
+SQLite features | Serialize a whole database to bytes (a valid database file) and open an in-memory copy from bytes (WAL images included) | a_database_serializes_to_bytes_and_opens_from_them
+SQLite features | Loadable extensions (load_extension) | GAP: not exposed — loading native code is unsafe, and there is no portable test extension to prove it on Linux / macOS / Windows yet
+SQLite features | Session extension (changesets / patchsets) | GAP: not exposed — needs SQLite built with SQLITE_ENABLE_SESSION
+SQLite features | Encryption at rest | N/A: not part of SQLite (SQLCipher / SEE are separate products)
+
+Platform & runtime | Runs on Linux: whole driver suite (CI) | ci::test_ubuntu_latest
+Platform & runtime | Runs on macOS: whole driver suite (CI) | ci::test_macos_latest
+Platform & runtime | Runs on Windows: whole driver suite, incl. file release on drop (CI) | ci::test_windows_latest

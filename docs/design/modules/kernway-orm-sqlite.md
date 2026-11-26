@@ -1,206 +1,59 @@
-# kernway-orm-sqlite — SQLite `Repository<T>` via rusqlite
+# kernway-orm-sqlite
 
-## Purpose
+SQLite for the kernway ORM: the shared SQL layer (`kernway-orm-sql`) over an
+embedded SQLite. Acceptance report: [`docs/acceptance/sqlite.md`](../../acceptance/sqlite.md)
+(`acceptance/run.sh sqlite`).
 
-A SQLite-backed implementation of `kernway-orm-core`'s `Repository<T>` and
-`QueryBuilder<T>` traits. It is the first production-capable persistence driver
-in the ORM stack: actual data survives process restarts (file mode), DDL is
-generated automatically from `Entity` metadata, and the full CRUD + query
-surface is available.
+## Shape
 
-This crate now exposes an async ORM surface while keeping rusqlite on the
-blocking pool. Public `Repository<T>` and terminal `QueryBuilder<T>` methods
-return boxed futures; the actual SQLite work runs via `rt_core::spawn_blocking`.
-
-## Status
-
-| Area | State | Notes |
-|---|---|---|
-| `Repository<T>` — all 9 CRUD methods | ✅ done | async trait methods backed by `spawn_blocking` |
-| Auto-DDL (`CREATE TABLE IF NOT EXISTS`) | ✅ done | generated from `Entity::columns()` at construction |
-| `#[id(strategy = "auto")]` | ✅ done | `AUTOINCREMENT`; returns entity with DB-assigned id after insert |
-| WAL mode + foreign keys | ✅ done | `PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;` on open |
-| `SqliteRepository::open(path)` | ✅ done | file-backed |
-| `SqliteRepository::in_memory()` | ✅ done | private in-memory DB for tests (`:memory:` semantics) |
-| `execute_raw(sql)` | ✅ done | escape hatch for fixtures / schema tweaks |
-| `QueryBuilder<T>` — all 5 filters | ✅ done | compiled to parameterised `WHERE` clause |
-| `QueryBuilder<T>` — ordering | ✅ done | `ORDER BY … ASC/DESC`; last `order_by_*` wins (single key) |
-| `QueryBuilder<T>` — pagination | ✅ done | sync builder chaining; terminal methods async via `spawn_blocking` |
-| `QueryBuilder::with` (eager load) | 🚧 no-op | accepted but silently ignored |
-| `UniqueViolation` / `ForeignKeyViolation` error mapping | ✅ done | rusqlite codes → `OrmError` variants |
-| Migrations | ❌ not started | no schema versioning; DDL is append-only CREATE IF NOT EXISTS |
-| Connection pooling | ❌ not started | single `Arc<Mutex<Connection>>` per repo instance |
-| Multi-key ordering | ❌ not started | last `order_by_*` wins |
-| Transactions across multiple saves | ❌ not started | `save_all` is a loop of individual writes |
-
-**Today**: a working SQLite backend — open a file (or `:memory:`), call CRUD
-and query methods, get back typed `T`. Suitable for single-process applications.
-**Not yet**: connection pooling, migrations, multi-sort, eager relations.
-
-## Standards
-
-No formal spec. Compliance goals:
-
-| Spec | Scope | Compliance |
-|---|---|---|
-| SQLite WAL mode | concurrency model | enabled on every connection |
-| SQLite foreign key enforcement | referential integrity | enabled on every connection (`PRAGMA foreign_keys=ON`) |
-| `kernway-orm-core` `Repository<T>` contract | CRUD semantics | full — all 9 async methods implemented |
-| `kernway-orm-core` `QueryBuilder<T>` contract | filter / order / page | full — sync chaining + async terminal methods; `.with()` no-op |
-
-## Architecture
-
-```text
-SqliteRepository<T>
-    │
-    ├─ conn: Arc<Mutex<Connection>>   ← shared with every SqliteQueryBuilder it vends
-    │         WAL mode, FK enforcement enabled at open time
-    │         DDL auto-created for T at construction
-    │
-    └─ _marker: PhantomData<T>
-
-Entity → serde_json::Value → rusqlite params    (write path)
-rusqlite Row → serde_json::Value → Entity       (read path)
-
-─── Write path (save/insert/update) ───────────────────────────────────────
-T::columns()              → column list, INSERT/UPDATE SQL template
-serde_json::to_value(T)   → JSON object
-json_to_sql(col, value)   → rusqlite SqlValue per column
-  Boolean  → INTEGER 0/1
-  Integer  → INTEGER (i64); rejects u64 > i64::MAX explicitly
-  Float    → REAL
-  Text/…   → TEXT; JSON columns stored as serialised string
-conn.execute(sql, params) → rowid
-(auto pk) re-SELECT by rowid → deserialise back into T with assigned id
-
-─── Read path (find_by_id / find_all / query terminal) ─────────────────────
-rusqlite Row  (column index i, ColumnDef)
-    → SqlValue → sql_to_json(v, col) → serde_json::Value
-    → serde_json::from_value::<T>()
-
-─── Filter path (QueryBuilder) ─────────────────────────────────────────────
-.filter_eq("role", "ADMIN") → accumulate in SqliteQueryBuilder.filters
-.fetch_all() terminal → build WHERE clause from filters → parameterised query
-  filter_value_for_field: parses string value to correct SqlValue type
-  (INTEGER for boolean/integer columns, REAL for float, TEXT otherwise)
+```
+SqliteDriver ──derefs──▶ SqlDb<SqliteConnect>      (shared: repositories, select builder,
+     │                         │                     transactions, cursors, raw SQL, execute_many)
+     │                    kernway_wire::Pool  (per core)
+     │                         │
+     │                    SqliteConn ── implements SqlConn
+     │                         │   send job ─────────▶ connection thread
+     │                         │   await reply ◀────── (rusqlite::Connection, open cursors)
+     └── blob_* / serialize / backup_to / from_bytes  (SQLite-only, same path)
 ```
 
-The serde_json intermediary is a deliberate tradeoff: it avoids a custom
-`FromRow` derive and works with any `Serialize + DeserializeOwned` struct.
-The cost is an extra allocation per row on every read. For an embedded SQLite
-driver this is acceptable; a high-throughput server should prefer `sqlx` or
-a zero-copy row mapper.
+- **Async without blocking the reactor.** SQLite is a library: every call does
+  file I/O and may wait on another connection's lock. Each pooled connection
+  owns a dedicated thread holding its `rusqlite::Connection`; the async side
+  sends a job and awaits a one-shot reply. A dropped future interrupts the
+  running statement (`sqlite3_interrupt`), so a timeout frees the connection
+  at once.
+- **Cursors** are prepared statements kept on the connection thread and
+  stepped a batch at a time (`raw_query` continues where the last batch
+  stopped). `query_each` streams through one; nothing is materialised.
+- **Concurrency.** One writer at a time. Transactions start `BEGIN IMMEDIATE`
+  so read-modify-write transactions queue within the busy timeout (default
+  5 s) instead of failing on their first write; files default to WAL so readers
+  never wait. There is no `FOR UPDATE`: the dialect's lock suffix is empty and
+  IMMEDIATE gives the same no-lost-update guarantee.
+- **Types.** SQLite stores NULL / integer / real / text / blob; values come back
+  typed by the column's declared type (`BOOLEAN`, `DATE`, `DATETIME`,
+  `TIMESTAMP`, `TIME`, `JSON`, `DECIMAL`/`NUMERIC`), which the dialect emits for
+  entity columns. `u64` beyond `i64::MAX` is refused, not rounded.
+- **In-memory databases** use SQLite's `memdb` VFS, so every connection of one
+  driver shares one database; an anchor connection keeps it alive.
+- **Same engine everywhere.** `rusqlite` with `bundled`: SQLite compiled from
+  source on Linux, macOS and Windows, FTS5 and the JSON functions included.
 
-## Public surface
+## Configuration
 
-```rust
-pub struct SqliteRepository<T>
-where
-    T: Entity + Serialize + DeserializeOwned,
-    T::Id: Serialize + DeserializeOwned + Default + PartialEq;
+`SqliteConfig::file(path)` / `::memory()` / `::from_url(url)` — mode
+(read-write-create, read-write, read-only), journal mode, busy timeout,
+foreign keys (on by default), `synchronous`, extra PRAGMAs, pool size, Rust
+scalar functions callable from SQL, and change / commit / rollback hooks.
 
-impl<T: …> SqliteRepository<T> {
-    /// Open (or create) a file-backed SQLite database.
-    /// Creates T's table on first open.
-    pub fn open(path: &str) -> Result<Self, OrmError>;
+URL forms: `sqlite::memory:`, `sqlite:relative.db`, `sqlite://relative.db`,
+`sqlite:///abs/path.db`, `sqlite:///C:/data/app.db`, a bare path; options
+`?mode=ro|rw|rwc&journal_mode=…&busy_timeout=<ms>&foreign_keys=on|off&synchronous=…&pool=<n>`.
 
-    /// Open a private in-memory database. Data is lost when the repo is dropped.
-    /// The usual choice for tests requiring real SQL (vs InMemoryRepository).
-    pub fn in_memory() -> Result<Self, OrmError>;
+## Not available
 
-    /// Run arbitrary SQL against the connection.
-    /// Bypasses the Repository abstraction — not portable to another backend.
-    pub fn execute_raw(&self, sql: &str) -> Result<(), OrmError>;
-}
-
-impl<T: …> Repository<T> for SqliteRepository<T> { … }
-```
-
-**Stability**: `open`, `in_memory`, and `execute_raw` are stable. The
-`SqliteQueryBuilder` type is not exported; it is only reachable through
-`repo.query()`. The serde_json intermediary is an implementation detail.
-
-## Integration
-
-**Depends on**:
-
-| Module | Why |
-|---|---|
-| `kernway-orm-core` | `Entity`, `Repository`, `QueryBuilder`, `OrmError`, `Page`, `ColumnDef`, `ColumnType` |
-| `rusqlite` | SQLite bindings |
-| `serde` / `serde_json` | row marshaling intermediary |
-
-**Depended on by**:
-
-| Module | What it uses |
-|---|---|
-| any app wanting SQLite persistence | `SqliteRepository::open` / `in_memory` |
-| `login-htmx` example (planned) | session / user storage |
-
-**Must never depend on**: `kernway-server`, `kernway-di`, `kernway-security`,
-or any Kernway runtime crate. Persistence must be usable without the web stack.
-
-## Speed
-
-| Path | Runs | Current | Budget | Bench |
-|---|---|---|---|---|
-| `save` (insert, no auto-PK) | per write | not measured | — | none |
-| `save` (insert, auto-PK) | per write | 2 round-trips (INSERT + SELECT by rowid) | — | none |
-| `find_by_id` | per request | not measured | — | none |
-| `query().filter_eq().fetch_all` | per request | parameterised SQL — not measured | — | none |
-
-Hypothesis (not measured): serde_json round-trip adds ~1–5 µs per row vs
-direct row mapping. Acceptable for embedded SQLite; measure before optimising.
-
-**Allocation policy**: each row allocates a `serde_json::Map` during
-deserialisation. One `Vec<T>` per query result. No zero-copy path.
-
-## Generic — extension points
-
-| Extension point | Trait | Default impl | Replaceable by |
-|---|---|---|---|
-| `Repository<T>` backend | `kernway-orm-core::Repository` | `SqliteRepository<T>` | `kernway-orm-memory` for tests; future `kernway-orm-sqlx` for Postgres/MySQL |
-| `QueryBuilder<T>` | `kernway-orm-core::QueryBuilder` | `SqliteQueryBuilder<T>` | not independently replaceable; comes from the repo |
-| Row marshaling | internal `json_to_sql` / `sql_to_json` | serde_json intermediary | not exposed; open a PR |
-
-## Security
-
-| Threat | Mitigation | Tested |
-|---|---|---|
-| SQL injection | all filter values bound as `rusqlite` positional parameters; SQL is template-generated from `Entity` metadata (field names from proc-macro, not user input) | no explicit injection test — gap |
-| Integer overflow (u64 > i64::MAX written to INTEGER column) | `number_to_integer` returns `OrmError::TypeConversion` rather than wrapping | logic covered by type conversion code; no separate test |
-| Mutex poisoning | all lock calls map poison to `OrmError::Transaction` | no explicit test — error path gap |
-| FOREIGN KEY violations silently ignored | `PRAGMA foreign_keys=ON` at open; `rusqlite::ErrorCode::ConstraintViolation` with FK message → `OrmError::ForeignKeyViolation` | no integration test with FK schema |
-
-## Direction
-
-| Phase | Goal | Blocked by |
-|---|---|---|
-| Next | Connection pooling (r2d2 or an internal pool) | design decision — one repo per pool or repo holds pool? |
-| Next | Multi-key ordering | small change; low priority |
-| Later | Schema migration (versioned ALTER TABLE) | needs a migration DSL or SQL file runner; separate sub-crate? |
-| Later | `.with()` eager-load via JOIN or secondary SELECT | needs the relation model in `kernway-orm-core` first |
-| Done | Async surface | public async API implemented with `BoxFuture` + `spawn_blocking` |
-
-**Out of scope**: Postgres, MySQL, MongoDB. Those are separate driver crates
-(`kernway-orm-sqlx` for async PG/MySQL; community for Mongo). The sqlite driver
-is explicitly for embedded / development use.
-
-## Open questions
-
-- Should `SqliteRepository` hold a connection pool instead of a single
-  `Arc<Mutex<Connection>>`? A pool would avoid lock contention under concurrent
-  writes at the cost of added complexity. SQLite WAL mode already allows
-  concurrent reads; the single-connection model is the correct default for
-  embedded use but needs revisiting if the driver is used in a multi-threaded
-  server.
-- The `execute_raw` escape hatch bypasses the `Repository` abstraction. Should
-  it be gated behind a `#[cfg(test)]` attribute to prevent accidental production
-  use?
-
-## Related KEPs
-
-| KEP | Bearing on this module |
-|---|---|
-| KEP-0000 §1 | why the driver uses rusqlite (ours) rather than sqlx (not yet) |
-| KEP-0000 §2 | speed numbers above are hypotheses — bench before claiming |
+- Stored procedures: SQLite has none — `call()` is `Unsupported`; register a
+  Rust function and call it from SQL or with `call_function`.
+- Loadable extensions and the session extension: not exposed yet (listed as
+  gaps in the acceptance report).

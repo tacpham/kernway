@@ -6,6 +6,7 @@ against mocks or another client library's output. One command per database:
 ```sh
 acceptance/run.sh mysql    # -> docs/acceptance/mysql.md
 acceptance/run.sh oracle   # -> docs/acceptance/oracle.md
+acceptance/run.sh sqlite   # -> docs/acceptance/sqlite.md (embedded: no container)
 ```
 
 The script creates or reuses the container (data is kept), waits for the
