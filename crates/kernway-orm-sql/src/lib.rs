@@ -138,6 +138,19 @@ pub trait SqlConn {
         async { Err(OrmError::Unsupported("stored procedure calls".into())) }
     }
 
+    /// Call stored function `name` with `args`; its result is
+    /// [`CallResult::value`], typed by `returns` where the database needs to
+    /// know (Oracle) — `OUT` arguments and output as for [`call`](Self::call).
+    fn call_function(
+        &mut self,
+        name: &str,
+        returns: OutKind,
+        args: &[CallArg],
+    ) -> impl Future<Output = Result<CallResult, OrmError>> {
+        let _ = (name, returns, args);
+        async { Err(OrmError::Unsupported("stored function calls".into())) }
+    }
+
     /// Run a script of several `;`-separated statements (schema files,
     /// migrations), stopping at the first error.
     fn execute_script(&mut self, script: &str) -> impl Future<Output = Result<(), OrmError>> {

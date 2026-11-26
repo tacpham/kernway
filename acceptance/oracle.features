@@ -1,0 +1,48 @@
+# Oracle feature catalog for the acceptance report (format: see mysql.features).
+
+Connection & security | Login with user / password (O5LOGON, 11g and 12c verifiers) | logs_in_with_user_and_password, auth_crypto::tests::verifier_11g_matches_the_reference_vectors, auth_crypto::tests::verifier_12c_matches_the_reference_vectors, auth_crypto::tests::cbc_padding_always_adds_a_block_on_exact_multiples
+Connection & security | TCPS (TLS) with each certificate check, incl. listener TLS renegotiation | tcps_connections_with_each_certificate_check
+Connection & security | Native network encryption (SQLNET.ENCRYPTION) | GAP: use TCPS
+Connection & security | Wallet / Kerberos / proxy authentication | GAP: user/password only
+
+Protocol & encoding | NUMBER / DATE / TIMESTAMP / BINARY_DOUBLE encodings checked against the server's own bytes | server_checks::number_encoding_matches_the_servers_own_bytes, server_checks::dates_timestamps_and_floats_compare_equal_on_the_server
+Protocol & encoding | Queries with binds; fetches in rounds | select_with_binds_and_types, many_rows_are_fetched_in_rounds
+Protocol & encoding | Request bytes match the reference driver's (golden EXECUTE messages) | exec::tests::execute_of_a_query_matches_the_golden_bytes, exec::tests::execute_of_plsql_with_out_bind_matches_the_golden_bytes
+Protocol & encoding | TTC primitives: universal integers, byte strings, incomplete-response handling | buf::tests::universal_integers_round_trip, buf::tests::byte_strings_short_long_and_null, buf::tests::running_out_of_bytes_is_incomplete_not_invalid
+Protocol & encoding | Statement classification and bind discovery (literals, comments, := skipped) | stmt::tests::classifies_by_first_keyword, stmt::tests::finds_binds_and_skips_literals_comments_and_assignment
+Protocol & encoding | NUMBER / DATE / BINARY_DOUBLE codecs (reference tables, round trips) | value::tests::numbers_encode_like_the_reference_table, value::tests::numbers_round_trip, value::tests::dates_and_doubles_round_trip
+Protocol & encoding | DML, commit / rollback, server errors mapped (unique violation names the constraint) | dml_commit_rollback_and_errors, exec::tests::unique_violation_names_the_constraint
+Protocol & encoding | Statement cache (re-use parsed cursors) | GAP: every execute parses
+Protocol & encoding | Scrollable cursors | GAP: not implemented
+
+Types | NUMBER typed by precision/scale (Int / Decimal / Float), BINARY_FLOAT/DOUBLE | every_column_type_is_typed_and_matches_the_servers_rendering, backend::tests::values_are_typed_by_their_column
+Types | VARCHAR2 / NVARCHAR2 / CHAR / RAW | every_column_type_is_typed_and_matches_the_servers_rendering
+Types | DATE, TIMESTAMP(n), WITH TIME ZONE (offset), WITH LOCAL TIME ZONE — equal to TO_CHAR | every_column_type_is_typed_and_matches_the_servers_rendering, value::tests::timestamp_tz_round_trips_with_offsets_and_day_rollover
+Types | INTERVAL YEAR TO MONTH / DAY TO SECOND — equal to TO_CHAR | every_column_type_is_typed_and_matches_the_servers_rendering, value::tests::intervals_format_like_to_char
+Types | JSON (OSON decoded) — equal to JSON_SERIALIZE | every_column_type_is_typed_and_matches_the_servers_rendering, oson::tests::escapes_json_strings, oson::tests::rejects_garbage
+Types | VECTOR — equal to VECTOR_SERIALIZE | every_column_type_is_typed_and_matches_the_servers_rendering
+Types | BOOLEAN | every_column_type_is_typed_and_matches_the_servers_rendering
+Types | ROWID / UROWID (physical and logical) accepted back by the server | every_column_type_is_typed_and_matches_the_servers_rendering, logical_rowids_of_index_organized_tables_round_trip
+Types | CLOB / NCLOB / BLOB read and written, 0 B – 1 MB | clob_and_blob_read_and_write
+Types | Object types / XMLType / BFILE / nested CURSOR columns refused cleanly (session stays usable) | unsupported_types_are_refused_cleanly
+Types | Object types / XMLType / BFILE / nested CURSOR columns decoded | GAP: refused with OrmError::Unsupported (planned: phase 3)
+Types | TIMESTAMP WITH TIME ZONE in a named region | GAP: refused with a clear message; use TO_CHAR / SYS_EXTRACT_UTC
+
+ORM (shared layer) | Shared conformance suite (CRUD, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL) | oracle_conforms
+ORM (shared layer) | Query builder aggregates / GROUP BY / JOIN | GAP: use hand-written SQL (query_as) for now
+
+Hand-written SQL | Streaming large results (150k rows); callback errors close the cursor | large_results_stream_and_a_callback_error_stops_cleanly
+Hand-written SQL | Array DML (execute_many, 20k rows in one round trip; all-or-nothing in a transaction) | array_dml_runs_many_rows_in_one_call
+
+PL/SQL | Anonymous blocks, procedures and functions with IN / OUT / IN OUT binds | plsql_blocks_procedures_and_functions
+PL/SQL | call(): OUT / IN OUT, REF CURSOR OUT, implicit results (DBMS_SQL.RETURN_RESULT), DBMS_OUTPUT (~700 KB) | procedure_calls_return_out_values_cursors_implicit_results_and_output
+PL/SQL | REF CURSORs from procedures and functions | ref_cursors_from_procedures_and_functions
+PL/SQL | call_function(), package members, named arguments (any order, skipping defaults) | functions_named_arguments_and_every_out_kind
+PL/SQL | OUT of every scalar kind: NUMBER, BINARY_DOUBLE, VARCHAR2, RAW, BOOLEAN, DATE, TIMESTAMP, WITH TIME ZONE, INTERVAL YM / DS, cursor | functions_named_arguments_and_every_out_kind, procedure_calls_return_out_values_cursors_implicit_results_and_output
+PL/SQL | Compilation errors reported with line / column / message (not left INVALID silently) | compilation_errors_are_reported_with_their_lines
+PL/SQL | Scripts: SQL + PL/SQL units ended by '/', quotes / q'[…]' / comments respected | scripts_run_sql_and_plsql_units_and_stop_at_the_first_error, backend::tests::scripts_split_on_semicolons_and_slash_lines
+PL/SQL | Procedure names / parameter names validated (never SQL) | backend::tests::procedure_names_are_identifiers_only, procedure_calls_return_out_values_cursors_implicit_results_and_output
+PL/SQL | CLOB / BLOB as OUT or function result; IN values over 32 KB (LOB locators) | GAP: planned phase 2
+PL/SQL | RECORD, collections (VARRAY, nested table), associative arrays, object types as arguments | GAP: planned phase 3
+
+Other Oracle features | Advanced Queuing, Continuous Query Notification, SODA, two-phase commit | GAP: not implemented

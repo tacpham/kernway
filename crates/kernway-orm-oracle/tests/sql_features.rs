@@ -356,3 +356,125 @@ fn logical_rowids_of_index_organized_tables_round_trip() {
         }
     });
 }
+
+#[test]
+fn compilation_errors_are_reported_with_their_lines() {
+    let Some(url) = url() else { return eprintln!("skip: KERNWAY_ORACLE_HOST not set") };
+    run(async move {
+        let db = OracleDriver::connect(&url).await.unwrap();
+        let e = db.execute("CREATE OR REPLACE PROCEDURE kwo_broken AS BEGIN x := ; END;").await.unwrap_err().to_string();
+        assert!(e.contains("PROCEDURE KWO_BROKEN") && e.contains("line 1") && e.contains("PLS-"), "{e}");
+        let e = db
+            .execute_script(
+                "CREATE OR REPLACE PACKAGE kwo_pkg_bad AS PROCEDURE p; END;
+/
+CREATE OR REPLACE PACKAGE BODY kwo_pkg_bad AS
+  PROCEDURE p IS BEGIN
+    SELECT 1 INTO v_missing FROM dual;
+  END;
+END;
+/",
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("statement 2") && e.contains("PACKAGE BODY KWO_PKG_BAD") && e.contains("line 3"), "{e}");
+        // A valid unit is fine, and an object referencing a missing table is
+        // reported too (not silently left INVALID).
+        db.execute("CREATE OR REPLACE PROCEDURE kwo_fine AS BEGIN NULL; END;").await.unwrap();
+        let e = db.execute("CREATE OR REPLACE FUNCTION kwo_f_bad RETURN NUMBER AS n NUMBER; BEGIN SELECT COUNT(*) INTO n FROM kwo_no_table; RETURN n; END;")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("FUNCTION KWO_F_BAD") && e.contains("ORA-00942"), "{e}");
+    });
+}
+
+#[test]
+fn functions_named_arguments_and_every_out_kind() {
+    let Some(url) = url() else { return eprintln!("skip: KERNWAY_ORACLE_HOST not set") };
+    run(async move {
+        let db = OracleDriver::connect_with(kernway_orm_oracle::OracleConfig::from_url(&url).unwrap(), 1).await.unwrap();
+        db.execute_script(
+            "CREATE OR REPLACE PACKAGE kwo_api AS
+  FUNCTION total(p_qty IN NUMBER, p_price IN NUMBER DEFAULT 2.5, p_tax IN NUMBER DEFAULT 0) RETURN NUMBER;
+  FUNCTION greet(p_who IN VARCHAR2, p_len OUT NUMBER) RETURN VARCHAR2;
+  FUNCTION is_even(p_n IN NUMBER) RETURN BOOLEAN;
+  FUNCTION rows_upto(p_n IN NUMBER) RETURN SYS_REFCURSOR;
+  PROCEDURE kinds(p_ts OUT TIMESTAMP WITH TIME ZONE, p_ym OUT INTERVAL YEAR TO MONTH,
+                  p_ds OUT INTERVAL DAY TO SECOND, p_f OUT BINARY_DOUBLE, p_r OUT RAW, p_b OUT BOOLEAN);
+END;
+/
+CREATE OR REPLACE PACKAGE BODY kwo_api AS
+  FUNCTION total(p_qty IN NUMBER, p_price IN NUMBER DEFAULT 2.5, p_tax IN NUMBER DEFAULT 0) RETURN NUMBER IS
+  BEGIN DBMS_OUTPUT.PUT_LINE('total called'); RETURN p_qty * p_price + p_tax; END;
+  FUNCTION greet(p_who IN VARCHAR2, p_len OUT NUMBER) RETURN VARCHAR2 IS
+  BEGIN p_len := LENGTH(p_who); RETURN 'hi ' || p_who; END;
+  FUNCTION is_even(p_n IN NUMBER) RETURN BOOLEAN IS BEGIN RETURN MOD(p_n, 2) = 0; END;
+  FUNCTION rows_upto(p_n IN NUMBER) RETURN SYS_REFCURSOR IS c SYS_REFCURSOR;
+  BEGIN OPEN c FOR SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= p_n; RETURN c; END;
+  PROCEDURE kinds(p_ts OUT TIMESTAMP WITH TIME ZONE, p_ym OUT INTERVAL YEAR TO MONTH,
+                  p_ds OUT INTERVAL DAY TO SECOND, p_f OUT BINARY_DOUBLE, p_r OUT RAW, p_b OUT BOOLEAN) IS
+  BEGIN
+    p_ts := TIMESTAMP '2026-11-26 23:30:00.5 +07:00';
+    p_ym := INTERVAL '3-4' YEAR TO MONTH;
+    p_ds := INTERVAL '1 02:03:04.5' DAY TO SECOND;
+    p_f := 0.125; p_r := HEXTORAW('CAFE'); p_b := FALSE;
+  END;
+END;
+/",
+        )
+        .await
+        .unwrap();
+
+        // Defaults used; then a middle default skipped by name.
+        let r = db.call_function("kwo_api.total", OutKind::Number, &[4.into()]).await.unwrap();
+        assert_eq!(r.value, Value::Int(10));
+        assert_eq!(r.output, ["total called"]);
+        let r = db
+            .call_function("kwo_api.total", OutKind::Number, &[4.into(), CallArg::named("p_tax", 1)])
+            .await
+            .unwrap();
+        assert_eq!(r.value, Value::Int(11));
+        let r = db
+            .call_function("kwo_api.total", OutKind::Number, &[CallArg::named("p_price", 3), CallArg::named("p_qty", 2)])
+            .await
+            .unwrap();
+        assert_eq!(r.value, Value::Int(6), "named, any order");
+
+        let r = db.call_function("kwo_api.greet", OutKind::Text, &["Lan".into(), OutKind::Number.into()]).await.unwrap();
+        assert_eq!((r.value, r.out), (Value::Text("hi Lan".into()), vec![Value::Int(3)]));
+        assert_eq!(db.call_function("kwo_api.is_even", OutKind::Bool, &[4.into()]).await.unwrap().value, Value::Bool(true));
+        let Value::Rows(rows) = db.call_function("kwo_api.rows_upto", OutKind::Cursor, &[3.into()]).await.unwrap().value else {
+            panic!("cursor")
+        };
+        assert_eq!(rows.rows.len(), 3);
+
+        let r = db
+            .call(
+                "kwo_api.kinds",
+                &[
+                    OutKind::DateTimeTz.into(),
+                    OutKind::IntervalYm.into(),
+                    OutKind::IntervalDs.into(),
+                    OutKind::Float.into(),
+                    OutKind::Bytes.into(),
+                    OutKind::Bool.into(),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            r.out,
+            vec![
+                Value::DateTime("2026-11-26 23:30:00.500000000 +07:00".into()),
+                Value::Interval("+03-04".into()),
+                Value::Interval("+01 02:03:04.500000".into()),
+                Value::Float(0.125),
+                Value::Bytes(vec![0xCA, 0xFE]),
+                Value::Bool(false),
+            ]
+        );
+        assert!(db.call("kwo_api.kinds", &[CallArg::named("bad name", 1)]).await.is_err());
+    });
+}

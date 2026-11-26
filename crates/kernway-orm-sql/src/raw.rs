@@ -203,6 +203,12 @@ pub enum OutKind {
     DateTime,
     /// A cursor (result set), read back as [`Value::Rows`].
     Cursor,
+    /// Timestamp with a time zone offset.
+    DateTimeTz,
+    /// Interval in years and months.
+    IntervalYm,
+    /// Interval in days to seconds.
+    IntervalDs,
 }
 
 /// One argument of a stored-procedure call.
@@ -214,6 +220,32 @@ pub enum CallArg {
     Out(OutKind),
     /// An `IN OUT` argument with its initial value.
     InOut(Param),
+    /// An argument passed by parameter name (`name => value`), in any order
+    /// and skipping defaulted parameters. Oracle only: MySQL has no named
+    /// arguments.
+    Named(String, Box<CallArg>),
+}
+
+impl CallArg {
+    /// `name => arg`: `CallArg::named("p_qty", 5)`,
+    /// `CallArg::named("p_total", CallArg::Out(OutKind::Number))`.
+    pub fn named(name: impl Into<String>, arg: impl Into<CallArg>) -> Self {
+        CallArg::Named(name.into(), Box::new(arg.into()))
+    }
+
+    /// The argument without its name.
+    pub fn inner(&self) -> &CallArg {
+        match self {
+            CallArg::Named(_, a) => a.inner(),
+            a => a,
+        }
+    }
+}
+
+impl From<OutKind> for CallArg {
+    fn from(k: OutKind) -> Self {
+        CallArg::Out(k)
+    }
 }
 
 impl<T: Into<Param>> From<T> for CallArg {
@@ -223,7 +255,7 @@ impl<T: Into<Param>> From<T> for CallArg {
 }
 
 /// Everything a procedure call returned.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CallResult {
     /// The result sets the procedure produced, in order.
     pub results: Vec<Rows>,
@@ -233,6 +265,14 @@ pub struct CallResult {
     pub affected_rows: u64,
     /// Lines the procedure printed (Oracle `DBMS_OUTPUT`), in order.
     pub output: Vec<String>,
+    /// What a function returned (`Null` for a procedure).
+    pub value: Value,
+}
+
+impl Default for CallResult {
+    fn default() -> Self {
+        Self { results: Vec::new(), out: Vec::new(), affected_rows: 0, output: Vec::new(), value: Value::Null }
+    }
 }
 
 impl From<i64> for Param {

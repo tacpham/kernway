@@ -1,7 +1,7 @@
 //! [`SqlDb`]: the pooled database handle every SQL driver is built on.
 
 use crate::engine;
-use crate::raw::{CallArg, CallResult, Outcome, Rows, Value};
+use crate::raw::{CallArg, CallResult, OutKind, Outcome, Rows, Value};
 use crate::{run_transaction, Param, SqlConn, SqlConnect, SqlRepository, SqlTx};
 use kernway_orm_core::{
     driver::{Driver, DriverCapabilities},
@@ -121,6 +121,17 @@ impl<C: SqlConnect> SqlDb<C> {
     pub async fn call(&self, name: &str, args: &[CallArg]) -> Result<CallResult, OrmError> {
         let mut g = self.pool.acquire().await?;
         let r = g.call(name, args).await;
+        settle(&mut g, r)
+    }
+
+    /// Call a stored function: its value is [`CallResult::value`].
+    ///
+    /// ```rust,ignore
+    /// let total = db.call_function("order_total", OutKind::Number, &[42.into()]).await?.value;
+    /// ```
+    pub async fn call_function(&self, name: &str, returns: OutKind, args: &[CallArg]) -> Result<CallResult, OrmError> {
+        let mut g = self.pool.acquire().await?;
+        let r = g.call_function(name, returns, args).await;
         settle(&mut g, r)
     }
 

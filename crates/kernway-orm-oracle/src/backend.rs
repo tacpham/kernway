@@ -141,7 +141,70 @@ fn out_type(kind: OutKind) -> OutType {
         OutKind::Date => OutType::Date,
         OutKind::DateTime => OutType::Timestamp,
         OutKind::Cursor => OutType::Cursor,
+        OutKind::DateTimeTz => OutType::TimestampTz,
+        OutKind::IntervalYm => OutType::IntervalYm,
+        OutKind::IntervalDs => OutType::IntervalDs,
     }
+}
+
+fn is_identifier(p: &str) -> bool {
+    if let Some(inner) = p.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+        return !inner.is_empty() && !inner.contains('"');
+    }
+    let mut cs = p.chars();
+    cs.next().is_some_and(|c| c.is_ascii_alphabetic()) && cs.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '#'))
+}
+
+/// A call argument as its bind.
+fn arg_bind(a: &CallArg) -> Bind {
+    match a.inner() {
+        CallArg::In(p) => bind(p),
+        CallArg::Out(k) => Bind::Out(out_type(*k)),
+        CallArg::InOut(p) => match bind(p) {
+            Bind::In(v) => Bind::InOut(v, inout_type(p)),
+            other => other,
+        },
+        CallArg::Named(..) => unreachable!("inner() unwraps names"),
+    }
+}
+
+/// `CREATE … PROCEDURE / FUNCTION / PACKAGE [BODY] / TRIGGER / TYPE [BODY]
+/// [schema.]name`: (owner, name, USER_ERRORS type), as the dictionary
+/// stores them.
+fn plsql_unit(sql: &str) -> Option<(Option<String>, String, String)> {
+    let text = strip_comments(sql);
+    let words: Vec<&str> = text.split_whitespace().take(8).map(|w| w.split('(').next().unwrap_or(w)).collect();
+    let up: Vec<String> = words.iter().map(|w| w.to_ascii_uppercase()).collect();
+    let mut k = 0;
+    if up.first().map(String::as_str) != Some("CREATE") {
+        return None;
+    }
+    k += 1;
+    if up.get(k).map(String::as_str) == Some("OR") {
+        k += 2;
+    }
+    if matches!(up.get(k).map(String::as_str), Some("EDITIONABLE" | "NONEDITIONABLE")) {
+        k += 1;
+    }
+    let mut kind = up.get(k)?.clone();
+    if !matches!(kind.as_str(), "PROCEDURE" | "FUNCTION" | "PACKAGE" | "TRIGGER" | "TYPE") {
+        return None;
+    }
+    k += 1;
+    if matches!(kind.as_str(), "PACKAGE" | "TYPE") && up.get(k).map(String::as_str) == Some("BODY") {
+        kind.push_str(" BODY");
+        k += 1;
+    }
+    let full = *words.get(k)?;
+    let norm = |p: &str| match p.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+        Some(q) => q.to_string(),
+        None => p.to_ascii_uppercase(),
+    };
+    let (owner, name) = match full.split_once('.') {
+        Some((o, n)) => (Some(norm(o)), norm(n)),
+        None => (None, norm(full)),
+    };
+    Some((owner, name, kind))
 }
 
 /// The OUT type an `IN OUT` argument returns, from its input value.
@@ -327,11 +390,104 @@ fn strip_comments(s: &str) -> String {
 
 impl Conn {
     async fn run(&mut self, sql: &str, binds: &[Bind]) -> Result<crate::Executed, OrmError> {
-        if self.in_tx {
-            self.execute(sql, binds).await
-        } else {
-            self.execute_autocommit(sql, binds).await
+        let r = if self.in_tx { self.execute(sql, binds).await? } else { self.execute_autocommit(sql, binds).await? };
+        if let Some((24344, _)) = r.warning {
+            return Err(self.compile_errors(sql).await);
         }
+        Ok(r)
+    }
+
+    /// The error for a PL/SQL unit created with compilation errors, listing
+    /// them from the data dictionary (line, column, message).
+    async fn compile_errors(&mut self, sql: &str) -> OrmError {
+        let Some((owner, name, kind)) = plsql_unit(sql) else {
+            return OrmError::Query("ORA-24344: success with compilation error".into());
+        };
+        let listed = self
+            .execute(
+                "SELECT line, position, text FROM all_errors WHERE owner = NVL(:o, SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')) \
+                 AND name = :n AND type = :t ORDER BY sequence",
+                &[owner.map_or(Bind::In(Value::Null), Bind::from), Bind::from(name.as_str()), Bind::from(kind.as_str())],
+            )
+            .await;
+        let mut msg = format!("ORA-24344: {kind} {name} was created with compilation errors");
+        if let Ok(r) = listed {
+            for row in r.rows {
+                let t = |i: usize| row.get(i).and_then(Value::to_text).unwrap_or_default();
+                msg.push_str(&format!("\n  line {}, column {}: {}", t(0), t(1), t(2).trim_end()));
+            }
+        }
+        OrmError::Query(msg)
+    }
+
+    /// `BEGIN [:ret :=] name(args); END;` with `DBMS_OUTPUT` captured in the
+    /// same round trip (more round trips only for output past ~32 KB).
+    async fn invoke(&mut self, name: &str, returns: Option<OutKind>, args: &[CallArg]) -> Result<CallResult, OrmError> {
+        let name = procedure_name(name)?;
+        // Placeholders are bound in order of appearance: the return value
+        // (if any) first, then the arguments, then the output drain.
+        let first = usize::from(returns.is_some()) + 1;
+        let mut list = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let ph = format!(":{}", first + i);
+            match a {
+                CallArg::Named(param, _) if is_identifier(param) => list.push(format!("{param} => {ph}")),
+                CallArg::Named(param, _) => return Err(OrmError::Query(format!("not a parameter name: {param:?}"))),
+                _ => list.push(ph),
+            }
+        }
+        let n = args.len() + usize::from(returns.is_some());
+        let target = if returns.is_some() { format!(":1 := {name}") } else { name };
+        let sql = format!(
+            "{DRAIN_DECLARE} BEGIN DBMS_OUTPUT.ENABLE(NULL); {target}({}); {DRAIN_OUTPUT} :{} := kw_buf; :{} := kw_over; :{} := kw_done; END;",
+            list.join(", "),
+            n + 1,
+            n + 2,
+            n + 3
+        );
+        let mut b: Vec<Bind> = returns.map(|k| Bind::Out(out_type(k))).into_iter().collect();
+        b.extend(args.iter().map(arg_bind));
+        b.extend([Bind::Out(OutType::Str(8191)), Bind::Out(OutType::Str(8191)), Bind::Out(OutType::Number)]);
+        let r = match self.run(&sql, &b).await {
+            Ok(r) => r,
+            Err(e) => {
+                // The block failed before draining: switch output off again
+                // so the pooled session does not keep buffering.
+                let _ = self.execute("BEGIN DBMS_OUTPUT.DISABLE; END;", &[]).await;
+                return Err(e);
+            }
+        };
+        let mut out = CallResult {
+            results: r.implicit.into_iter().map(result_set).collect(),
+            affected_rows: r.row_count,
+            ..CallResult::default()
+        };
+        let mut values = r.out;
+        let mut drain: Vec<Value> = values.split_off(n);
+        if returns.is_some() {
+            out.value = to_shared(values.remove(0), None);
+        }
+        out.out = args
+            .iter()
+            .zip(values)
+            .filter(|(a, _)| !matches!(a.inner(), CallArg::In(_)))
+            .map(|(_, v)| to_shared(v, None))
+            .collect();
+        loop {
+            let text = |v: &Value| v.to_text().unwrap_or_default();
+            out.output.extend(text(&drain[0]).split('\u{1f}').map(String::from));
+            out.output.pop(); // after the last separator
+            if drain[2].as_i64() == Some(1) {
+                break;
+            }
+            out.output.push(text(&drain[1]));
+            let more = format!("{DRAIN_DECLARE} BEGIN {DRAIN_OUTPUT} :1 := kw_buf; :2 := kw_over; :3 := kw_done; END;");
+            let r = self
+                .run(&more, &[Bind::Out(OutType::Str(8191)), Bind::Out(OutType::Str(8191)), Bind::Out(OutType::Number)])
+                .await?;
+            drain = r.out;
+        }
+        Ok(out)
     }
 
     /// The identity sequence of `table`.`column` (for a generated key that
@@ -440,73 +596,12 @@ impl SqlConn for Conn {
         Conn::execute_many(self, sql, &rows, autocommit).await
     }
 
-    /// `BEGIN name(:1, …); END;` with `DBMS_OUTPUT` captured in the same
-    /// round trip (more round trips only for output past ~32 KB).
     async fn call(&mut self, name: &str, args: &[CallArg]) -> Result<CallResult, OrmError> {
-        let name = procedure_name(name)?;
-        let placeholders: Vec<String> = (1..=args.len()).map(|i| format!(":{i}")).collect();
-        let n = args.len();
-        let sql = format!(
-            "{DRAIN_DECLARE} BEGIN DBMS_OUTPUT.ENABLE(NULL); {name}({}); {DRAIN_OUTPUT} :{} := kw_buf; :{} := kw_over; :{} := kw_done; END;",
-            placeholders.join(", "),
-            n + 1,
-            n + 2,
-            n + 3
-        );
-        let mut b: Vec<Bind> = args
-            .iter()
-            .map(|a| match a {
-                CallArg::In(p) => bind(p),
-                CallArg::Out(k) => Bind::Out(out_type(*k)),
-                CallArg::InOut(p) => match bind(p) {
-                    Bind::In(v) => Bind::InOut(v, inout_type(p)),
-                    other => other,
-                },
-            })
-            .collect();
-        b.extend([Bind::Out(OutType::Str(8191)), Bind::Out(OutType::Str(8191)), Bind::Out(OutType::Number)]);
-        let r = match self.run(&sql, &b).await {
-            Ok(r) => r,
-            Err(e) => {
-                // The block failed before draining: switch output off again
-                // so the pooled session does not keep buffering.
-                let _ = self.execute("BEGIN DBMS_OUTPUT.DISABLE; END;", &[]).await;
-                return Err(e);
-            }
-        };
-        let mut out = CallResult {
-            results: r.implicit.into_iter().map(result_set).collect(),
-            affected_rows: r.row_count,
-            ..CallResult::default()
-        };
-        let mut values = r.out;
-        let drain: Vec<Value> = values.split_off(n);
-        out.out = args
-            .iter()
-            .zip(values)
-            .filter(|(a, _)| !matches!(a, CallArg::In(_)))
-            .map(|(_, v)| to_shared(v, None))
-            .collect();
-        let mut drain = drain;
-        loop {
-            let text = |v: &Value| v.to_text().unwrap_or_default();
-            let buf = text(&drain[0]);
-            out.output.extend(buf.split('\u{1f}').map(String::from));
-            out.output.pop(); // after the last separator
-            let done = drain[2].as_i64() == Some(1);
-            if !done {
-                out.output.push(text(&drain[1]));
-            }
-            if done {
-                break;
-            }
-            let more = format!("{DRAIN_DECLARE} BEGIN {DRAIN_OUTPUT} :1 := kw_buf; :2 := kw_over; :3 := kw_done; END;");
-            let r = self
-                .run(&more, &[Bind::Out(OutType::Str(8191)), Bind::Out(OutType::Str(8191)), Bind::Out(OutType::Number)])
-                .await?;
-            drain = r.out;
-        }
-        Ok(out)
+        self.invoke(name, None, args).await
+    }
+
+    async fn call_function(&mut self, name: &str, returns: OutKind, args: &[CallArg]) -> Result<CallResult, OrmError> {
+        self.invoke(name, Some(returns), args).await
     }
 
     async fn execute_script(&mut self, script: &str) -> Result<(), OrmError> {

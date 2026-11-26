@@ -68,6 +68,11 @@ impl<C: SqlConnect> SqlTx<C> {
         self.conn()?.query_each(sql, params, each).await
     }
 
+    /// Call a stored function inside the transaction.
+    pub async fn call_function(&self, name: &str, returns: crate::OutKind, args: &[CallArg]) -> Result<CallResult, OrmError> {
+        self.conn()?.call_function(name, returns, args).await
+    }
+
     /// Call a stored procedure inside the transaction.
     pub async fn call(&self, name: &str, args: &[CallArg]) -> Result<CallResult, OrmError> {
         self.conn()?.call(name, args).await

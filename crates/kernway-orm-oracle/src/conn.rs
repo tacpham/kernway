@@ -182,6 +182,9 @@ pub(crate) struct CallStatus {
     pub(crate) cursor_id: u16,
     pub(crate) row_count: u64,
     pub(crate) call_status: u32,
+    /// A warning the call ended with (e.g. ORA-24344, success with
+    /// compilation error): code and message.
+    pub(crate) warning: Option<(u16, String)>,
 }
 
 /// A live, authenticated Oracle session.
@@ -585,7 +588,8 @@ pub(crate) fn common_message(r: &mut Reader<'_>, t: u8, fv: u8, st: &mut CallSta
             let len = r.ub2()?;
             r.ub2()?; // flags
             if num != 0 && len > 0 {
-                r.skip_bytes()?;
+                let text = r.str()?.unwrap_or_default();
+                st.warning = Some((num, text.trim_end().to_string()));
             }
             Ok(false)
         }
@@ -612,7 +616,10 @@ fn parse_error(r: &mut Reader<'_>, fv: u8, st: &mut CallStatus) -> PResult<()> {
     st.cursor_id = r.ub2()?;
     let position = r.sb()?;
     r.skip(5)?; // sql type, fatal, flags, user cursor options, UPI parameter
-    r.u8()?; // flags (compilation-error warning)
+    if r.u8()? & 0x20 != 0 {
+        // Created, but with compilation errors.
+        st.warning = Some((24344, "success with compilation error".into()));
+    }
     // rowid
     r.skip_ub()?;
     r.skip_ub()?;

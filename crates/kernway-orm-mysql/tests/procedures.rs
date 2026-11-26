@@ -199,3 +199,56 @@ fn typed_call_maps_results_by_name_and_returns_out_arguments() {
         db.execute("SELECT 1").await.unwrap();
     });
 }
+
+#[test]
+fn stored_functions_and_delimiter_scripts() {
+    let (Some(url), Ok(root)) = (url(), std::env::var("KERNWAY_MYSQL_ROOT_URL")) else {
+        return eprintln!("skip: KERNWAY_MYSQL_URL / KERNWAY_MYSQL_ROOT_URL not set");
+    };
+    run(async move {
+        // With binary logging on, creating functions / triggers needs this
+        // (a server setting, granted by an administrator).
+        MySqlDriver::connect(&root).await.unwrap().execute("SET GLOBAL log_bin_trust_function_creators = 1").await.unwrap();
+        let db = MySqlDriver::connect(&url).await.unwrap();
+        // A mysqldump-style script: DELIMITER blocks, a function, a trigger.
+        db.execute_script(
+            "DROP FUNCTION IF EXISTS kwf_total;
+DROP TABLE IF EXISTS kwf_log;
+CREATE TABLE kwf_log (id INT AUTO_INCREMENT PRIMARY KEY, msg VARCHAR(50));
+DELIMITER ;;
+CREATE FUNCTION kwf_total(qty INT, price DECIMAL(8,2)) RETURNS DECIMAL(10,2) DETERMINISTIC
+BEGIN
+  DECLARE t DECIMAL(10,2);
+  SET t = qty * price; -- semicolons; inside the body
+  RETURN t;
+END ;;
+DROP TRIGGER IF EXISTS kwf_trg ;;
+CREATE TRIGGER kwf_trg BEFORE INSERT ON kwf_log FOR EACH ROW
+BEGIN
+  SET NEW.msg = UPPER(NEW.msg);
+END ;;
+DELIMITER ;
+INSERT INTO kwf_log (msg) VALUES ('a;b');
+",
+        )
+        .await
+        .unwrap();
+        let r = db.call_function("kwf_total", OutKind::Number, &[3.into(), "2.50".into()]).await.unwrap();
+        assert_eq!(r.value, Value::Decimal("7.50".into()));
+        assert_eq!(db.query_scalar("SELECT msg FROM kwf_log", &[]).await.unwrap(), Value::Text("A;B".into()));
+        // MySQL functions have IN arguments only; MySQL has no named arguments.
+        assert!(db.call_function("kwf_total", OutKind::Number, &[1.into(), OutKind::Number.into()]).await.is_err());
+        let e = db.call("kwp_none", &[CallArg::named("n", 1)]).await.unwrap_err();
+        assert!(matches!(e, OrmError::Unsupported(_)), "{e}");
+        // Without DELIMITER the server splits the script itself, BEGIN … END included.
+        db.execute_script(
+            "DROP PROCEDURE IF EXISTS kwf_p; CREATE PROCEDURE kwf_p(OUT r INT) BEGIN DECLARE x INT DEFAULT 4; SET r = x * 2; END;",
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.call("kwf_p", &[OutKind::Number.into()]).await.unwrap().out, vec![Value::Int(8)]);
+        // A failing statement in a DELIMITER script is reported with its position.
+        let e = db.execute_script("DELIMITER ;;\nSELECT 1 ;;\nSELECT * FROM kwf_nope ;;\n").await.unwrap_err();
+        assert!(e.to_string().contains("statement 2"), "{e}");
+    });
+}

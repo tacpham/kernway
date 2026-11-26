@@ -56,6 +56,12 @@ pub enum OutType {
     Raw(u32),
     /// SYS_REFCURSOR: returned as [`Value::Cursor`] with every row fetched.
     Cursor,
+    /// TIMESTAMP WITH TIME ZONE.
+    TimestampTz,
+    /// INTERVAL YEAR TO MONTH.
+    IntervalYm,
+    /// INTERVAL DAY TO SECOND.
+    IntervalDs,
 }
 
 /// A bind variable, by position.
@@ -126,6 +132,9 @@ pub struct Executed {
     /// Result sets a PL/SQL block returned with `DBMS_SQL.RETURN_RESULT`,
     /// each fetched to the end.
     pub implicit: Vec<ResultSet>,
+    /// A warning the statement succeeded with: Oracle error code and message
+    /// (ORA-24344 = created with compilation errors).
+    pub warning: Option<(u16, String)>,
 }
 
 fn out_meta(t: OutType) -> (u8, u8, u32) {
@@ -138,6 +147,9 @@ fn out_meta(t: OutType) -> (u8, u8, u32) {
         OutType::Bool => (ora_type::BOOLEAN, 0, 4),
         OutType::Raw(n) => (ora_type::RAW, 0, n.max(1)),
         OutType::Cursor => (ora_type::CURSOR, 0, 4),
+        OutType::TimestampTz => (ora_type::TIMESTAMP_TZ, 0, 13),
+        OutType::IntervalYm => (ora_type::INTERVAL_YM, 0, 5),
+        OutType::IntervalDs => (ora_type::INTERVAL_DS, 0, 11),
     }
 }
 
@@ -1051,6 +1063,7 @@ impl Conn {
         }
         self.queue_close(cursor_id);
         result.row_count = if kind == Kind::Query { fetched } else { status.row_count };
+        result.warning = status.warning.clone().or_else(|| resp.status.warning.clone());
         // REF CURSORs: fetch each to the end and hand back its rows.
         for (idx, id, cols) in std::mem::take(&mut resp.cursors) {
             let rs = self.fetch_ref_cursor(id, cols).await?;

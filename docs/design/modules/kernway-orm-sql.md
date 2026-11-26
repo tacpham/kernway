@@ -122,6 +122,10 @@ and binary columns are created nullable and read back empty).
 2. `XxxDialect: SqlDialect`; override only what differs.
 3. `impl SqlConn for Conn` (`backend.rs`), `XxxConnect`, `XxxDriver`.
 4. `tests/conformance.rs` → `run_all` passes against the live server.
-5. Errors: map the database's unique-constraint error to
+5. Acceptance: write `acceptance/<db>.features` (every feature of the
+   database, gaps marked `GAP:`), extend `acceptance/run.sh` for its Docker
+   container, and commit the generated `docs/acceptance/<db>.md`. See
+   `acceptance/README.md`.
+6. Errors: map the database's unique-constraint error to
    `OrmError::UniqueViolation`, connection failures to
    `OrmError::Connection` (the pool discards those connections).

@@ -6,7 +6,7 @@
 use crate::protocol::{BindValue, Cell, ColMeta, Conn, Fetched, QueryResult};
 use crate::MySqlDialect;
 use kernway_orm_core::{decode::cells_to_entity, entity::Entity, error::OrmError, SqlDialect};
-use kernway_orm_sql::{CallArg, CallResult, Outcome, Param, Rows, SqlConn, Value};
+use kernway_orm_sql::{CallArg, CallResult, OutKind, Outcome, Param, Rows, SqlConn, Value};
 use serde::de::DeserializeOwned;
 
 static DIALECT: MySqlDialect = MySqlDialect;
@@ -84,6 +84,97 @@ fn bytes(cell: &Cell<'_>) -> Vec<u8> {
 
 fn row_values(metas: &[ColMeta], cells: &[Cell<'_>]) -> Result<Vec<Value>, OrmError> {
     Ok(metas.iter().zip(cells).map(|(m, c)| to_value(m, c)).collect())
+}
+
+fn named_unsupported() -> OrmError {
+    OrmError::Unsupported("named arguments: MySQL has none; pass arguments by position".into())
+}
+
+/// A positional `CALL` argument: `OUT` slots are bound as NULL.
+fn positional(a: &CallArg) -> Result<BindValue, OrmError> {
+    match a {
+        CallArg::In(p) | CallArg::InOut(p) => Ok(bind(p)),
+        CallArg::Out(_) => Ok(BindValue::Null),
+        CallArg::Named(..) => Err(named_unsupported()),
+    }
+}
+
+fn has_delimiter_directive(script: &str) -> bool {
+    script.lines().any(|l| l.trim_start().get(..10).is_some_and(|w| w.eq_ignore_ascii_case("DELIMITER ")))
+}
+
+/// Split a script the way the `mysql` client does: statements end at the
+/// current delimiter (`;` until a `DELIMITER x` line changes it), outside
+/// quotes (`'`, `"`, backticks) and comments (`-- `, `#`, `/* */`).
+pub(crate) fn split_mysql_script(script: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut delim = ";".to_string();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut block_comment = false;
+    for line in script.split_inclusive('\n') {
+        if quote.is_none() && !block_comment && cur.trim().is_empty() {
+            let t = line.trim();
+            if t.len() > 10 && t[..10].eq_ignore_ascii_case("DELIMITER ") {
+                delim = t[10..].trim().to_string();
+                cur.clear();
+                continue;
+            }
+        }
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            if block_comment {
+                cur.push(c);
+                if c == '*' && chars.get(i + 1) == Some(&'/') {
+                    cur.push('/');
+                    i += 1;
+                    block_comment = false;
+                }
+            } else if let Some(q) = quote {
+                cur.push(c);
+                if c == '\\' {
+                    if let Some(n) = chars.get(i + 1) {
+                        cur.push(*n);
+                        i += 1;
+                    }
+                } else if c == q {
+                    quote = None;
+                }
+            } else if c == '#' || (c == '-' && chars.get(i + 1) == Some(&'-') && chars.get(i + 2).is_none_or(|n| n.is_whitespace())) {
+                // Comment to end of line.
+                break;
+            } else if c == '/' && chars.get(i + 1) == Some(&'*') {
+                block_comment = true;
+                cur.push_str("/*");
+                i += 1;
+            } else if matches!(c, '\'' | '"' | '`') {
+                quote = Some(c);
+                cur.push(c);
+            } else if chars[i..].iter().collect::<String>().starts_with(&delim) {
+                let stmt = cur.trim().to_string();
+                if !stmt.is_empty() {
+                    out.push(stmt);
+                }
+                cur.clear();
+                i += delim.chars().count();
+                continue;
+            } else {
+                cur.push(c);
+            }
+            i += 1;
+        }
+        if !line.ends_with('\n') || quote.is_some() || block_comment {
+            continue;
+        }
+        cur.push('\n');
+    }
+    let stmt = cur.trim().to_string();
+    if !stmt.is_empty() {
+        out.push(stmt);
+    }
+    out
 }
 
 fn first_u64(cells: &[Cell<'_>]) -> Result<u64, OrmError> {
@@ -170,13 +261,7 @@ impl SqlConn for Conn {
     /// come back in the result set the server flags as `OUT` parameters.
     async fn call(&mut self, name: &str, args: &[CallArg]) -> Result<CallResult, OrmError> {
         let sql = crate::protocol::call_sql(name, args.len())?;
-        let params: Vec<BindValue> = args
-            .iter()
-            .map(|a| match a {
-                CallArg::In(p) | CallArg::InOut(p) => bind(p),
-                CallArg::Out(_) => BindValue::Null,
-            })
-            .collect();
+        let params: Vec<BindValue> = args.iter().map(positional).collect::<Result<_, _>>()?;
         let mut row = row_values;
         // `CALL` is always prepared here (even without arguments) so `OUT`
         // values come back.
@@ -192,8 +277,43 @@ impl SqlConn for Conn {
         Ok(out)
     }
 
+    /// `SELECT name(?, …)`: MySQL functions take `IN` arguments only.
+    async fn call_function(&mut self, name: &str, _returns: OutKind, args: &[CallArg]) -> Result<CallResult, OrmError> {
+        if args.iter().any(|a| !matches!(a.inner(), CallArg::In(_))) {
+            return Err(OrmError::Query("MySQL stored functions take IN arguments only".into()));
+        }
+        let call = crate::protocol::call_sql(name, args.len())?;
+        let sql = format!("SELECT {}", &call["CALL ".len()..]);
+        let params: Vec<Param> = args
+            .iter()
+            .map(|a| match a.inner() {
+                CallArg::In(p) => Ok(p.clone()),
+                _ => Err(named_unsupported()),
+            })
+            .collect::<Result<_, _>>()?;
+        if args.iter().any(|a| matches!(a, CallArg::Named(..))) {
+            return Err(named_unsupported());
+        }
+        let rows = self.query_rows(&sql, &params).await?;
+        let value = rows.rows.into_iter().next().and_then(|r| r.into_iter().next()).unwrap_or(Value::Null);
+        Ok(CallResult { value, ..CallResult::default() })
+    }
+
+    /// Without `DELIMITER` lines the server splits the script itself
+    /// (multi-statement mode — it understands `BEGIN … END` bodies). With
+    /// them (mysqldump / mysql-client scripts) it is split here, as the
+    /// `mysql` client does, and run statement by statement.
     async fn execute_script(&mut self, script: &str) -> Result<(), OrmError> {
-        Conn::execute_script(self, script).await
+        if !has_delimiter_directive(script) {
+            return Conn::execute_script(self, script).await;
+        }
+        for (i, stmt) in split_mysql_script(script).iter().enumerate() {
+            self.query(stmt).await.map_err(|e| match e {
+                OrmError::Query(m) => OrmError::Query(format!("statement {} of the script: {m}", i + 1)),
+                other => other,
+            })?;
+        }
+        Ok(())
     }
 
     async fn begin(&mut self) -> Result<(), OrmError> {
@@ -206,5 +326,32 @@ impl SqlConn for Conn {
 
     async fn rollback(&mut self) -> Result<(), OrmError> {
         self.query("ROLLBACK").await.map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_mysql_script;
+
+    #[test]
+    fn delimiter_scripts_split_like_the_mysql_client() {
+        let script = "DROP PROCEDURE IF EXISTS p;
+DELIMITER ;;
+CREATE PROCEDURE p() BEGIN
+  SELECT 'a;b'; -- c;omment
+  SELECT \"x;;y\";
+END ;;
+DELIMITER ;
+/* block; comment */ SELECT 1;
+# hash; comment
+SELECT `we;ird`;
+";
+        let parts = split_mysql_script(script);
+        assert_eq!(parts.len(), 4, "{parts:#?}");
+        assert_eq!(parts[0], "DROP PROCEDURE IF EXISTS p");
+        assert!(parts[1].starts_with("CREATE PROCEDURE p() BEGIN") && parts[1].ends_with("END"), "{}", parts[1]);
+        assert!(parts[1].contains("SELECT 'a;b';") && parts[1].contains("\"x;;y\""));
+        assert!(parts[2].ends_with("SELECT 1"));
+        assert_eq!(parts[3], "SELECT `we;ird`");
     }
 }
