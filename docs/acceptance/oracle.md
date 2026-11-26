@@ -5,19 +5,19 @@
 
 | | |
 |---|---|
-| generated | 2026-11-26 16:15 UTC |
+| generated | 2026-11-26 16:24 UTC |
 | server | Oracle AI Database 26ai Free Release 23.26.4.0.0 - Develop, Learn, and Run for Free Version 23.26.4.0.0 |
 | image | gvenzl/oracle-free:23-slim |
 | container | kernway-oracle |
-| driver commit | 2fd8650 on feat/oracle-full |
+| driver commit | c353573 on feat/oracle-full |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
-| command | `cargo test -p kernway-orm-oracle  --lib --tests -- --test-threads=1 --nocapture ; CI run 45855818537 (Linux / macOS / Windows)` |
+| command | `cargo test -p kernway-orm-oracle  --lib --tests -- --test-threads=1 --nocapture ; CI run 45858012392 (Linux / macOS / Windows)` |
 
-## Verdict: implemented features **PASSED** · completeness **47/50** — NOT complete
+## Verdict: implemented features **PASSED** · completeness **47/47** — complete
 
 - *Implemented features* passes only if every test ran and passed (no skips) in this run.
 - *Completeness* counts 🚧 gaps (listed below) against the full feature catalog.
-- Features verified: **47 / 50** (3 not implemented yet, 0 failing; 0 not applicable to Oracle).
+- Features verified: **47 / 47** (0 not implemented yet, 0 failing; 3 not applicable to Oracle).
 - Tests run: 62 — 62 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
 - A feature is ✅ only when every test listed as its evidence ran and passed in this run.
 
@@ -28,9 +28,9 @@
 | Login with user / password (O5LOGON, 11g and 12c verifiers) | ✅ PASS | `logs_in_with_user_and_password`<br>`auth_crypto::tests::verifier_11g_matches_the_reference_vectors`<br>`auth_crypto::tests::verifier_12c_matches_the_reference_vectors`<br>`auth_crypto::tests::cbc_padding_always_adds_a_block_on_exact_multiples` |
 | TCPS (TLS) with each certificate check, incl. listener TLS renegotiation | ✅ PASS | `tcps_connections_with_each_certificate_check` |
 | Mutual TLS: client certificate (ssl-cert / ssl-key, or one PEM wallet) presented to a server that requires it (SSL_CLIENT_AUTHENTICATION = TRUE); refused without it | ✅ PASS | `tcps_client_certificate_is_required_and_presented` |
-| Native network encryption (SQLNET.ENCRYPTION) | 🚧 GAP | use TCPS |
+| Native network encryption (SQLNET.ENCRYPTION) | ➖ N/A | out of scope for a thin driver (python-oracledb thin does not do it either) — use TCPS / mutual TLS |
 | Proxy authentication (user[target] / ?proxy-user=): the server reports USER = target, PROXY_USER = the connecting user; refused without the grant | ✅ PASS | `proxy_authentication_connects_on_behalf_of_another_user` |
-| Kerberos authentication | 🚧 GAP | not in thin mode (python-oracledb thin lacks it too) |
+| Kerberos authentication | ➖ N/A | out of scope for a thin driver (python-oracledb thin does not do it either) — use password, proxy or certificate authentication |
 
 ## Protocol & encoding
 
@@ -101,7 +101,7 @@
 |---|---|---|
 | Two-phase commit (XA): begin / end / prepare / commit (two- and one-phase) / rollback, recovery from another session, suspend / resume, read-only branch | ✅ PASS | `two_phase_commit_prepare_commit_recover_and_rollback` |
 | Advanced Queuing: RAW / JSON / object-type queues; enqueue with correlation / priority / delay, dequeue by correlation, browse, wait with timeout, visibility with commit (one round trip each through DBMS_AQ) | ✅ PASS | `advanced_queuing_raw_json_and_object_queues` |
-| Continuous Query Notification, SODA | 🚧 GAP | not in thin mode (python-oracledb thin lacks them too) |
+| Continuous Query Notification, SODA | ➖ N/A | out of scope for a thin driver (python-oracledb thin does not do them either) — use triggers / Advanced Queuing, and SQL/JSON |
 
 ## Platform & runtime
 

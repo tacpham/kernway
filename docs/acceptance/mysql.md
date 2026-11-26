@@ -5,13 +5,13 @@
 
 | | |
 |---|---|
-| generated | 2026-11-26 16:15 UTC |
+| generated | 2026-11-26 16:25 UTC |
 | server | MySQL 8.0.46 |
 | image | mysql:8.0 |
 | container | kernway-mysql |
-| driver commit | 2fd8650 on feat/oracle-full |
+| driver commit | c353573 on feat/oracle-full |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
-| command | `cargo test -p kernway-orm-mysql --features mysql --lib --tests -- --test-threads=1 --nocapture --skip local_socket_; local_socket_* inside kernway-mysql; CI run 45855818537 (Linux / macOS / Windows)` |
+| command | `cargo test -p kernway-orm-mysql --features mysql --lib --tests -- --test-threads=1 --nocapture --skip local_socket_; local_socket_* inside kernway-mysql; CI run 45858012392 (Linux / macOS / Windows)` |
 
 ## Verdict: implemented features **PASSED** · completeness **43/43** — complete
 
