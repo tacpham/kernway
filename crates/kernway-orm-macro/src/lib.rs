@@ -315,16 +315,6 @@ fn to_snake_case(s: &str) -> String {
     result
 }
 
-#[cfg(test)]
-mod tests {
-    use super::to_snake_case;
-
-    #[test]
-    fn snake_case_conversion() {
-        assert_eq!(to_snake_case("MyStruct"), "my_struct");
-        assert_eq!(to_snake_case("Todo"), "todo");
-    }
-}
 
 /// Derives a repository from method names — the Spring Data "derived query"
 /// equivalent.
@@ -531,4 +521,15 @@ fn parse_relation_attr(attr: &Attribute) -> syn::Result<(String, Option<String>)
         syn::Error::new_spanned(attr, "relation requires `entity = \"table\"`")
     })?;
     Ok((entity, column))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::to_snake_case;
+
+    #[test]
+    fn snake_case_conversion() {
+        assert_eq!(to_snake_case("MyStruct"), "my_struct");
+        assert_eq!(to_snake_case("Todo"), "todo");
+    }
 }

@@ -160,14 +160,12 @@ pub fn unmask(data: &mut [u8], mask: [u8; 4]) {
     let wide = u64::from_ne_bytes([
         mask[0], mask[1], mask[2], mask[3], mask[0], mask[1], mask[2], mask[3],
     ]);
-    let mut chunks = data.chunks_exact_mut(8);
-    for chunk in &mut chunks {
-        let mut word = [0u8; 8];
-        word.copy_from_slice(chunk);
-        chunk.copy_from_slice(&(u64::from_ne_bytes(word) ^ wide).to_ne_bytes());
+    let (words, tail) = data.as_chunks_mut::<8>();
+    for word in words {
+        *word = (u64::from_ne_bytes(*word) ^ wide).to_ne_bytes();
     }
     // 8 is a multiple of 4: the key phase restarts at 0 for the tail.
-    for (i, b) in chunks.into_remainder().iter_mut().enumerate() {
+    for (i, b) in tail.iter_mut().enumerate() {
         *b ^= mask[i & 3];
     }
 }

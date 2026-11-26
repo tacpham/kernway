@@ -166,12 +166,15 @@ pub trait UserPresence: Send + Sync {
     fn sessions(&self, now: u64) -> BoxFuture<'_, Result<Vec<DeviceSession>, StoreError>>;
 }
 
+/// A user's devices: device id → (last heartbeat, payload).
+type Devices = HashMap<String, (u64, String)>;
+
 /// In-memory per-user/device presence: `user -> (device -> (last-beat, meta))`. For a
 /// single instance; heartbeats are map writes, and reads prune anything past the window
 /// (empty users included) as they go.
 pub struct InMemoryUserPresence {
     window_secs: u64,
-    users: RwLock<HashMap<String, HashMap<String, (u64, String)>>>,
+    users: RwLock<HashMap<String, Devices>>,
 }
 
 impl InMemoryUserPresence {

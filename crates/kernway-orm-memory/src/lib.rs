@@ -186,20 +186,24 @@ where
         }
     }
 
+    #[allow(clippy::boxed_local)] // the trait's boxed receiver, passed through
     fn fetch_all_sync(self: Box<Self>) -> Result<Vec<T>, OrmError> {
         let items = self.collect_items()?;
         Ok(self.apply_window(items))
     }
 
+    #[allow(clippy::boxed_local)] // the trait's boxed receiver, passed through
     fn fetch_one_sync(mut self: Box<Self>) -> Result<Option<T>, OrmError> {
         self.limit = Some(1);
         Ok(self.fetch_all_sync()?.into_iter().next())
     }
 
+    #[allow(clippy::boxed_local)] // the trait's boxed receiver, passed through
     fn fetch_count_sync(self: Box<Self>) -> Result<u64, OrmError> {
         Ok(self.collect_items()?.len() as u64)
     }
 
+    #[allow(clippy::boxed_local)] // the trait's boxed receiver, passed through
     fn fetch_page_sync(self: Box<Self>, page: u64, size: u64) -> Result<Page<T>, OrmError> {
         let items = self.collect_items()?;
         let total = items.len() as u64;

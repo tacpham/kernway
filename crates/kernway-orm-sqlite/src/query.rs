@@ -233,6 +233,7 @@ where
         )
     }
 
+    #[allow(clippy::boxed_local)] // the trait's boxed receiver, passed through
     fn fetch_all_sync(mut self: Box<Self>) -> Result<Vec<T>, OrmError> {
         if let Some(err) = self.error.take() {
             return Err(err);
@@ -250,12 +251,14 @@ where
         rows.map(|row| row.map_err(map_err)).collect()
     }
 
+    #[allow(clippy::boxed_local)] // the trait's boxed receiver, passed through
     fn fetch_one_sync(mut self: Box<Self>) -> Result<Option<T>, OrmError> {
         self.lim = Some(1);
         let mut items = self.fetch_all_sync()?;
         Ok(items.pop())
     }
 
+    #[allow(clippy::boxed_local)] // the trait's boxed receiver, passed through
     fn fetch_count_sync(mut self: Box<Self>) -> Result<u64, OrmError> {
         if let Some(err) = self.error.take() {
             return Err(err);
@@ -270,6 +273,7 @@ where
         Ok(count as u64)
     }
 
+    #[allow(clippy::boxed_local)] // the trait's boxed receiver, passed through
     fn fetch_page_sync(mut self: Box<Self>, page: u64, size: u64) -> Result<Page<T>, OrmError> {
         if let Some(err) = self.error.take() {
             return Err(err);
