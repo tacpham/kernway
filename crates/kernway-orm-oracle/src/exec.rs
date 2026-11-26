@@ -3,6 +3,7 @@
 //! commit / rollback / logoff.
 
 use kernway_orm_core::error::OrmError;
+use std::collections::HashMap;
 
 use crate::buf::{PResult, ParseError, Reader, Writer};
 use crate::conn::{common_message, func, msg, CallStatus, Conn};
@@ -190,6 +191,7 @@ fn value_meta(v: &Value) -> (u8, u8, u32) {
         Value::Raw(b) => (ora_type::RAW, 0, (b.len() as u32).max(1)),
         Value::Bool(_) => (ora_type::BOOLEAN, 0, 4),
         Value::Cursor(_) => (ora_type::CURSOR, 0, 4),
+        Value::TimestampTzRegion(..) | Value::TimestampTzRegionId(..) => (ora_type::TIMESTAMP_TZ, 0, 13),
         Value::Lob(l) if l.blob => (ora_type::BLOB, 0, LOB_BIND_SIZE),
         Value::Lob(_) => (ora_type::CLOB, 1, LOB_BIND_SIZE),
     }
@@ -267,6 +269,11 @@ fn write_value(w: &mut Writer, ora_type_num: u8, v: Option<&Value>) -> Result<()
         Value::Lob(l) => {
             w.bytes_2l(&l.locator);
         }
+        // Bound by its offset at that instant (the same point in time).
+        Value::TimestampTzRegion(d, off, _) => {
+            w.bytes_wl(&value::encode_timestamp_tz(d, *off));
+        }
+        Value::TimestampTzRegionId(..) => return Err("an unresolved time-zone region cannot be bound".into()),
     }
     Ok(())
 }
@@ -1070,6 +1077,13 @@ impl Conn {
             Ok(mut ex) => {
                 let mut read = Ok(());
                 for v in &mut ex.out {
+                    if matches!(v, Value::TimestampTzRegionId(..)) {
+                        if let Err(e) = self.resolve_region(v).await {
+                            read = Err(e);
+                            break;
+                        }
+                        continue;
+                    }
                     if let Value::Lob(lob) = v {
                         let lob = lob.clone();
                         match self.lob_read_all(&lob).await {
@@ -1356,6 +1370,52 @@ impl Conn {
         self.queue_close(cur.id);
     }
 
+    /// Turn a region-based TIMESTAMP WITH TIME ZONE (UTC time + region id)
+    /// into its local time, offset and region name — computed by the server:
+    /// the region names come from `V$TIMEZONE_NAMES` (once per session), the
+    /// local time from `AT TIME ZONE`, so daylight saving follows the
+    /// server's own time-zone file.
+    async fn resolve_region(&mut self, v: &mut Value) -> Result<(), OrmError> {
+        let Value::TimestampTzRegionId(utc, id) = v.clone() else { return Ok(()) };
+        self.resolving_tz = true;
+        let r = self.resolve_region_inner(&utc, id).await;
+        self.resolving_tz = false;
+        *v = r?;
+        Ok(())
+    }
+
+    async fn resolve_region_inner(&mut self, utc: &value::DateTime, id: u16) -> Result<Value, OrmError> {
+        if self.tz_regions.is_none() {
+            let ex = Box::pin(self.execute(
+                    "SELECT tzname, FROM_TZ(TIMESTAMP '2000-01-01 00:00:00', tzname) FROM (SELECT DISTINCT tzname FROM v$timezone_names) ORDER BY tzname",
+                    &[],
+                ))
+                .await?;
+            let mut map = HashMap::new();
+            for row in ex.rows {
+                if let [Value::Str(name), Value::TimestampTzRegionId(_, rid)] = row.as_slice() {
+                    map.entry(*rid).or_insert_with(|| name.clone());
+                }
+            }
+            self.tz_regions = Some(map);
+        }
+        let name = self
+            .tz_regions
+            .as_ref()
+            .and_then(|m| m.get(&id))
+            .cloned()
+            .ok_or_else(|| OrmError::TypeConversion(format!("unknown Oracle time-zone region id {id}")))?;
+        let ex = Box::pin(self.execute(
+            "SELECT TO_CHAR(FROM_TZ(:1, 'UTC') AT TIME ZONE (:2), 'YYYY-MM-DD HH24:MI:SS.FF9 TZH:TZM') FROM dual",
+            &[Bind::In(Value::Timestamp(*utc)), Bind::In(Value::Str(name.clone()))],
+        ))
+        .await?;
+        let text = ex.rows.first().and_then(|r| r.first()).and_then(Value::to_text).unwrap_or_default();
+        let (local, offset) = value::parse_datetime_offset(&text)
+            .ok_or_else(|| OrmError::TypeConversion(format!("unexpected AT TIME ZONE result {text:?}")))?;
+        Ok(Value::TimestampTzRegion(local, offset, name))
+    }
+
     fn queue_close(&mut self, cursor_id: u16) {
         if cursor_id != 0 {
             self.pending_close.push(u32::from(cursor_id));
@@ -1377,6 +1437,8 @@ impl Conn {
                     // BFILE columns: read the file through its locator.
                     let lob = lob.clone();
                     *v = Box::pin(self.lob_read_all(&lob)).await?;
+                } else if matches!(v, Value::TimestampTzRegionId(..)) && !self.resolving_tz {
+                    Box::pin(self.resolve_region(v)).await?;
                 }
             }
         }

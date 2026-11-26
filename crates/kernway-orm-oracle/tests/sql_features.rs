@@ -621,3 +621,64 @@ fn bfile_columns_are_read_from_the_server_file() {
         assert_eq!(db.query_scalar("SELECT 5 FROM dual", &[]).await.unwrap(), Value::Int(5));
     });
 }
+
+#[test]
+fn timestamps_in_named_regions_come_back_as_the_server_computes_them() {
+    let Some(url) = url() else { return eprintln!("skip: KERNWAY_ORACLE_HOST not set") };
+    run(async move {
+        let db = OracleDriver::connect_with(kernway_orm_oracle::OracleConfig::from_url(&url).unwrap(), 1).await.unwrap();
+        let _ = db.execute("DROP TABLE kwo_tzr").await;
+        db.execute("CREATE TABLE kwo_tzr (id NUMBER, ts TIMESTAMP(3) WITH TIME ZONE)").await.unwrap();
+        db.execute_script(
+            "INSERT INTO kwo_tzr VALUES (1, TIMESTAMP '2026-07-01 10:00:00.250 Asia/Ho_Chi_Minh');
+             INSERT INTO kwo_tzr VALUES (2, TIMESTAMP '2026-01-15 08:00:00 America/New_York');
+             INSERT INTO kwo_tzr VALUES (3, TIMESTAMP '2026-07-15 08:00:00 America/New_York');
+             INSERT INTO kwo_tzr VALUES (4, TIMESTAMP '2026-11-26 23:30:00.5 +07:00');
+             INSERT INTO kwo_tzr VALUES (5, NULL)",
+        )
+        .await
+        .unwrap();
+        let r = db
+            .query(
+                "SELECT ts, TO_CHAR(ts, 'YYYY-MM-DD HH24:MI:SS.FF3 TZR') AS want FROM kwo_tzr ORDER BY id",
+                &[],
+            )
+            .await
+            .unwrap();
+        let got: Vec<Option<String>> = r.rows.iter().map(|row| row[0].as_str().map(String::from)).collect();
+        let want: Vec<Option<String>> = r.rows.iter().map(|row| row[1].as_str().map(String::from)).collect();
+        // TZR prints the offset form for an offset value, a region in upper
+        // case (we keep the IANA spelling from V$TIMEZONE_NAMES).
+        let up = |v: &[Option<String>]| v.iter().map(|s| s.as_ref().map(|s| s.to_uppercase())).collect::<Vec<_>>();
+        assert_eq!(up(&got), up(&want), "local time and region exactly as the server renders them");
+        assert_eq!(got[1].as_deref(), Some("2026-01-15 08:00:00.000 America/New_York"));
+        assert_eq!(got[2].as_deref(), Some("2026-07-15 08:00:00.000 America/New_York"));
+
+        // The Oracle-level value carries the offset in force at that instant
+        // (daylight saving: -05:00 in January, -04:00 in July).
+        let mut c = kernway_orm_oracle::Conn::connect(&kernway_orm_oracle::OracleConfig::from_url(&url).unwrap()).await.unwrap();
+        let ex = c.execute("SELECT ts FROM kwo_tzr WHERE id IN (2, 3) ORDER BY id", &[]).await.unwrap();
+        let offs: Vec<i16> = ex
+            .rows
+            .iter()
+            .map(|row| match &row[0] {
+                kernway_orm_oracle::Value::TimestampTzRegion(_, off, region) => {
+                    assert_eq!(region, "America/New_York");
+                    *off
+                }
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(offs, [-300, -240]);
+
+        // A region-based OUT argument of PL/SQL, through call_function.
+        db.execute(
+            "CREATE OR REPLACE FUNCTION kwo_tzr_fn RETURN TIMESTAMP WITH TIME ZONE IS
+             BEGIN RETURN TIMESTAMP '2026-03-29 01:30:00 Europe/Paris'; END;",
+        )
+        .await
+        .unwrap();
+        let v = db.call_function("kwo_tzr_fn", OutKind::DateTimeTz, &[]).await.unwrap().value;
+        assert_eq!(v, Value::DateTime("2026-03-29 01:30:00 Europe/Paris".into()), "an OUT value without fraction prints none");
+    });
+}

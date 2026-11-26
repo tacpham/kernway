@@ -48,6 +48,8 @@ fn cell<'a>(v: &'a Value, col: Option<&ColumnDef>) -> Cell<'a> {
         Value::Float(f) => Cell::F64(*f),
         Value::Date(d) | Value::Timestamp(d) => Cell::Owned(d.to_string()),
         Value::TimestampTz(d, off) => Cell::Owned(format!("{d} {}", fmt_offset(*off))),
+        Value::TimestampTzRegion(d, _, region) => Cell::Owned(format!("{d} {region}")),
+        Value::TimestampTzRegionId(..) => Cell::Null,
         v @ (Value::IntervalYm { .. } | Value::IntervalDs { .. }) => Cell::Owned(fmt_interval(v, 2, 6)),
         Value::Raw(b) => Cell::Bytes(b),
         Value::Bool(b) => Cell::Bool(*b),
@@ -112,7 +114,11 @@ pub(crate) fn to_shared(v: Value, col: Option<&Column>) -> kernway_orm_sql::Valu
         Value::Raw(b) => V::Bytes(b),
         Value::Bool(b) => V::Bool(b),
         Value::Cursor(rs) => V::Rows(Box::new(result_set(rs))),
-        Value::Lob(_) => V::Null,
+        Value::Lob(_) | Value::TimestampTzRegionId(..) => V::Null,
+        Value::TimestampTzRegion(d, _, region) => V::DateTime(format!(
+            "{} {region}",
+            fmt_datetime(&d, if col.is_some() { frac } else if d.nanos == 0 { 0 } else { 9 })
+        )),
         v @ (Value::IntervalYm { .. } | Value::IntervalDs { .. }) => {
             // Leading precision and fractional digits as declared (Oracle's
             // defaults: 2 and 6).

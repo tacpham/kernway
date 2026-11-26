@@ -171,6 +171,15 @@ pub enum Value {
     /// TIMESTAMP WITH TIME ZONE: the local wall time and its UTC offset in
     /// minutes.
     TimestampTz(DateTime, i16),
+    /// TIMESTAMP WITH TIME ZONE in a named region: the local wall time, its
+    /// UTC offset at that instant (minutes) and the region
+    /// (`Asia/Ho_Chi_Minh`) — as the server computes them.
+    TimestampTzRegion(DateTime, i16, String),
+    /// Internal: a region-based value as it arrives (UTC time and Oracle's
+    /// region id), before the driver resolves it into
+    /// [`TimestampTzRegion`](Self::TimestampTzRegion).
+    #[doc(hidden)]
+    TimestampTzRegionId(DateTime, u16),
     /// INTERVAL YEAR TO MONTH (both parts carry the sign).
     IntervalYm {
         /// Years.
@@ -218,6 +227,8 @@ impl Value {
             Value::Bool(b) => Some(if *b { "1" } else { "0" }.to_string()),
             Value::Cursor(rs) => Some(format!("<cursor: {} rows>", rs.rows.len())),
             Value::Lob(_) => Some("<LOB locator>".into()),
+            Value::TimestampTzRegion(d, _, region) => Some(format!("{d} {region}")),
+            Value::TimestampTzRegionId(d, id) => Some(format!("{d} UTC (region #{id})")),
         }
     }
 
@@ -414,18 +425,16 @@ pub(crate) fn encode_timestamp(d: &DateTime) -> Vec<u8> {
 }
 
 /// TIMESTAMP WITH TIME ZONE: 11 bytes of UTC date-time, then the offset
-/// (hour + 20, minute + 60). A named region (high bit) is refused rather
-/// than guessed.
+/// (hour + 20, minute + 60) — or, with the high bit set, a 13-bit region id
+/// (resolved by the driver through the server, never guessed).
 pub(crate) fn decode_timestamp_tz(b: &[u8]) -> Result<Value, String> {
     let utc = decode_date(b)?;
     if b.len() <= 11 || b[11] == 0 || b[12] == 0 {
         return Ok(Value::TimestampTz(utc, 0));
     }
     if b[11] & 0x80 != 0 {
-        return Err("TIMESTAMP WITH TIME ZONE in a named region (e.g. 'Asia/Ho_Chi_Minh') is not \
-                    supported; select it with TO_CHAR(…, 'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM') or \
-                    SYS_EXTRACT_UTC(…)"
-            .into());
+        let id = (u16::from(b[11] & 0x7F) << 6) | (u16::from(b[12] & 0xFC) >> 2);
+        return Ok(Value::TimestampTzRegionId(utc, id));
     }
     let off = (i16::from(b[11]) - 20) * 60 + (i16::from(b[12]) - 60);
     Ok(Value::TimestampTz(utc.add_minutes(i64::from(off)), off))
@@ -595,4 +604,24 @@ mod tests {
         }
         assert_eq!(d.to_string(), "2024-03-15 13:45:30");
     }
+}
+
+/// Parse `YYYY-MM-DD HH24:MI:SS[.fraction] ±HH:MM` (TO_CHAR output).
+pub(crate) fn parse_datetime_offset(s: &str) -> Option<(DateTime, i16)> {
+    let (dt, off) = s.trim().rsplit_once(' ')?;
+    let (date, time) = dt.split_once(' ')?;
+    let mut d = date.split('-').map(|p| p.parse::<i64>().ok());
+    let (year, month, day) = (d.next()??, d.next()??, d.next()??);
+    let (hms, frac) = time.split_once('.').unwrap_or((time, ""));
+    let mut t = hms.split(':').map(|p| p.parse::<u8>().ok());
+    let (hour, minute, second) = (t.next()??, t.next()??, t.next()??);
+    let digits: String = frac.chars().take(9).collect();
+    let nanos = if digits.is_empty() { 0 } else { format!("{digits:0<9}").parse().ok()? };
+    let sign: i16 = if off.starts_with('-') { -1 } else { 1 };
+    let (oh, om) = off.trim_start_matches(['+', '-']).split_once(':')?;
+    let offset = sign * (oh.parse::<i16>().ok()? * 60 + om.parse::<i16>().ok()?);
+    Some((
+        DateTime { year: i32::try_from(year).ok()?, month: u8::try_from(month).ok()?, day: u8::try_from(day).ok()?, hour, minute, second, nanos },
+        offset,
+    ))
 }

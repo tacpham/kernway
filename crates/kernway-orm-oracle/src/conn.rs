@@ -207,6 +207,11 @@ pub struct Conn {
     /// Server-side cursors opened through `SqlConn::cursor_open`, by id.
     pub(crate) cursors: HashMap<u64, crate::exec::CursorState>,
     pub(crate) next_cursor: u64,
+    /// Oracle time-zone region ids → names, loaded from the server the first
+    /// time a region-based TIMESTAMP WITH TIME ZONE arrives.
+    pub(crate) tz_regions: Option<HashMap<u16, String>>,
+    /// Set while the driver runs its own region lookups (no recursion).
+    pub(crate) resolving_tz: bool,
 }
 
 /// Map a parse error to the driver's error type.
@@ -262,6 +267,8 @@ impl Conn {
             in_tx: false,
             cursors: HashMap::new(),
             next_cursor: 1,
+            tz_regions: None,
+            resolving_tz: false,
         };
         conn.negotiate().await?;
         conn.authenticate(cfg).await?;

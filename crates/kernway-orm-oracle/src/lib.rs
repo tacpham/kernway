@@ -27,12 +27,12 @@
 //! password logon (11g and 12c verifiers), SQL and PL/SQL with IN / OUT /
 //! IN OUT binds, array DML, implicit result sets, REF CURSORs. Types:
 //! NUMBER, BINARY_FLOAT / DOUBLE, VARCHAR2 / NVARCHAR2 / CHAR / LONG, RAW /
-//! LONG RAW, DATE, TIMESTAMP (with time zone as an offset, with local time
-//! zone), INTERVAL YEAR TO MONTH / DAY TO SECOND, CLOB / NCLOB / BLOB (read
-//! inline; written as long binds), JSON (OSON decoded), VECTOR, BOOLEAN,
-//! ROWID / UROWID. Refused with a clear error (convert in SQL instead):
-//! object types, XMLType, BFILE, nested `CURSOR(…)` columns, time zones
-//! given as a named region. Not yet: native network encryption.
+//! LONG RAW, DATE, TIMESTAMP (with time zone — an offset or a named region —
+//! and with local time zone), INTERVAL YEAR TO MONTH / DAY TO SECOND, CLOB /
+//! NCLOB / BLOB of any size (columns inline; PL/SQL through LOB locators and
+//! temporary LOBs), BFILE, JSON (OSON decoded), VECTOR, BOOLEAN, ROWID /
+//! UROWID, nested `CURSOR(…)` columns. Server-side cursors. Refused with a
+//! clear error (convert in SQL instead): object types and XMLType.
 
 mod auth_crypto;
 mod backend;

@@ -28,7 +28,7 @@ Types | Nested CURSOR(...) columns: each fetched to the end as a result set (120
 Types | BFILE columns: the server file read through its locator (open / read / close), byte-exact vs the server's length; a missing file is the server's error | bfile_columns_are_read_from_the_server_file
 Types | Object types / XMLType columns decoded | GAP: refused with OrmError::Unsupported (planned: phase 3)
 Types | Object types / XMLType / BFILE / nested CURSOR columns decoded | GAP: refused with OrmError::Unsupported (planned: phase 3)
-Types | TIMESTAMP WITH TIME ZONE in a named region | GAP: refused with a clear message; use TO_CHAR / SYS_EXTRACT_UTC
+Types | TIMESTAMP WITH TIME ZONE in a named region: local time, offset at that instant (daylight saving) and IANA region name, computed by the server (region ids from V$TIMEZONE_NAMES); columns and PL/SQL results — beyond python-oracledb thin, which refuses them | timestamps_in_named_regions_come_back_as_the_server_computes_them
 
 ORM (shared layer) | Shared conformance suite (CRUD, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL, joins/aggregates, execute_many failure semantics, server cursors) | oracle_conforms
 ORM (shared layer) | Select builder: INNER / LEFT JOIN, WHERE on any joined entity, GROUP BY, COUNT/COUNT DISTINCT/SUM/AVG/MIN/MAX, HAVING, ORDER BY, OFFSET/FETCH, counting groups, entity pairs from a join | oracle_conforms
