@@ -62,4 +62,4 @@ jobs:
         shell: bash
         run: >
           cargo test -p kernway-redis -p kernway-security -p kernway-orm-meilisearch
-          -p kernway-dns -p kernway-http-client -- --ignored --test-threads=1
+          -p kernway-dns -p kernway-http-client --lib --tests -- --ignored --test-threads=1

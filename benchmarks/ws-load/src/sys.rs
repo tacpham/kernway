@@ -10,6 +10,7 @@ use std::process::Command;
 /// `RLIM_INFINITY` while `setrlimit` refuses anything above
 /// `kern.maxfilesperproc`, so candidates are tried from the top down.
 #[allow(unsafe_code)]
+#[cfg(unix)]
 pub fn raise_fd_limit() -> (u64, u64) {
     let mut lim = libc::rlimit {
         rlim_cur: 0,
@@ -54,6 +55,7 @@ pub fn raise_fd_limit() -> (u64, u64) {
 ///
 /// Returns the *effective* per-process limit: on macOS a soft limit of
 /// `RLIM_INFINITY` is still capped by `kern.maxfilesperproc`.
+#[cfg(unix)]
 pub fn report_fd_limit(who: &str) -> u64 {
     let (soft, hard) = raise_fd_limit();
     let show = |v: u64| {
@@ -95,7 +97,7 @@ fn max_files_per_proc() -> Option<u64> {
     (rc == 0).then(|| u64::try_from(v).unwrap_or(0))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn max_files_per_proc() -> Option<u64> {
     None
 }
@@ -140,6 +142,7 @@ fn parse_cpu_time(s: &str) -> Option<f64> {
 /// CPU seconds (user + system) used so far by this process.
 #[allow(unsafe_code)]
 #[must_use]
+#[cfg(unix)]
 pub fn self_cpu_secs() -> f64 {
     // SAFETY: zeroed rusage is a valid value; getrusage fills it.
     let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
@@ -159,6 +162,7 @@ pub fn self_cpu_secs() -> f64 {
 /// Linux `IP_BIND_ADDRESS_NO_PORT` defers the port choice to `connect`, so a
 /// port is shared across destinations (the 4-tuple stays unique).
 #[allow(unsafe_code)]
+#[cfg(unix)]
 pub fn start_connect_from(
     src: std::net::Ipv4Addr,
     dst: std::net::SocketAddr,
@@ -223,6 +227,36 @@ pub fn start_connect_from(
         }
     }
     Ok(stream)
+}
+
+// --- Other platforms (Windows): no RLIMIT_NOFILE, no getrusage, no raw
+// sockets through libc. The load tools build everywhere; these measurements
+// and `--bind` are Unix-only.
+
+/// No file-descriptor rlimit on this platform: `(0, 0)`.
+#[cfg(not(unix))]
+pub fn raise_fd_limit() -> (u64, u64) {
+    (0, 0)
+}
+
+/// No file-descriptor rlimit on this platform: reports that, returns `u64::MAX`.
+#[cfg(not(unix))]
+pub fn report_fd_limit(who: &str) -> u64 {
+    eprintln!("[{who}] no RLIMIT_NOFILE on this platform");
+    u64::MAX
+}
+
+/// Not measured on this platform: `0.0`.
+#[cfg(not(unix))]
+#[must_use]
+pub fn self_cpu_secs() -> f64 {
+    0.0
+}
+
+/// Binding a source address (`--bind`) needs Unix sockets.
+#[cfg(not(unix))]
+pub fn start_connect_from(_src: std::net::Ipv4Addr, _dst: std::net::SocketAddr) -> std::io::Result<std::net::TcpStream> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "--bind is Unix-only"))
 }
 
 #[cfg(test)]
