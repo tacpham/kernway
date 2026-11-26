@@ -123,6 +123,10 @@ impl<'a> Reader<'a> {
     pub(crate) fn skip(&mut self, n: usize) -> PResult<()> {
         self.take(n).map(|_| ())
     }
+    /// The next byte, not consumed.
+    pub(crate) fn peek(&self) -> PResult<u8> {
+        self.b.get(self.pos).copied().ok_or(ParseError::Incomplete)
+    }
     pub(crate) fn u8(&mut self) -> PResult<u8> {
         Ok(self.take(1)?[0])
     }

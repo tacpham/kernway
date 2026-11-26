@@ -823,6 +823,13 @@ fn parse_response(
                     // followed by its actual length.
                     for &i in positions {
                         let (ot, csfrm, _) = binds[i].meta();
+                        if ot == ora_type::OBJECT && r.peek()? == 0xFF {
+                            // An unset object OUT can come as a bare NULL.
+                            r.u8()?;
+                            r.sb()?; // actual length
+                            out.out_values.push(Value::Null);
+                            continue;
+                        }
                         if ot == ora_type::OBJECT {
                             // TOID, OID, snapshot, version, length, flags, image.
                             for _ in 0..3 {
@@ -991,6 +998,10 @@ fn read_column(r: &mut Reader<'_>, c: &Column, fv: u8, nested: &mut Vec<(u16, Ve
             OBJECT => {
                 // Type OID, OID, snapshot, version, image length, flags,
                 // image: decoded by the caller with the type's metadata.
+                if r.peek()? == 0xFF {
+                    r.u8()?; // a bare NULL
+                    return Ok(Value::Null);
+                }
                 for _ in 0..3 {
                     skip_bytes_with_length(r)?;
                 }

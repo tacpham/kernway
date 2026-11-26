@@ -146,9 +146,10 @@ impl fmt::Display for DateTime {
 }
 
 /// A value read from or bound to Oracle.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum Value {
     /// SQL NULL (Oracle also treats an empty string as NULL).
+    #[default]
     Null,
     /// VARCHAR2 / CHAR / NVARCHAR2 / LONG text.
     Str(String),

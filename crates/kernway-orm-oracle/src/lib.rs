@@ -34,6 +34,7 @@
 //! UROWID, nested `CURSOR(…)` columns. Server-side cursors. Refused with a
 //! clear error (convert in SQL instead): object types and XMLType.
 
+mod aq;
 mod auth_crypto;
 mod backend;
 mod buf;
@@ -58,5 +59,6 @@ pub use dialect::OracleDialect;
 pub use driver::{OracleDriver, OracleRepository, OracleScrollable, OracleTx};
 pub use pool::OracleConnect;
 pub use exec::{Bind, Column, Executed, OpenCursor, OutType, Scroll, ScrollCursor};
+pub use aq::{AqDequeue, AqMessage, AqPayload};
 pub use tpc::{TpcBegin, Xid};
 pub use value::{DateTime, ResultSet, Value};

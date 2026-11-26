@@ -50,7 +50,7 @@ PL/SQL | CLOB / BLOB of any size: OUT arguments and function results read throug
 PL/SQL | Object, collection, RECORD and associative-array (index-by) arguments: IN (pickled, incl. LOB attributes as freed temporary LOBs), OUT, IN OUT and function results — types taken from the procedure declaration (NAME_RESOLVE + ALL_ARGUMENTS) | object_collection_and_record_arguments_through_call
 
 Other Oracle features | Two-phase commit (XA): begin / end / prepare / commit (two- and one-phase) / rollback, recovery from another session, suspend / resume, read-only branch | two_phase_commit_prepare_commit_recover_and_rollback
-Other Oracle features | Advanced Queuing (enqueue / dequeue) | GAP: planned next
+Other Oracle features | Advanced Queuing: RAW / JSON / object-type queues; enqueue with correlation / priority / delay, dequeue by correlation, browse, wait with timeout, visibility with commit (one round trip each through DBMS_AQ) | advanced_queuing_raw_json_and_object_queues
 Other Oracle features | Continuous Query Notification, SODA | GAP: not in thin mode (python-oracledb thin lacks them too)
 
 Platform & runtime | Runs on Linux: whole live suite against Oracle Database Free, no test skipped (CI) | ci::oracle_live_ubuntu_latest
