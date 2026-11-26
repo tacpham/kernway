@@ -199,22 +199,16 @@ where
 
     async fn rows(&self) -> Result<Vec<T>, OrmError> {
         let q = self.select_sql();
-        let mut g = self.pool.acquire().await?;
+        let mut g = crate::db::checkout(&self.pool).await?;
         let r = g.select::<T>(&q.text, &q.params).await;
-        if matches!(r, Err(OrmError::Connection(_))) {
-            g.poison();
-        }
-        r
+        crate::db::settle(&mut g, r)
     }
 
     async fn total(&self) -> Result<u64, OrmError> {
         let q = self.count_sql();
-        let mut g = self.pool.acquire().await?;
+        let mut g = crate::db::checkout(&self.pool).await?;
         let r = g.select_count(&q.text, &q.params).await;
-        if matches!(r, Err(OrmError::Connection(_))) {
-            g.poison();
-        }
-        r
+        crate::db::settle(&mut g, r)
     }
 
     fn take_error(&mut self) -> Result<(), OrmError> {

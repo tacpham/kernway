@@ -111,6 +111,15 @@ impl<C: Connect> Pooled<C> {
     pub fn poison(&mut self) {
         self.healthy = false;
     }
+
+    /// Mark the connection fit to return to the pool. With
+    /// [`poison`](Self::poison) this brackets an operation: poison before it
+    /// starts, mark healthy once it has completed — a future dropped half-way
+    /// (a timeout, a cancelled request) then discards the connection instead
+    /// of pooling one with a half-read reply or an open transaction.
+    pub fn mark_healthy(&mut self) {
+        self.healthy = true;
+    }
 }
 
 impl<C: Connect> Deref for Pooled<C> {

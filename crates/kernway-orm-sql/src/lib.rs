@@ -41,7 +41,7 @@ pub use param::{column_for_field, filter_param, id_to_params, is_auto_pk, is_new
 pub use query::SqlQueryBuilder;
 pub use repository::SqlRepository;
 pub use select::{col, Agg, Cmp, Col, RowSource, Select};
-pub use transaction::{run_transaction, SqlTx};
+pub use transaction::{run_transaction, run_transaction_on, SqlTx};
 
 use kernway_orm_core::{driver::DriverCapabilities, entity::Entity, error::OrmError, SqlDialect};
 use serde::de::DeserializeOwned;

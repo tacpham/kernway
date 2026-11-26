@@ -161,34 +161,56 @@ where
     F: FnOnce(SqlTx<C>) -> BoxFuture<'a, Result<R, OrmError>> + 'a,
     R: 'a,
 {
-    let mut guard = pool.acquire().await?;
+    let guard = pool.acquire().await?;
+    run_transaction_on(guard, work).await.1
+}
+
+/// [`run_transaction`] on a connection the caller already holds, which it
+/// gets back afterwards (`None` if the transaction lost it) — for work that
+/// must happen on the same connection before and after the transaction
+/// (SQLite's change sessions record one connection's changes).
+pub async fn run_transaction_on<'a, C, R, F>(mut guard: Pooled<C>, work: F) -> (Option<Pooled<C>>, Result<R, OrmError>)
+where
+    C: SqlConnect,
+    F: FnOnce(SqlTx<C>) -> BoxFuture<'a, Result<R, OrmError>> + 'a,
+    R: 'a,
+{
+    // Poisoned until the transaction has ended: dropped half-way (a timeout
+    // around the whole transaction), the connection — still inside the
+    // transaction — is discarded, never handed to the next caller.
+    guard.poison();
     if let Err(e) = guard.begin().await {
-        if matches!(e, OrmError::Connection(_)) {
-            guard.poison();
+        if !matches!(e, OrmError::Connection(_)) {
+            guard.mark_healthy();
         }
-        return Err(e);
+        return (Some(guard), Err(e));
     }
     let cell: SharedConn<C> = Rc::new(RefCell::new(Some(guard)));
     let result = work(SqlTx { conn: Rc::clone(&cell) }).await;
-    let mut guard = cell
-        .borrow_mut()
-        .take()
-        .ok_or_else(|| OrmError::Transaction("connection lost during transaction".into()))?;
-    match result {
+    let Some(mut guard) = cell.borrow_mut().take() else {
+        return (None, Err(OrmError::Transaction("connection lost during transaction".into())));
+    };
+    let result = match result {
         Ok(value) => match guard.commit().await {
-            Ok(()) => Ok(value),
+            Ok(()) => {
+                guard.mark_healthy();
+                Ok(value)
+            }
             Err(e) => {
-                if matches!(e, OrmError::Connection(_)) {
-                    guard.poison();
+                // A refused commit (a deferred constraint) leaves the
+                // transaction to roll back; a dead connection stays poisoned.
+                if !matches!(e, OrmError::Connection(_)) && guard.rollback().await.is_ok() {
+                    guard.mark_healthy();
                 }
                 Err(e)
             }
         },
         Err(err) => {
-            if guard.rollback().await.is_err() {
-                guard.poison();
+            if guard.rollback().await.is_ok() {
+                guard.mark_healthy();
             }
             Err(err)
         }
-    }
+    };
+    (Some(guard), result)
 }

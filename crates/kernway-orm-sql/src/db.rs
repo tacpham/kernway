@@ -32,9 +32,22 @@ impl<C: SqlConnect> Clone for SqlDb<C> {
 }
 
 /// Discard the connection if the error was connection-level.
-fn settle<R, C: SqlConnect>(g: &mut Pooled<C>, r: Result<R, OrmError>) -> Result<R, OrmError> {
+/// Check a connection out for one operation. It stays poisoned until
+/// [`settle`] sees the operation finish, so a future dropped half-way never
+/// returns a connection in an unknown state to the pool.
+pub(crate) async fn checkout<C: SqlConnect>(pool: &Rc<Pool<C>>) -> Result<Pooled<C>, OrmError> {
+    let mut g = pool.acquire().await?;
+    g.poison();
+    Ok(g)
+}
+
+/// The operation finished: the connection goes back to the pool unless it
+/// failed at the connection level.
+pub(crate) fn settle<R, C: SqlConnect>(g: &mut Pooled<C>, r: Result<R, OrmError>) -> Result<R, OrmError> {
     if matches!(r, Err(OrmError::Connection(_))) {
         g.poison();
+    } else {
+        g.mark_healthy();
     }
     r
 }
@@ -55,7 +68,7 @@ impl<C: SqlConnect> SqlDb<C> {
 
     /// Create `T`'s table if it does not exist.
     pub async fn ensure_table<T: Entity>(&self) -> Result<(), OrmError> {
-        let mut g = self.pool.acquire().await?;
+        let mut g = checkout(&self.pool).await?;
         let r = engine::ensure_table::<T, C::Sql>(&mut g).await;
         settle(&mut g, r)
     }
@@ -69,7 +82,7 @@ impl<C: SqlConnect> SqlDb<C> {
 
     /// Run one statement with bound parameters; returns the rows affected.
     pub async fn execute_with(&self, sql: &str, params: &[Param]) -> Result<u64, OrmError> {
-        let mut g = self.pool.acquire().await?;
+        let mut g = checkout(&self.pool).await?;
         let r = SqlConn::execute(&mut *g, sql, params).await;
         settle(&mut g, r)
     }
@@ -80,7 +93,7 @@ impl<C: SqlConnect> SqlDb<C> {
     /// inside [`transaction`](kernway_orm_core::transaction::TransactionalDriver::transaction)
     /// for all-or-nothing.
     pub async fn execute_many(&self, sql: &str, rows: &[Vec<Param>]) -> Result<u64, OrmError> {
-        let mut g = self.pool.acquire().await?;
+        let mut g = checkout(&self.pool).await?;
         let r = g.execute_many(sql, rows).await;
         settle(&mut g, r)
     }
@@ -88,7 +101,7 @@ impl<C: SqlConnect> SqlDb<C> {
     /// Run any query with bound parameters — joins, aggregates, subqueries,
     /// window functions — and collect its rows as typed [`Value`]s.
     pub async fn query(&self, sql: &str, params: &[Param]) -> Result<Rows, OrmError> {
-        let mut g = self.pool.acquire().await?;
+        let mut g = checkout(&self.pool).await?;
         let r = g.query_rows(sql, params).await;
         settle(&mut g, r)
     }
@@ -110,7 +123,7 @@ impl<C: SqlConnect> SqlDb<C> {
     /// fetch the rows in batches with [`DbCursor::next_batch`]. Within a
     /// transaction, use [`SqlTx::open_cursor`] to interleave other statements.
     pub async fn cursor(&self, sql: &str, params: &[Param]) -> Result<DbCursor<C>, OrmError> {
-        let mut g = self.pool.acquire().await?;
+        let mut g = checkout(&self.pool).await?;
         let r = g.cursor_open(sql, params).await;
         let cursor = settle(&mut g, r)?;
         Ok(DbCursor { conn: Some(g), cursor: Some(cursor) })
@@ -121,7 +134,7 @@ impl<C: SqlConnect> SqlDb<C> {
     where
         F: FnMut(Vec<Value>) -> Result<(), OrmError>,
     {
-        let mut g = self.pool.acquire().await?;
+        let mut g = checkout(&self.pool).await?;
         let r = g.query_each(sql, params, each).await;
         settle(&mut g, r)
     }
@@ -129,7 +142,7 @@ impl<C: SqlConnect> SqlDb<C> {
     /// Call a stored procedure: its result sets, and its `OUT` / `IN OUT`
     /// argument values in order.
     pub async fn call(&self, name: &str, args: &[CallArg]) -> Result<CallResult, OrmError> {
-        let mut g = self.pool.acquire().await?;
+        let mut g = checkout(&self.pool).await?;
         let r = g.call(name, args).await;
         settle(&mut g, r)
     }
@@ -140,14 +153,14 @@ impl<C: SqlConnect> SqlDb<C> {
     /// let total = db.call_function("order_total", OutKind::Number, &[42.into()]).await?.value;
     /// ```
     pub async fn call_function(&self, name: &str, returns: OutKind, args: &[CallArg]) -> Result<CallResult, OrmError> {
-        let mut g = self.pool.acquire().await?;
+        let mut g = checkout(&self.pool).await?;
         let r = g.call_function(name, returns, args).await;
         settle(&mut g, r)
     }
 
     /// Run a script of several `;`-separated statements.
     pub async fn execute_script(&self, script: &str) -> Result<(), OrmError> {
-        let mut g = self.pool.acquire().await?;
+        let mut g = checkout(&self.pool).await?;
         let r = g.execute_script(script).await;
         settle(&mut g, r)
     }
@@ -163,7 +176,7 @@ impl<C: SqlConnect> Driver for SqlDb<C> {
 
     fn ping(&self) -> BoxFuture<'_, Result<(), OrmError>> {
         Box::pin(async move {
-            let mut g = self.pool.acquire().await?;
+            let mut g = checkout(&self.pool).await?;
             let d = <C::Sql as SqlConn>::dialect();
             let r = g.query_rows(d.ping_sql(), &[]).await.map(|_| ());
             settle(&mut g, r)

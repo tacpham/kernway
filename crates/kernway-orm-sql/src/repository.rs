@@ -35,7 +35,7 @@ macro_rules! pooled {
     ($pool:expr, |$c:ident| $body:expr) => {{
         let pool = Rc::clone($pool);
         Box::pin(async move {
-            let mut g = pool.acquire().await?;
+            let mut g = crate::db::checkout(&pool).await?;
             let $c = &mut *g;
             let r = $body.await;
             settle(&mut g, r)

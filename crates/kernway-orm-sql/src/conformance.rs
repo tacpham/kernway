@@ -124,6 +124,7 @@ pub fn run_all<H: Harness>(h: H) {
         ("select_joins_and_aggregates", select_joins_and_aggregates::<H>),
         ("execute_many_failure_semantics", execute_many_failure_semantics::<H>),
         ("server_cursors", server_cursors::<H>),
+        ("cancelled_transactions_leave_the_pool_clean", cancelled_transactions_leave_the_pool_clean::<H>),
     ] {
         eprintln!("conformance: {name}");
         scenario(h.clone());
@@ -744,5 +745,48 @@ fn server_cursors<H: Harness>(h: H) {
         // A cursor over a statement without rows is refused.
         let bad = db.cursor(&format!("UPDATE {} SET {} = 0", q("conf_items"), q("qty")), &[]).await;
         assert!(bad.is_err());
+    });
+}
+
+/// A transaction whose future is dropped half-way (a timeout around it) must
+/// not hand its connection — still inside the transaction — to the next
+/// caller: its work is not committed, and every later transaction starts
+/// clean.
+fn cancelled_transactions_leave_the_pool_clean<H: Harness>(h: H) {
+    block(async move {
+        let db = h.connect().await;
+        fresh_table::<Item, H>(&h, &db).await;
+        let repo = db.repository::<Item>();
+        for round in 0..3 {
+            let abandoned = rt_core::timeout(
+                std::time::Duration::from_millis(100),
+                db.transaction(move |tx| {
+                    Box::pin(async move {
+                        tx.repository::<Item>().save(item(&format!("abandoned {round}"), 1, 0.0, false, None)).await?;
+                        rt_core::sleep(std::time::Duration::from_secs(30)).await;
+                        Ok(())
+                    })
+                }),
+            )
+            .await;
+            // A leftover open transaction would make this begin fail at once
+            // instead of timing out.
+            assert!(abandoned.is_err(), "round {round}: expected a timeout, got {abandoned:?}");
+        }
+        // Many transactions afterwards, each on whatever connection the pool
+        // hands out: none finds itself inside a leftover transaction.
+        for i in 0..12i64 {
+            db.transaction(move |tx| {
+                Box::pin(async move {
+                    tx.repository::<Item>().save(item(&format!("after {i}"), i, 0.0, true, None)).await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap_or_else(|e| panic!("transaction {i} after the abandoned ones: {e}"));
+        }
+        let all = repo.find_all().await.unwrap();
+        assert_eq!(all.len(), 12, "nothing of the abandoned transactions was committed");
+        assert!(all.iter().all(|i| i.name.starts_with("after")));
     });
 }
