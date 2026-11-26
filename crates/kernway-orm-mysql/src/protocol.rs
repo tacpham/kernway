@@ -648,9 +648,10 @@ impl Conn {
         let extra = if use_tls { CLIENT_SSL } else { 0 } | compress_cap;
         self.write_packet(&build_handshake_response(cfg, &auth, plugin, extra))
             .await?;
-        // A local socket is as private as TLS (the official client treats
-        // it the same way for the clear-text password exchange).
-        let secure = use_tls || self.io.is_local();
+        // The server accepts the clear-text password of a caching_sha2 full
+        // authentication over TLS or a Unix socket — not over a named pipe,
+        // where the RSA exchange is used instead.
+        let secure = use_tls || (self.io.is_local() && !self.io.is_pipe());
         self.finish_auth(cfg, plugin, secure, hello.salt).await?;
         // Every packet after the authentication OK travels compressed.
         if compress {
@@ -727,7 +728,10 @@ impl Conn {
                     // Full auth without TLS: the password RSA-encrypted with
                     // the server's public key.
                     Some(0x04) => {
-                        let pem = match (&cfg.server_public_key, cfg.get_server_public_key) {
+                        // Over a local named pipe there is no network to
+                        // swap the key on: fetch it, as the server allows.
+                        let fetch = cfg.get_server_public_key || self.io.is_pipe();
+                        let pem = match (&cfg.server_public_key, fetch) {
                             (Some(path), _) => read_file(path, "server-public-key").await?,
                             (None, true) => {
                                 self.write_packet(&[0x02]).await?; // request public key

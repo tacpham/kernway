@@ -37,8 +37,10 @@ jobs:
           mkdir -p /tmp/mysqld && chmod 777 /tmp/mysqld
           docker run -d --name kw-mysql -p 3306:3306 -e MYSQL_ROOT_PASSWORD=secret \
             -v /tmp/mysqld:/var/run/mysqld mysql:8.0
-          for _ in $(seq 1 60); do
-            docker exec kw-mysql mysqladmin -uroot -psecret ping --silent 2>/dev/null && break
+          # Wait for the final server: the image's first-run init uses a
+          # temporary one (no network, no root password yet).
+          for _ in $(seq 1 90); do
+            docker exec kw-mysql mysql -uroot -psecret -h127.0.0.1 --protocol=TCP -e 'SELECT 1' >/dev/null 2>&1 && break
             sleep 2
           done
           echo "MYSQL_CONTAINER=kw-mysql" >> "$GITHUB_ENV"

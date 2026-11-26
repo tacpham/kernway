@@ -92,6 +92,20 @@ impl BufStream {
         }
     }
 
+    /// Whether this is a Windows named pipe (MySQL does not count one as a
+    /// secure transport, unlike a Unix socket).
+    #[inline]
+    pub fn is_pipe(&self) -> bool {
+        #[cfg(windows)]
+        {
+            matches!(self.socket, Socket::Pipe(_))
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
     /// Whether the session is encrypted.
     #[inline]
     pub fn is_tls(&self) -> bool {
