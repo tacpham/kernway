@@ -5,11 +5,11 @@
 
 | | |
 |---|---|
-| generated | 2026-11-26 14:02 UTC |
+| generated | 2026-11-26 14:46 UTC |
 | server | Oracle AI Database 26ai Free Release 23.26.4.0.0 - Develop, Learn, and Run for Free Version 23.26.4.0.0 |
 | image | gvenzl/oracle-free:23-slim |
 | container | kernway-oracle |
-| driver commit | 94c9cc9 on feat/plsql-full |
+| driver commit | 8283ee7 on feat/plsql-full |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
 | command | `cargo test -p kernway-orm-oracle  --lib --tests -- --test-threads=1 --nocapture ` |
 
