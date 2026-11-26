@@ -12,7 +12,7 @@ use kernway_orm_core::{
     error::OrmError,
     SqlDialect,
 };
-use kernway_orm_sql::{Param, SqlConn};
+use kernway_orm_sql::{Outcome, Param, Rows, SqlConn};
 use serde::de::DeserializeOwned;
 
 static DIALECT: OracleDialect = OracleDialect;
@@ -76,6 +76,25 @@ impl Conn {
             .and_then(|row| row.first())
             .and_then(Value::to_text)
             .ok_or_else(|| OrmError::Query(format!("no identity column {table}.{column}")))
+    }
+}
+
+/// An Oracle value as a shared typed value. (Interim: the Oracle phase
+/// refines NUMBER / temporal typing and streams fetch rounds.)
+pub(crate) fn to_shared(v: Value) -> kernway_orm_sql::Value {
+    use kernway_orm_sql::Value as V;
+    match v {
+        Value::Null => V::Null,
+        Value::Str(s) => V::Text(s),
+        Value::Number(n) => n.parse::<i64>().map_or(V::Decimal(n), V::Int),
+        Value::Float(f) => V::Float(f),
+        Value::Date(d) | Value::Timestamp(d) => V::DateTime(d.to_string()),
+        Value::Raw(b) => V::Bytes(b),
+        Value::Bool(b) => V::Bool(b),
+        Value::Cursor(rs) => V::Rows(Box::new(Rows {
+            columns: rs.columns.into_iter().map(|c| c.name).collect(),
+            rows: rs.rows.into_iter().map(|r| r.into_iter().map(to_shared).collect()).collect(),
+        })),
     }
 }
 
@@ -144,6 +163,19 @@ impl SqlConn for Conn {
         b.push(Bind::from(id));
         self.run(&sql, &b).await?;
         Ok(Param::Int(id))
+    }
+
+    async fn query_each<F>(&mut self, sql: &str, params: &[Param], mut each: F) -> Result<Outcome, OrmError>
+    where
+        F: FnMut(Vec<kernway_orm_sql::Value>) -> Result<(), OrmError>,
+    {
+        let r = self.run(sql, &binds(params)).await?;
+        let columns: Vec<String> = r.columns.iter().map(|c| c.name.clone()).collect();
+        let affected_rows = if columns.is_empty() { r.row_count } else { 0 };
+        for row in r.rows {
+            each(row.into_iter().map(to_shared).collect())?;
+        }
+        Ok(Outcome { columns, affected_rows, last_insert_id: None })
     }
 
     async fn begin(&mut self) -> Result<(), OrmError> {

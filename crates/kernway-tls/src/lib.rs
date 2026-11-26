@@ -29,7 +29,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::client::WebPkiServerVerifier;
 use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
 use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{CertificateError, ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 
 pub use rustls;
@@ -64,35 +64,61 @@ pub fn default_config() -> Arc<ClientConfig> {
 ///
 /// Fails if `ca_pem` holds no parseable certificate.
 pub fn client_config(ca_pem: Option<&[u8]>, check: CertCheck) -> io::Result<Arc<ClientConfig>> {
+    client_config_with_identity(ca_pem, check, None)
+}
+
+/// A client certificate chain and its private key, both PEM — presented to
+/// servers that require mutual TLS.
+#[derive(Debug, Clone, Copy)]
+pub struct ClientIdentity<'a> {
+    /// The certificate chain, leaf first.
+    pub cert_pem: &'a [u8],
+    /// The private key (PKCS#8, PKCS#1 or SEC1).
+    pub key_pem: &'a [u8],
+}
+
+/// [`client_config`], also presenting `identity` when the server asks for a
+/// client certificate (mutual TLS).
+pub fn client_config_with_identity(
+    ca_pem: Option<&[u8]>,
+    check: CertCheck,
+    identity: Option<ClientIdentity<'_>>,
+) -> io::Result<Arc<ClientConfig>> {
     let builder = ClientConfig::builder_with_provider(provider())
         .with_safe_default_protocol_versions()
         .map_err(io::Error::other)?;
 
-    if check == CertCheck::None {
-        let verifier = Arc::new(NoCertCheck(provider()));
-        return Ok(Arc::new(
-            builder
-                .dangerous()
-                .with_custom_certificate_verifier(verifier)
-                .with_no_client_auth(),
-        ));
-    }
-
-    let roots = Arc::new(root_store(ca_pem)?);
-    let config = match check {
-        CertCheck::Full => builder.with_root_certificates(roots).with_no_client_auth(),
+    let wants_cert = match check {
+        CertCheck::None => builder.dangerous().with_custom_certificate_verifier(Arc::new(NoCertCheck(provider()))),
+        CertCheck::Full => builder.with_root_certificates(Arc::new(root_store(ca_pem)?)),
         CertCheck::CaOnly => {
-            let inner = WebPkiServerVerifier::builder_with_provider(roots, provider())
+            let inner = WebPkiServerVerifier::builder_with_provider(Arc::new(root_store(ca_pem)?), provider())
                 .build()
                 .map_err(io::Error::other)?;
-            builder
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(IgnoreName(inner)))
-                .with_no_client_auth()
+            builder.dangerous().with_custom_certificate_verifier(Arc::new(IgnoreName(inner)))
         }
-        CertCheck::None => unreachable!("handled above"),
+    };
+    let config = match identity {
+        None => wants_cert.with_no_client_auth(),
+        Some(id) => {
+            let bad = |what: &str, e: &dyn std::fmt::Display| io::Error::new(io::ErrorKind::InvalidData, format!("bad {what}: {e}"));
+            let certs = CertificateDer::pem_slice_iter(id.cert_pem)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| bad("client certificate PEM", &e))?;
+            if certs.is_empty() {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "no certificate in the client certificate PEM"));
+            }
+            let key = PrivateKeyDer::from_pem_slice(id.key_pem).map_err(|e| bad("client key PEM", &e))?;
+            wants_cert.with_client_auth_cert(certs, key).map_err(io::Error::other)?
+        }
     };
     Ok(Arc::new(config))
+}
+
+/// Fill `buf` with cryptographically secure random bytes (the TLS provider's
+/// system RNG).
+pub fn fill_random(buf: &mut [u8]) -> io::Result<()> {
+    provider().secure_random.fill(buf).map_err(|_| io::Error::other("system RNG failed"))
 }
 
 /// Mozilla's roots, or the certificates in `ca_pem`.

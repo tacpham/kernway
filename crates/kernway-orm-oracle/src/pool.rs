@@ -17,5 +17,3 @@ impl Connect for OracleConnect {
     }
 }
 
-/// A per-core pool of Oracle sessions.
-pub type Pool = kernway_wire::Pool<OracleConnect>;

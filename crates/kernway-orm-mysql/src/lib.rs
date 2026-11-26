@@ -38,6 +38,8 @@ pub use dialect::MySqlDialect;
 #[cfg(feature = "mysql")]
 pub mod protocol;
 #[cfg(feature = "mysql")]
+mod rsa;
+#[cfg(feature = "mysql")]
 pub mod pool;
 #[cfg(feature = "mysql")]
 pub mod value;
@@ -49,7 +51,12 @@ pub mod driver;
 #[cfg(feature = "mysql")]
 pub use driver::MySqlDriver;
 #[cfg(feature = "mysql")]
+pub use pool::MySqlConnect;
+#[cfg(feature = "mysql")]
 pub use protocol::{BindValue, Cell, Conn, Fetched, MysqlConfig, QueryResult};
+/// The shared SQL types used with this driver: parameters, typed values, results.
+#[cfg(feature = "mysql")]
+pub use kernway_orm_sql::{params, CallArg, CallResult, OutKind, Outcome, Param, Rows, SqlDb, Value};
 /// The MySQL query builder (the shared SQL query builder over MySQL connections).
 #[cfg(feature = "mysql")]
 pub type MySqlQueryBuilder<T> = kernway_orm_sql::SqlQueryBuilder<T, pool::MySqlConnect>;

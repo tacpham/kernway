@@ -16,14 +16,16 @@
 //! - Buffered packet I/O: one read syscall serves many small packets; rows are
 //!   decoded in place, straight into the caller's type.
 //! - Multi-result responses (`CLIENT_MULTI_RESULTS`): stored procedures via
-//!   [`Conn::call`] / [`Conn::query_multi`]; every response is read to its end,
+//!   [`Conn::call_results`] / [`Conn::query_multi`]; every response is read to its end,
 //!   so an error part-way never leaves the connection out of sync.
 //!
-//! ## Not yet
-//!
-//! - `caching_sha2_password` full auth **without** TLS (needs the server's RSA
-//!   key exchange): use TLS, or rely on the server's auth cache (fast auth).
-//! - Client certificates (mutual TLS).
+//! - `caching_sha2_password` full authentication without TLS: the password
+//!   RSA-OAEP-encrypted with the server's public key (given as a file, or
+//!   fetched when explicitly allowed).
+//! - Client certificates (mutual TLS) for accounts that `REQUIRE X509`.
+//! - `LOAD DATA LOCAL INFILE` from caller-supplied bytes only, and
+//!   multi-statement scripts enabled per call (`COM_SET_OPTION`).
+//! - `OUT` / `INOUT` procedure arguments via the binary protocol.
 
 use kernway_orm_core::error::OrmError;
 pub use kernway_orm_core::decode::Cell;
@@ -35,6 +37,9 @@ use std::net::ToSocketAddrs;
 
 // --- Capability flags (only the ones we assert) ---
 const CLIENT_LONG_PASSWORD: u32 = 0x0000_0001;
+/// Report rows *matched* (not only changed) by UPDATE, like other databases
+/// and JDBC's default — so "0 rows" always means "no such row".
+const CLIENT_FOUND_ROWS: u32 = 0x0000_0002;
 const CLIENT_LONG_FLAG: u32 = 0x0000_0004;
 const CLIENT_CONNECT_WITH_DB: u32 = 0x0000_0008;
 const CLIENT_SSL: u32 = 0x0000_0800;
@@ -49,6 +54,13 @@ const CLIENT_MULTI_RESULTS: u32 = 0x0002_0000;
 const CLIENT_PS_MULTI_RESULTS: u32 = 0x0004_0000;
 /// Server status flag: another result follows this one in the response.
 const SERVER_MORE_RESULTS_EXISTS: u16 = 0x0008;
+/// Status flag: this result set holds a procedure's `OUT` parameters.
+const SERVER_PS_OUT_PARAMS: u16 = 0x1000;
+/// Client capability: may answer `LOAD DATA LOCAL INFILE` requests (only
+/// ever with data the caller handed to [`Conn::load_local_infile`]).
+const CLIENT_LOCAL_FILES: u32 = 0x0000_0080;
+/// Packet size for `LOAD DATA LOCAL INFILE` data.
+const LOCAL_INFILE_CHUNK: usize = 1 << 20;
 
 const UTF8MB4_GENERAL_CI: u8 = 45;
 const MAX_PACKET: u32 = 16 * 1024 * 1024; // 16 MiB
@@ -75,6 +87,20 @@ pub struct MysqlConfig {
     /// PEM file with the CA(s) to trust for [`SslMode::VerifyCa`] /
     /// [`SslMode::VerifyIdentity`] (URL: `?ssl-ca=`). `None` = Mozilla's public roots.
     pub ssl_ca: Option<std::path::PathBuf>,
+    /// PEM client certificate for servers that require one (`REQUIRE X509`;
+    /// URL: `?ssl-cert=`). Needs [`ssl_key`](Self::ssl_key) too.
+    pub ssl_cert: Option<std::path::PathBuf>,
+    /// PEM private key of [`ssl_cert`](Self::ssl_cert) (URL: `?ssl-key=`).
+    pub ssl_key: Option<std::path::PathBuf>,
+    /// PEM RSA public key of the server, for `caching_sha2_password` full
+    /// authentication **without TLS** (URL: `?server-public-key=`). The
+    /// password is RSA-encrypted with it.
+    pub server_public_key: Option<std::path::PathBuf>,
+    /// Without TLS and without [`server_public_key`](Self::server_public_key),
+    /// ask the server for its public key (URL: `?get-server-public-key=true`).
+    /// Off by default, as in the official client: over plaintext the key
+    /// itself could be swapped by a man in the middle.
+    pub get_server_public_key: bool,
 }
 
 /// TLS policy, with the same names and meaning as the official client's
@@ -153,11 +179,19 @@ impl MysqlConfig {
         };
         let mut ssl_mode = SslMode::default();
         let mut ssl_ca = None;
+        let (mut ssl_cert, mut ssl_key, mut server_public_key) = (None, None, None);
+        let mut get_server_public_key = false;
         for pair in options.split('&').filter(|p| !p.is_empty()) {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
             match key.to_ascii_lowercase().replace('_', "-").as_str() {
                 "ssl-mode" | "sslmode" => ssl_mode = SslMode::parse(value)?,
                 "ssl-ca" => ssl_ca = Some(std::path::PathBuf::from(value)),
+                "ssl-cert" => ssl_cert = Some(std::path::PathBuf::from(value)),
+                "ssl-key" => ssl_key = Some(std::path::PathBuf::from(value)),
+                "server-public-key" => server_public_key = Some(std::path::PathBuf::from(value)),
+                "get-server-public-key" => {
+                    get_server_public_key = matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes")
+                }
                 other => return Err(conn_err(format!("unknown MySQL URL option '{other}'"))),
             }
         }
@@ -175,7 +209,22 @@ impl MysqlConfig {
         if host.is_empty() {
             return Err(conn_err("missing host in MySQL URL"));
         }
-        Ok(Self { host, port, user, password, database, ssl_mode, ssl_ca })
+        if ssl_cert.is_some() != ssl_key.is_some() {
+            return Err(conn_err("ssl-cert and ssl-key must be given together"));
+        }
+        Ok(Self {
+            host,
+            port,
+            user,
+            password,
+            database,
+            ssl_mode,
+            ssl_ca,
+            ssl_cert,
+            ssl_key,
+            server_public_key,
+            get_server_public_key,
+        })
     }
 }
 
@@ -215,6 +264,9 @@ pub enum Fetched<R> {
         columns: Vec<String>,
         /// What the row function returned for each row.
         rows: Vec<R>,
+        /// Whether this result set carries a procedure's `OUT` parameter
+        /// values (binary protocol, `SERVER_PS_OUT_PARAMS`).
+        out_params: bool,
     },
 }
 
@@ -234,7 +286,7 @@ impl From<Fetched<Vec<Option<String>>>> for QueryResult {
             Fetched::Ok { affected_rows, last_insert_id } => {
                 QueryResult::Ok { affected_rows, last_insert_id }
             }
-            Fetched::Rows { columns, rows } => QueryResult::Rows { columns, rows },
+            Fetched::Rows { columns, rows, .. } => QueryResult::Rows { columns, rows },
         }
     }
 }
@@ -269,6 +321,9 @@ pub struct Conn {
     big: Vec<u8>,
     /// Prepared statements by SQL text (bounded; the oldest is closed).
     stmts: StmtCache<Stmt>,
+    /// Data for the `LOAD DATA LOCAL INFILE` request of the statement in
+    /// flight (see [`Conn::load_local_infile`]); `None` refuses any request.
+    local_data: Option<Vec<u8>>,
 }
 
 impl Conn {
@@ -290,6 +345,7 @@ impl Conn {
             seq: 0,
             big: Vec::new(),
             stmts: StmtCache::new(STMT_CACHE_CAP),
+            local_data: None,
         };
         conn.handshake(cfg).await?;
         Ok(conn)
@@ -406,7 +462,7 @@ impl Conn {
         let extra = if use_tls { CLIENT_SSL } else { 0 };
         self.write_packet(&build_handshake_response(cfg, &auth, plugin, extra))
             .await?;
-        self.finish_auth(cfg, plugin, use_tls).await
+        self.finish_auth(cfg, plugin, use_tls, hello.salt).await
     }
 
     /// Swap the plaintext socket for a TLS session over it, checking the server
@@ -418,8 +474,19 @@ impl Conn {
             })?),
             None => None,
         };
-        let tls_config = kernway_tls::client_config(ca_pem.as_deref(), cfg.ssl_mode.cert_check())
-            .map_err(|e| conn_err(format!("TLS config: {e}")))?;
+        let read = |p: &std::path::Path, what: &str| {
+            std::fs::read(p).map_err(|e| conn_err(format!("read {what} {}: {e}", p.display())))
+        };
+        let identity = match (&cfg.ssl_cert, &cfg.ssl_key) {
+            (Some(c), Some(k)) => Some((read(c, "ssl-cert")?, read(k, "ssl-key")?)),
+            _ => None,
+        };
+        let tls_config = kernway_tls::client_config_with_identity(
+            ca_pem.as_deref(),
+            cfg.ssl_mode.cert_check(),
+            identity.as_ref().map(|(c, k)| kernway_tls::ClientIdentity { cert_pem: c, key_pem: k }),
+        )
+        .map_err(|e| conn_err(format!("TLS config: {e}")))?;
         self.io
             .upgrade_tls(tls_config, &cfg.host)
             .await
@@ -434,6 +501,7 @@ impl Conn {
         cfg: &MysqlConfig,
         mut plugin: &'static str,
         tls: bool,
+        mut scramble: Vec<u8>,
     ) -> Result<(), OrmError> {
         // A well-behaved server needs at most a switch plus one extra round; the
         // bound only stops a misbehaving one from looping us forever.
@@ -456,6 +524,7 @@ impl Conn {
                     };
                     let auth = auth_response(plugin, cfg.password.as_bytes(), &data);
                     self.write_packet(&auth).await?;
+                    scramble = data;
                 }
                 Some(0x01) if plugin == "caching_sha2_password" => match reply.get(1).copied() {
                     // Fast auth: the server's cache matched the scramble; OK follows.
@@ -466,13 +535,48 @@ impl Conn {
                         clear.push(0);
                         self.write_packet(&clear).await?;
                     }
+                    // Full auth without TLS: the password RSA-encrypted with
+                    // the server's public key.
                     Some(0x04) => {
-                        return Err(conn_err(
-                            "caching_sha2_password needs a full authentication, which this \
-                             driver only does over TLS (a wrong password also ends up here, as \
-                             the server cannot fast-auth it): connect with ssl-mode=preferred \
-                             (or stricter) to a TLS-enabled server, or use mysql_native_password",
-                        ))
+                        let pem = match (&cfg.server_public_key, cfg.get_server_public_key) {
+                            (Some(path), _) => std::fs::read(path).map_err(|e| {
+                                conn_err(format!("read server-public-key {}: {e}", path.display()))
+                            })?,
+                            (None, true) => {
+                                self.write_packet(&[0x02]).await?; // request public key
+                                let reply = self.read_packet().await?;
+                                match reply.first() {
+                                    Some(0x01) => reply[1..].to_vec(),
+                                    Some(0xFF) => return Err(parse_err_packet(&reply)),
+                                    _ => return Err(conn_err("bad public key reply")),
+                                }
+                            }
+                            (None, false) => {
+                                return Err(conn_err(
+                                    "caching_sha2_password needs a full authentication (first login \
+                                     since the server's cache was cleared, or a wrong password): \
+                                     use TLS (ssl-mode=preferred or stricter), give the server's RSA \
+                                     key with server-public-key=<pem>, or allow fetching it with \
+                                     get-server-public-key=true",
+                                ))
+                            }
+                        };
+                        let key = crate::rsa::PublicKey::from_pem(&pem)
+                            .map_err(|e| conn_err(format!("server public key: {e}")))?;
+                        // password + NUL, XOR the 20-byte scramble (repeated).
+                        let salt: Vec<u8> = scramble.iter().copied().take(20).collect();
+                        if salt.is_empty() {
+                            return Err(conn_err("no auth scramble for RSA password exchange"));
+                        }
+                        let mut clear = cfg.password.as_bytes().to_vec();
+                        clear.push(0);
+                        for (i, b) in clear.iter_mut().enumerate() {
+                            *b ^= salt[i % salt.len()];
+                        }
+                        let mut seed = [0u8; 20];
+                        kernway_tls::fill_random(&mut seed).map_err(|e| conn_err(format!("RNG: {e}")))?;
+                        let encrypted = key.encrypt_oaep_sha1(&clear, seed).map_err(conn_err)?;
+                        self.write_packet(&encrypted).await?;
                     }
                     other => {
                         return Err(conn_err(format!(
@@ -507,6 +611,7 @@ impl Conn {
         payload.extend_from_slice(sql.as_bytes());
         self.write_packet(&payload).await?;
         let first = self.read_packet().await?;
+        let mut row = |_: &[ColMeta], cells: &[Cell<'_>]| row(cells);
         let results = self.read_results(first, false, &mut row, false).await?;
         Ok(first_result(results))
     }
@@ -521,7 +626,7 @@ impl Conn {
         payload.extend_from_slice(sql.as_bytes());
         self.write_packet(&payload).await?;
         let first = self.read_packet().await?;
-        let mut row = cells_to_text;
+        let mut row = |_: &[ColMeta], cells: &[Cell<'_>]| cells_to_text(cells);
         let results = self.read_results(first, false, &mut row, true).await?;
         Ok(results.into_iter().map(QueryResult::from).collect())
     }
@@ -530,13 +635,94 @@ impl Conn {
     /// `CALL name(?, …)`) and return every result: one [`QueryResult::Rows`] per
     /// result set the procedure produces, then the [`QueryResult::Ok`] of the call.
     /// `name` may be schema-qualified (`db.proc`); it must be a plain identifier.
-    /// `OUT` parameters are read the MySQL way: pass a user variable in SQL via
-    /// [`query_multi`](Self::query_multi) (`CALL p(?, @out)`), then `SELECT @out`.
-    pub async fn call(&mut self, name: &str, args: &[BindValue]) -> Result<Vec<QueryResult>, OrmError> {
+    /// `OUT` parameter values come back as a result set of their own (see
+    /// the typed `SqlConn::call` for them split out).
+    pub async fn call_results(&mut self, name: &str, args: &[BindValue]) -> Result<Vec<QueryResult>, OrmError> {
         let sql = call_sql(name, args.len())?;
-        let mut row = cells_to_text;
+        let mut row = |_: &[ColMeta], cells: &[Cell<'_>]| cells_to_text(cells);
         let results = self.exec_prepared_inner(&sql, args, &mut row, true).await?;
         Ok(results.into_iter().map(QueryResult::from).collect())
+    }
+
+    /// Run `sql` — over the text protocol without parameters (any
+    /// statement), as a cached prepared statement with them — handing each row
+    /// and its column definitions to `row`. Every result when `keep_all`.
+    pub(crate) async fn run_meta<R, F>(
+        &mut self,
+        sql: &str,
+        params: &[BindValue],
+        row: &mut F,
+        keep_all: bool,
+    ) -> Result<Vec<Fetched<R>>, OrmError>
+    where
+        F: FnMut(&[ColMeta], &[Cell<'_>]) -> Result<R, OrmError>,
+    {
+        if params.is_empty() {
+            self.seq = 0;
+            let mut payload = Vec::with_capacity(sql.len() + 1);
+            payload.push(0x03); // COM_QUERY
+            payload.extend_from_slice(sql.as_bytes());
+            self.write_packet(&payload).await?;
+            let first = self.read_packet().await?;
+            self.read_results(first, false, row, keep_all).await
+        } else {
+            self.exec_prepared_inner(sql, params, row, keep_all).await
+        }
+    }
+
+    /// Execute a prepared statement (even without parameters) and keep every
+    /// result, handing rows and column definitions to `row`.
+    pub(crate) async fn exec_prepared_all<R, F>(
+        &mut self,
+        sql: &str,
+        params: &[BindValue],
+        row: &mut F,
+    ) -> Result<Vec<Fetched<R>>, OrmError>
+    where
+        F: FnMut(&[ColMeta], &[Cell<'_>]) -> Result<R, OrmError>,
+    {
+        self.exec_prepared_inner(sql, params, row, true).await
+    }
+
+    /// `COM_SET_OPTION`: turn multi-statement support on (`0`) or off (`1`).
+    async fn set_option(&mut self, option: u16) -> Result<(), OrmError> {
+        self.seq = 0;
+        let mut payload = vec![0x1b]; // COM_SET_OPTION
+        payload.extend_from_slice(&option.to_le_bytes());
+        self.write_packet(&payload).await?;
+        let reply = self.read_packet().await?;
+        match reply.first() {
+            Some(0xFF) => Err(parse_err_packet(&reply)),
+            _ => Ok(()),
+        }
+    }
+
+    /// Run a script of `;`-separated statements in one round trip (schema
+    /// files, migrations), reading every result; the first failing statement
+    /// ends the script with its error. Multi-statement mode is enabled only
+    /// for this call, so ordinary queries can never be stacked.
+    pub async fn execute_script(&mut self, script: &str) -> Result<(), OrmError> {
+        self.set_option(0).await?;
+        let mut row = |_: &[ColMeta], _: &[Cell<'_>]| Ok(());
+        let result = self.run_meta(script, &[], &mut row, true).await.map(|_| ());
+        let reset = self.set_option(1).await;
+        result.and(reset)
+    }
+
+    /// Run a `LOAD DATA LOCAL INFILE '<any name>' INTO TABLE …` statement,
+    /// streaming `data` as the file's contents; returns the rows loaded. The
+    /// server's file name is ignored: this client only ever sends the bytes
+    /// given here, never a file from disk. The server must allow it
+    /// (`local_infile = ON`).
+    pub async fn load_local_infile(&mut self, sql: &str, data: &[u8]) -> Result<u64, OrmError> {
+        self.local_data = Some(data.to_vec());
+        let mut row = |_: &[ColMeta], _: &[Cell<'_>]| Ok(());
+        let result = self.run_meta(sql, &[], &mut row, false).await;
+        self.local_data = None;
+        match first_result(result?) {
+            Fetched::Ok { affected_rows, .. } => Ok(affected_rows),
+            Fetched::Rows { .. } => Err(OrmError::Query("LOAD DATA returned rows".into())),
+        }
     }
 
     /// Read every result of a response whose first packet is `first`: result
@@ -556,7 +742,7 @@ impl Conn {
         keep_all: bool,
     ) -> Result<Vec<Fetched<R>>, OrmError>
     where
-        F: FnMut(&[Cell<'_>]) -> Result<R, OrmError>,
+        F: FnMut(&[ColMeta], &[Cell<'_>]) -> Result<R, OrmError>,
     {
         let mut results = Vec::new();
         let mut deferred: Option<OrmError> = None;
@@ -567,7 +753,25 @@ impl Conn {
                     (Ok(ok_fetched(&first)), more)
                 }
                 Some(0xFF) => return Err(parse_err_packet(&first)),
-                Some(0xFB) => return Err(OrmError::Query("LOCAL INFILE not supported".into())),
+                Some(0xFB) => {
+                    // LOAD DATA LOCAL INFILE: send the data the caller supplied
+                    // for this statement — never a file the server names.
+                    match self.local_data.take() {
+                        Some(data) => {
+                            for chunk in data.chunks(LOCAL_INFILE_CHUNK) {
+                                self.write_packet(chunk).await?;
+                            }
+                        }
+                        None => {
+                            deferred.get_or_insert(OrmError::Query(
+                                "the server asked for a local file; use load_local_infile to supply data".into(),
+                            ));
+                        }
+                    }
+                    self.write_packet(&[]).await?; // end of data
+                    first = self.read_packet().await?;
+                    continue;
+                }
                 _ => {
                     let (col_count, _) = read_lenenc_int(&first, 0)
                         .ok_or_else(|| OrmError::Query("bad column count packet".into()))?;
@@ -576,7 +780,7 @@ impl Conn {
                         self.read_rows(col_count as usize, binary, row).await?
                     } else {
                         let (_, more) = self
-                            .read_rows(col_count as usize, binary, &mut |_: &[Cell<'_>]| Ok(()))
+                            .read_rows(col_count as usize, binary, &mut |_: &[ColMeta], _: &[Cell<'_>]| Ok(()))
                             .await?;
                         (Ok(Fetched::Ok { affected_rows: 0, last_insert_id: 0 }), more)
                     }
@@ -614,7 +818,7 @@ impl Conn {
         row: &mut F,
     ) -> Result<(Result<Fetched<R>, OrmError>, bool), OrmError>
     where
-        F: FnMut(&[Cell<'_>]) -> Result<R, OrmError>,
+        F: FnMut(&[ColMeta], &[Cell<'_>]) -> Result<R, OrmError>,
     {
         let mut metas = Vec::with_capacity(col_count);
         for _ in 0..col_count {
@@ -632,7 +836,7 @@ impl Conn {
                 return;
             }
             let mut cells = recycle(std::mem::take(scratch));
-            let outcome = decode_row(packet, binary, &metas, &mut cells).and_then(|()| row(&cells));
+            let outcome = decode_row(packet, binary, &metas, &mut cells).and_then(|()| row(&metas, &cells));
             *scratch = recycle(cells);
             match outcome {
                 Ok(r) => rows.push(r),
@@ -642,13 +846,16 @@ impl Conn {
         // EOF after the column definitions (CLIENT_DEPRECATE_EOF is not set). A
         // text result set that skips it starts with its first row instead.
         let after_cols = self.read_packet_ref().await?;
+        let out_params = is_eof(after_cols) && eof_status(after_cols) & SERVER_PS_OUT_PARAMS != 0;
         if !binary && !is_eof(after_cols) {
             take(after_cols, &mut scratch);
         }
         let more = loop {
             let packet = self.read_packet_ref().await?;
             if is_eof(packet) {
-                break eof_status(packet) & SERVER_MORE_RESULTS_EXISTS != 0;
+                // The OUT-parameter result set's EOF does not set
+                // MORE_RESULTS, yet the CALL's own OK always follows it.
+                break out_params || eof_status(packet) & SERVER_MORE_RESULTS_EXISTS != 0;
             }
             if packet.first() == Some(&0xFF) {
                 return Err(parse_err_packet(packet));
@@ -658,7 +865,7 @@ impl Conn {
         self.release_drained();
         let result = match failed {
             Some(e) => Err(e),
-            None => Ok(Fetched::Rows { columns, rows }),
+            None => Ok(Fetched::Rows { columns, rows, out_params }),
         };
         Ok((result, more))
     }
@@ -695,6 +902,7 @@ impl Conn {
     where
         F: FnMut(&[Cell<'_>]) -> Result<R, OrmError>,
     {
+        let mut row = |_: &[ColMeta], cells: &[Cell<'_>]| row(cells);
         let results = self.exec_prepared_inner(sql, params, &mut row, false).await?;
         Ok(first_result(results))
     }
@@ -710,7 +918,7 @@ impl Conn {
         keep_all: bool,
     ) -> Result<Vec<Fetched<R>>, OrmError>
     where
-        F: FnMut(&[Cell<'_>]) -> Result<R, OrmError>,
+        F: FnMut(&[ColMeta], &[Cell<'_>]) -> Result<R, OrmError>,
     {
         let cached = self.stmts.get(sql);
         let stmt = match cached {
@@ -771,7 +979,7 @@ impl Conn {
             return Err(parse_err_packet(&ok));
         }
         if ok.first() != Some(&0x00) || ok.len() < 9 {
-            return Err(OrmError::Query("bad COM_STMT_PREPARE response".into()));
+            return Err(OrmError::Query(format!("bad COM_STMT_PREPARE response {:02x?}", &ok[..ok.len().min(40)])));
         }
         let stmt_id = u32::from_le_bytes([ok[1], ok[2], ok[3], ok[4]]);
         let num_columns = u16::from_le_bytes([ok[5], ok[6]]);
@@ -802,7 +1010,7 @@ impl Conn {
         keep_all: bool,
     ) -> Result<Exec<R>, OrmError>
     where
-        F: FnMut(&[Cell<'_>]) -> Result<R, OrmError>,
+        F: FnMut(&[ColMeta], &[Cell<'_>]) -> Result<R, OrmError>,
     {
         if params.len() != num_params as usize {
             return Err(OrmError::Query(format!(
@@ -932,6 +1140,7 @@ fn parse_handshake(p: &[u8]) -> Result<Hello, OrmError> {
 /// charset, reserved. On its own (with `CLIENT_SSL`) it is the `SSLRequest`.
 fn handshake_header(cfg: &MysqlConfig, extra_caps: u32) -> Vec<u8> {
     let mut caps = CLIENT_LONG_PASSWORD
+        | CLIENT_FOUND_ROWS
         | CLIENT_LONG_FLAG
         | CLIENT_PROTOCOL_41
         | CLIENT_TRANSACTIONS
@@ -939,6 +1148,7 @@ fn handshake_header(cfg: &MysqlConfig, extra_caps: u32) -> Vec<u8> {
         | CLIENT_PLUGIN_AUTH
         | CLIENT_MULTI_RESULTS
         | CLIENT_PS_MULTI_RESULTS
+        | CLIENT_LOCAL_FILES
         | extra_caps;
     if cfg.database.is_some() {
         caps |= CLIENT_CONNECT_WITH_DB;
@@ -1058,7 +1268,7 @@ fn eof_status(p: &[u8]) -> u16 {
 
 /// `CALL name(?, …)` for `args` arguments. `name` must be an identifier,
 /// optionally schema-qualified; each part is backquoted.
-fn call_sql(name: &str, args: usize) -> Result<String, OrmError> {
+pub(crate) fn call_sql(name: &str, args: usize) -> Result<String, OrmError> {
     let parts: Vec<&str> = name.split('.').collect();
     let valid = parts.len() <= 2
         && parts.iter().all(|p| {
@@ -1263,6 +1473,10 @@ const MYSQL_TYPE_TIME: u8 = 0x0b;
 const MYSQL_TYPE_DATETIME: u8 = 0x0c;
 const MYSQL_TYPE_YEAR: u8 = 0x0d;
 const MYSQL_TYPE_BLOB: u8 = 0xfc;
+/// `NEWDATE` (internal, may appear in metadata for DATE).
+const MYSQL_TYPE_NEWDATE: u8 = 0x0e;
+/// The `binary` character set: a byte string, not text.
+const BINARY_CHARSET: u16 = 63;
 const MYSQL_TYPE_VAR_STRING: u8 = 0xfd;
 
 impl BindValue {
@@ -1314,10 +1528,22 @@ fn write_lenenc_int(out: &mut Vec<u8>, v: u64) {
 }
 
 /// Column metadata needed to decode a binary-protocol row.
-struct ColMeta {
-    name: String,
-    col_type: u8,
-    unsigned: bool,
+/// A result column's definition, as far as decoding needs it.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ColMeta {
+    /// The column label.
+    pub(crate) name: String,
+    /// The protocol type code (`MYSQL_TYPE_*`).
+    pub(crate) col_type: u8,
+    /// Integer column declared `UNSIGNED`.
+    pub(crate) unsigned: bool,
+    /// Binary character set (63) with the BINARY flag: bytes, not text.
+    pub(crate) binary: bool,
+    /// Binary character set without the BINARY flag — how MySQL describes a
+    /// procedure's character `OUT` parameters: text if it is valid UTF-8.
+    pub(crate) maybe_text: bool,
+    /// Fractional-second digits of a temporal column (0–6; 31 = not fixed).
+    pub(crate) decimals: u8,
 }
 
 fn parse_col_meta(def: &[u8]) -> ColMeta {
@@ -1332,18 +1558,31 @@ fn parse_col_meta(def: &[u8]) -> ColMeta {
                 }
                 i = next;
             }
-            None => return ColMeta { name, col_type: MYSQL_TYPE_VAR_STRING, unsigned: false },
+            None => return ColMeta { name, col_type: MYSQL_TYPE_VAR_STRING, ..ColMeta::default() },
         }
     }
-    // lenenc fixed-length (0x0c), charset(2), column_length(4), type(1), flags(2).
+    // lenenc fixed-length (0x0c), charset(2), column_length(4), type(1),
+    // flags(2), decimals(1).
     let (_fixed, consumed) = read_lenenc_int(def, i).unwrap_or((0, 1));
-    i += consumed + 2 + 4;
+    i += consumed;
+    let charset = def.get(i..i + 2).map_or(0, |b| u16::from_le_bytes([b[0], b[1]]));
+    i += 2 + 4;
     let col_type = *def.get(i).unwrap_or(&MYSQL_TYPE_VAR_STRING);
     let flags = def
         .get(i + 1..i + 3)
         .map(|b| u16::from_le_bytes([b[0], b[1]]))
         .unwrap_or(0);
-    ColMeta { name, col_type, unsigned: flags & 0x0020 != 0 }
+    let decimals = *def.get(i + 3).unwrap_or(&0);
+    let binary_charset = charset == BINARY_CHARSET;
+    let binary_flag = flags & 0x0080 != 0;
+    ColMeta {
+        name,
+        col_type,
+        unsigned: flags & 0x0020 != 0,
+        binary: binary_charset && binary_flag,
+        maybe_text: binary_charset && !binary_flag,
+        decimals,
+    }
 }
 
 /// Decode a binary-protocol row into `cells`; strings borrow from `packet`.
@@ -1406,10 +1645,10 @@ fn decode_binary_value<'a>(p: &'a [u8], i: usize, meta: &ColMeta) -> Result<(Cel
             let f = f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
             Ok((Cell::F64(f), i + 8))
         }
-        MYSQL_TYPE_DATE | MYSQL_TYPE_DATETIME | MYSQL_TYPE_TIMESTAMP => {
-            decode_datetime(p, i).map(|(s, next)| (Cell::Owned(s), next))
+        MYSQL_TYPE_DATE | MYSQL_TYPE_NEWDATE | MYSQL_TYPE_DATETIME | MYSQL_TYPE_TIMESTAMP => {
+            decode_datetime(p, i, meta).map(|(s, next)| (Cell::Owned(s), next))
         }
-        MYSQL_TYPE_TIME => decode_time(p, i).map(|(s, next)| (Cell::Owned(s), next)),
+        MYSQL_TYPE_TIME => decode_time(p, i, meta).map(|(s, next)| (Cell::Owned(s), next)),
         // DECIMAL / NEWDECIMAL / VARCHAR / VAR_STRING / STRING / BLOB / JSON / BIT / …
         _ => {
             let (bytes, next) = read_lenenc_str(p, i).ok_or_else(short)?;
@@ -1418,39 +1657,53 @@ fn decode_binary_value<'a>(p: &'a [u8], i: usize, meta: &ColMeta) -> Result<(Cel
     }
 }
 
-fn decode_datetime(p: &[u8], i: usize) -> Result<(String, usize), OrmError> {
+/// `.ffffff` cut to the column's fractional digits, as the text protocol
+/// prints it (`decimals` 31 = not fixed: all six digits when non-zero).
+fn fraction(micros: u32, decimals: u8) -> String {
+    let digits = match decimals {
+        0 => return String::new(),
+        d @ 1..=6 => usize::from(d),
+        _ if micros == 0 => return String::new(),
+        _ => 6,
+    };
+    format!(".{micros:06}")[..=digits].to_string()
+}
+
+/// A binary DATE / DATETIME / TIMESTAMP in the text protocol's format.
+fn decode_datetime(p: &[u8], i: usize, meta: &ColMeta) -> Result<(String, usize), OrmError> {
     let short = || OrmError::Query("short datetime".into());
     let len = *p.get(i).ok_or_else(short)? as usize;
     let d = p.get(i + 1..i + 1 + len).ok_or_else(short)?;
-    let s = match len {
-        0 => "0000-00-00 00:00:00".to_string(),
-        4 => format!("{:04}-{:02}-{:02}", u16::from_le_bytes([d[0], d[1]]), d[2], d[3]),
-        7 => format!(
-            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-            u16::from_le_bytes([d[0], d[1]]), d[2], d[3], d[4], d[5], d[6]
-        ),
-        _ => {
-            let micros = if d.len() >= 11 { u32::from_le_bytes([d[7], d[8], d[9], d[10]]) } else { 0 };
-            format!(
-                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}",
-                u16::from_le_bytes([d[0], d[1]]), d[2], d[3], d[4], d[5], d[6], micros
-            )
-        }
+    let at = |k: usize| d.get(k).copied().unwrap_or(0);
+    let year = if len >= 2 { u16::from_le_bytes([d[0], d[1]]) } else { 0 };
+    let date = format!("{year:04}-{:02}-{:02}", at(2), at(3));
+    let s = if matches!(meta.col_type, MYSQL_TYPE_DATE | MYSQL_TYPE_NEWDATE) {
+        date
+    } else {
+        let micros = if len >= 11 { u32::from_le_bytes([d[7], d[8], d[9], d[10]]) } else { 0 };
+        format!("{date} {:02}:{:02}:{:02}{}", at(4), at(5), at(6), fraction(micros, meta.decimals))
     };
     Ok((s, i + 1 + len))
 }
 
-fn decode_time(p: &[u8], i: usize) -> Result<(String, usize), OrmError> {
+/// A binary TIME (a duration: may be negative or exceed 24 hours).
+fn decode_time(p: &[u8], i: usize, meta: &ColMeta) -> Result<(String, usize), OrmError> {
     let short = || OrmError::Query("short time".into());
     let len = *p.get(i).ok_or_else(short)? as usize;
     let d = p.get(i + 1..i + 1 + len).ok_or_else(short)?;
-    let s = match len {
-        0 => "00:00:00".to_string(),
-        _ => {
-            let neg = d[0] == 1;
-            let hours = u32::from_le_bytes([d[1], d[2], d[3], d[4]]) * 24 + d[5] as u32;
-            format!("{}{:02}:{:02}:{:02}", if neg { "-" } else { "" }, hours, d[6], d[7])
-        }
+    let s = if len < 8 {
+        format!("00:00:00{}", fraction(0, meta.decimals))
+    } else {
+        let neg = d[0] == 1;
+        let hours = u32::from_le_bytes([d[1], d[2], d[3], d[4]]) * 24 + u32::from(d[5]);
+        let micros = if len >= 12 { u32::from_le_bytes([d[8], d[9], d[10], d[11]]) } else { 0 };
+        format!(
+            "{}{hours:02}:{:02}:{:02}{}",
+            if neg { "-" } else { "" },
+            d[6],
+            d[7],
+            fraction(micros, meta.decimals)
+        )
     };
     Ok((s, i + 1 + len))
 }
@@ -1780,13 +2033,13 @@ mod tests {
                 let mut r = Conn::connect(root).await.unwrap();
                 r.query("FLUSH PRIVILEGES").await.unwrap();
 
-                // Full auth without TLS: refused with a clear message, and the
-                // password never goes out in plaintext.
+                // Full auth without TLS and without the server's RSA key:
+                // refused with a clear message, the password never sent.
                 let err = Conn::connect(&with_mode(sha2.clone(), SslMode::Disabled, None))
                     .await
                     .err()
-                    .expect("full auth must not run without TLS");
-                assert!(err.to_string().contains("only does over TLS"), "{err}");
+                    .expect("full auth must not run without TLS or an RSA key");
+                assert!(err.to_string().contains("server-public-key"), "{err}");
             }
 
             // Over TLS: full authentication (password sent encrypted) succeeds…
@@ -1803,7 +2056,8 @@ mod tests {
 
             // A wrong password fails either way. Over TLS the server checks it and
             // answers 1045; in plaintext the scramble cannot match the cache, so the
-            // server asks for a full auth — which is refused without sending it.
+            // server asks for a full auth — which is refused without sending it
+            // (no RSA key configured; see tests/auth.rs for the RSA path).
             let mut bad = sha2.clone();
             bad.password = "nope".into();
             let err = Conn::connect(&with_mode(bad.clone(), SslMode::Required, None))
@@ -1815,7 +2069,7 @@ mod tests {
                 .await
                 .err()
                 .expect("wrong password must fail");
-            assert!(err.to_string().contains("only does over TLS"), "{err}");
+            assert!(err.to_string().contains("server-public-key"), "{err}");
         });
     }
 
@@ -1824,10 +2078,10 @@ mod tests {
         // Header 0x00, null bitmap (offset 2) marking column 2 NULL, then an
         // unsigned TINY 200, a signed LONGLONG -5, and a VAR_STRING "hi".
         let metas = [
-            ColMeta { name: "a".into(), col_type: MYSQL_TYPE_TINY, unsigned: true },
-            ColMeta { name: "b".into(), col_type: MYSQL_TYPE_LONGLONG, unsigned: false },
-            ColMeta { name: "c".into(), col_type: MYSQL_TYPE_LONG, unsigned: false },
-            ColMeta { name: "d".into(), col_type: MYSQL_TYPE_VAR_STRING, unsigned: false },
+            ColMeta { name: "a".into(), col_type: MYSQL_TYPE_TINY, unsigned: true, ..ColMeta::default() },
+            ColMeta { name: "b".into(), col_type: MYSQL_TYPE_LONGLONG, unsigned: false, ..ColMeta::default() },
+            ColMeta { name: "c".into(), col_type: MYSQL_TYPE_LONG, unsigned: false, ..ColMeta::default() },
+            ColMeta { name: "d".into(), col_type: MYSQL_TYPE_VAR_STRING, unsigned: false, ..ColMeta::default() },
         ];
         let mut p = vec![0x00, 0b0001_0000];
         p.push(200);

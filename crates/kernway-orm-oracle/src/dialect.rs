@@ -61,6 +61,10 @@ impl SqlDialect for OracleDialect {
         "FOR UPDATE"
     }
 
+    fn ping_sql(&self) -> &'static str {
+        "SELECT 1 FROM dual"
+    }
+
     fn empty_string_is_null(&self) -> bool {
         true
     }

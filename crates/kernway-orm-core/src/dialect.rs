@@ -75,6 +75,11 @@ pub trait SqlDialect: Send + Sync + 'static {
         ""
     }
 
+    /// A cheap statement that proves the connection is alive.
+    fn ping_sql(&self) -> &'static str {
+        "SELECT 1"
+    }
+
     /// Whether the database stores an empty string / empty binary value as
     /// NULL (Oracle). Text and binary columns then get no `NOT NULL`, so an
     /// empty `String` / `Vec<u8>` can be saved (and reads back empty).

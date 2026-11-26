@@ -9,6 +9,7 @@ use kernway_orm_sql::conformance::{run_all, Harness};
 struct MySql(String);
 
 impl Harness for MySql {
+    type Connect = kernway_orm_mysql::MySqlConnect;
     type Driver = MySqlDriver;
     async fn connect(&self) -> MySqlDriver {
         MySqlDriver::connect(&self.0).await.expect("connect")

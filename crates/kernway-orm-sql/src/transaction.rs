@@ -4,7 +4,8 @@
 //! `Err`.
 
 use crate::engine;
-use crate::{SqlConn, SqlConnect};
+use crate::raw::{CallArg, CallResult, Outcome, Rows, Value};
+use crate::{Param, SqlConn, SqlConnect};
 use kernway_orm_core::{
     entity::Entity,
     error::OrmError,
@@ -26,6 +27,46 @@ fn finished() -> OrmError {
 /// A live transaction handle over a `C` connection.
 pub struct SqlTx<C: SqlConnect> {
     conn: SharedConn<C>,
+}
+
+#[allow(clippy::await_holding_refcell_ref)] // one statement at a time on the transaction's connection
+impl<C: SqlConnect> SqlTx<C> {
+    fn conn(&self) -> Result<std::cell::RefMut<'_, Pooled<C>>, OrmError> {
+        let slot = self.conn.borrow_mut();
+        if slot.is_none() {
+            return Err(finished());
+        }
+        Ok(std::cell::RefMut::map(slot, |s| s.as_mut().expect("checked above")))
+    }
+
+    /// Run a statement with bound parameters inside the transaction; returns
+    /// the rows affected.
+    pub async fn execute_with(&self, sql: &str, params: &[Param]) -> Result<u64, OrmError> {
+        SqlConn::execute(&mut **self.conn()?, sql, params).await
+    }
+
+    /// Run a query inside the transaction and collect its rows.
+    pub async fn query(&self, sql: &str, params: &[Param]) -> Result<Rows, OrmError> {
+        self.conn()?.query_rows(sql, params).await
+    }
+
+    /// Run a query inside the transaction and map its rows onto `T` by name.
+    pub async fn query_as<T: Entity + DeserializeOwned>(&self, sql: &str, params: &[Param]) -> Result<Vec<T>, OrmError> {
+        self.query(sql, params).await?.into_entities()
+    }
+
+    /// Stream a query's rows inside the transaction.
+    pub async fn query_each<F>(&self, sql: &str, params: &[Param], each: F) -> Result<Outcome, OrmError>
+    where
+        F: FnMut(Vec<Value>) -> Result<(), OrmError>,
+    {
+        self.conn()?.query_each(sql, params, each).await
+    }
+
+    /// Call a stored procedure inside the transaction.
+    pub async fn call(&self, name: &str, args: &[CallArg]) -> Result<CallResult, OrmError> {
+        self.conn()?.call(name, args).await
+    }
 }
 
 impl<C: SqlConnect> Transaction for SqlTx<C> {

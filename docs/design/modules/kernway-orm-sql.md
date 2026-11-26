@@ -14,7 +14,9 @@
                ├─ engine        CRUD SQL: find / save / save_all / delete / by-id lists / FOR UPDATE
                ├─ SqlQueryBuilder  filters, Spec, order, limit/offset, page — all values bound
                ├─ SqlRepository    pooled autocommit repository
-               ├─ run_transaction / SqlTx   begin → work → commit | rollback
+               ├─ run_transaction / SqlTx   begin → work → commit | rollback (+ raw SQL inside)
+               ├─ SqlDb         the pooled handle drivers wrap: execute / execute_with / query /
+               │                query_as / query_scalar / query_each / call / execute_script
                └─ conformance   the test suite every backend must pass
                          │  SqlConn + SqlDialect  (the contract)
         ┌────────────────┼──────────────────┐
@@ -45,13 +47,31 @@
    | `insert_returning_id(sql, params, pk)` | INSERT, return the generated key (`LAST_INSERT_ID`, `RETURNING … INTO`, `RETURNING`, …) |
    | `insert_batch_first_id(sql, params, n)` | optional: multi-row INSERT reporting the first key of a consecutive range; `None` → row by row |
    | `begin` / `commit` / `rollback` | transaction control; outside a transaction every statement must be committed on its own |
+   | `query_each(sql, params, f)` | any statement; each row handed to `f` as typed `Value`s while it is read (no collecting); returns columns, rows affected, generated key |
+   | `query_rows` | provided: `query_each` collected into `Rows` |
+   | `call(name, args)` | optional: stored procedure with `CallArg::{In, Out(kind), InOut}` → result sets + OUT values |
+   | `execute_script(sql)` | optional: several `;`-separated statements, stopping at the first error |
+   | `capabilities()` | optional: what the backend supports |
+
+   **Value typing.** Every backend maps its column types onto the shared
+   `Value`: `Int`/`UInt` (integers, by signedness), `Float` (binary floating
+   point), `Decimal` (exact numbers, as text — never rounded), `Text`,
+   `Bytes` (binary strings / BLOB / bit / spatial), `Json`, `Date`, `Time`,
+   `DateTime` (the database's own text form, fractional digits as declared),
+   `Bool`, `Rows` (a cursor). A value must decode identically however the
+   driver fetched it (e.g. MySQL text vs binary protocol).
+
+   **Rows affected** means rows *matched* (MySQL connects with
+   `CLIENT_FOUND_ROWS`), as in Oracle, PostgreSQL and JDBC.
 
    Values arrive as neutral `Param`s (`Null, Int, UInt, Float, Bool, Str,
    Bytes`); the backend converts them to its bind format.
 4. **`Connect` + driver type** — `XxxConnect: kernway_wire::Connect`, and an
-   `XxxDriver` whose `repository()` returns `SqlRepository<T, XxxConnect>`
-   and whose `transaction()` calls `run_transaction`. Type aliases
-   (`XxxRepository<T>`, `XxxTx`) are the public names.
+   `XxxDriver` wrapping `SqlDb<XxxConnect>`: `connect(url)` /
+   `connect_with(cfg, size)`, `Deref<Target = SqlDb<…>>`, and `Driver` /
+   `TransactionalDriver` delegated to the `SqlDb`. Only what is truly the
+   database's own goes on the driver (MySQL: `load_local_infile`). Type
+   aliases (`XxxRepository<T>`, `XxxTx`) are the public names.
 
 A backend must **not** contain its own query builder, repository,
 transaction scope, CRUD SQL or entity ↔ value mapping. If it needs
@@ -74,6 +94,7 @@ raw DDL, dialect) and calling `run_all` against a live server. Scenarios:
 | `unique_violation` | duplicate unique value → `OrmError::UniqueViolation`; manual key saves update |
 | `transactions` | commit, rollback (update + delete undone), autocommit visible to another connection |
 | `row_lock_no_lost_update` | two concurrent `find_by_id_for_update` + save on different threads → no lost update |
+| `raw_sql` | hand-written queries with bound params, GROUP BY mapped onto an entity by name, scalar, rows affected (matched), streaming, NULL params, raw SQL rolled back with its transaction |
 
 Run:
 

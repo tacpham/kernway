@@ -4,7 +4,7 @@
 
 use kernway_orm_core::OrmError;
 use kernway_orm_macro::entity;
-use kernway_orm_mysql::{BindValue, Conn, MySqlDriver, MysqlConfig, QueryResult};
+use kernway_orm_mysql::{BindValue, CallArg, Conn, MySqlDriver, MysqlConfig, OutKind, QueryResult, Value};
 use serde::{Deserialize, Serialize};
 
 /// The server URL, with the test procedures created exactly once per run
@@ -39,6 +39,9 @@ async fn setup(conn: &mut Conn) {
         "DROP PROCEDURE IF EXISTS kwp_people",
         "CREATE PROCEDURE kwp_people() BEGIN \
            SELECT 'Mai' AS name, 2 AS extra, 7 AS id UNION ALL SELECT 'Lan', 0, 8; END",
+        "DROP PROCEDURE IF EXISTS kwp_inout",
+        "CREATE PROCEDURE kwp_inout(INOUT n INT, OUT greet VARCHAR(20), OUT ratio DECIMAL(5,2), IN who VARCHAR(10)) \
+           BEGIN SELECT n AS seen; SET n = n + 1, greet = CONCAT('hi ', who), ratio = 2.5; END",
         "DROP PROCEDURE IF EXISTS kwp_fails_late",
         "CREATE PROCEDURE kwp_fails_late() BEGIN SELECT 1 AS ok; SELECT * FROM kwp_no_such_table; END",
     ] {
@@ -65,11 +68,11 @@ fn call_returns_every_result_set_then_the_call_status() {
         let mut c = Conn::connect(&MysqlConfig::from_url(&url).unwrap()).await.unwrap();
 
         // No result set: just the call's OK.
-        let r = c.call("kwp_none", &[BindValue::Int(1)]).await.unwrap();
+        let r = c.call_results("kwp_none", &[BindValue::Int(1)]).await.unwrap();
         assert!(matches!(r.as_slice(), [QueryResult::Ok { .. }]), "{r:?}");
 
         // Two SELECTs → two result sets, then the OK.
-        let r = c.call("kwp_two", &[BindValue::Int(21)]).await.unwrap();
+        let r = c.call_results("kwp_two", &[BindValue::Int(21)]).await.unwrap();
         assert_eq!(r.len(), 3, "{r:?}");
         assert_eq!(rows(&r[0]), &vec![vec![Some("21".to_string())]]);
         assert_eq!(rows(&r[1]), &vec![vec![Some("42".to_string()), Some("x".to_string())]]);
@@ -95,9 +98,9 @@ fn call_returns_every_result_set_then_the_call_status() {
         // Schema-qualified names work; anything that is not an identifier is
         // refused before it reaches SQL.
         let db: String = rows(&c.query("SELECT DATABASE()").await.unwrap())[0][0].clone().unwrap();
-        c.call(&format!("{db}.kwp_none"), &[BindValue::Int(0)]).await.unwrap();
+        c.call_results(&format!("{db}.kwp_none"), &[BindValue::Int(0)]).await.unwrap();
         for bad in ["kwp_none; DROP TABLE x", "a.b.c", "", "kwp`none"] {
-            assert!(c.call(bad, &[]).await.is_err(), "{bad:?} must be refused");
+            assert!(c.call_results(bad, &[]).await.is_err(), "{bad:?} must be refused");
         }
         alive(&mut c).await;
     });
@@ -110,7 +113,7 @@ fn an_error_inside_a_procedure_leaves_the_connection_usable() {
         let mut c = Conn::connect(&MysqlConfig::from_url(&url).unwrap()).await.unwrap();
         // First result set arrives, then the second SELECT fails: the ERR ends
         // the response, the error surfaces, and nothing is left unread.
-        let err = c.call("kwp_fails_late", &[]).await.unwrap_err();
+        let err = c.call_results("kwp_fails_late", &[]).await.unwrap_err();
         assert!(err.to_string().contains("1146"), "{err}");
         alive(&mut c).await;
         let err = c.query("CALL kwp_fails_late()").await.unwrap_err();
@@ -165,18 +168,34 @@ struct Person {
 }
 
 #[test]
-fn call_as_maps_the_first_result_set_by_column_name() {
+fn typed_call_maps_results_by_name_and_returns_out_arguments() {
     let Some(url) = url() else { return eprintln!("skip: KERNWAY_MYSQL_URL not set") };
     run(async move {
         let db = MySqlDriver::connect(&url).await.unwrap();
         // Columns come back as (name, extra, id): out of entity order, plus one
         // the entity does not have.
-        let people: Vec<Person> = db.call_as("kwp_people", &[]).await.unwrap();
+        let r = db.call("kwp_people", &[]).await.unwrap();
+        let people: Vec<Person> = r.results[0].into_entities().unwrap();
         assert_eq!(
             people,
             vec![Person { id: 7, name: "Mai".into() }, Person { id: 8, name: "Lan".into() }]
         );
-        assert!(db.call_as::<Person>("kwp_none", &[BindValue::Int(1)]).await.unwrap().is_empty());
+        assert!(db.call("kwp_none", &[1.into()]).await.unwrap().results.is_empty());
+
+        // OUT argument: no user variables, no second query.
+        let r = db.call("kwp_out", &[CallArg::from(4), CallArg::Out(OutKind::Number)]).await.unwrap();
+        assert_eq!(r.out, vec![Value::Int(40)]);
+        // IN OUT, several OUT of different types, plus a result set.
+        let r = db
+            .call(
+                "kwp_inout",
+                &[CallArg::InOut(5.into()), CallArg::Out(OutKind::Text), CallArg::Out(OutKind::Number), "Lan".into()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.out, vec![Value::Int(6), Value::Text("hi Lan".into()), Value::Decimal("2.50".into())]);
+        assert_eq!(r.results.len(), 1);
+        assert_eq!(r.results[0].get(0, "seen"), Some(&Value::Int(5)));
         db.execute("SELECT 1").await.unwrap();
     });
 }

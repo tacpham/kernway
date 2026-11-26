@@ -13,14 +13,18 @@ use kernway_orm_core::{
     entity::Entity, error::OrmError, spec::Spec, transaction::{Transaction, TransactionalDriver},
     Driver, SqlDialect,
 };
+use crate::{params, Param, SqlConnect, SqlDb, Value};
 use kernway_orm_macro::entity;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
+use std::ops::Deref;
 
 /// How the suite reaches one backend.
 pub trait Harness: Clone + Send + Sync + 'static {
-    /// The driver under test.
-    type Driver: Driver + TransactionalDriver + 'static;
+    /// The pool connector of the backend.
+    type Connect: SqlConnect;
+    /// The driver under test (a [`SqlDb`] wrapper).
+    type Driver: Driver + TransactionalDriver<Tx = crate::SqlTx<Self::Connect>> + Deref<Target = SqlDb<Self::Connect>> + 'static;
     /// Open a driver (on the current executor).
     fn connect(&self) -> impl Future<Output = Self::Driver>;
     /// Run one raw statement (DDL).
@@ -61,6 +65,16 @@ pub struct Member {
     pub level: i32,
 }
 
+/// A projection of hand-written SQL, mapped by column name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[entity(table = "conf_item_totals")]
+pub struct ItemTotal {
+    #[id(strategy = "manual")]
+    pub active: bool,
+    pub n: i64,
+    pub total: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[entity(table = "conf_wallets")]
 pub struct Wallet {
@@ -96,6 +110,7 @@ pub fn run_all<H: Harness>(h: H) {
         ("unique_violation", unique_violation::<H>),
         ("transactions", transactions::<H>),
         ("row_lock_no_lost_update", row_lock_no_lost_update::<H>),
+        ("raw_sql", raw_sql::<H>),
     ] {
         eprintln!("conformance: {name}");
         scenario(h.clone());
@@ -343,3 +358,81 @@ fn row_lock_no_lost_update<H: Harness>(h: H) {
     });
 }
 
+
+fn raw_sql<H: Harness>(h: H) {
+    block(async move {
+        let db = h.connect().await;
+        fresh_table::<Item, H>(&h, &db).await;
+        let repo = db.repository::<Item>();
+        for i in 1..=6i64 {
+            repo.save(item(&format!("r{i}"), i, i as f64 / 4.0, i % 2 == 0, None)).await.unwrap();
+        }
+        let d = h.dialect();
+        let q = |s: &str| d.quote_identifier(s);
+        let (t, name, qty, price, active) = (q("conf_items"), q("name"), q("qty"), q("price"), q("active"));
+        let p = |i: usize| d.placeholder(i);
+
+        // Any query, bound parameters, typed values.
+        let rows = db
+            .query(&format!("SELECT {name}, {qty}, {price} FROM {t} WHERE {qty} > {} ORDER BY {qty} DESC", p(0)), params![4])
+            .await
+            .unwrap();
+        assert_eq!(rows.rows.len(), 2);
+        assert_eq!(rows.get(0, "name").and_then(Value::as_str), Some("r6"));
+        assert_eq!(rows.get(0, "qty").and_then(Value::as_i64), Some(6));
+        assert_eq!(rows.get(1, "price").and_then(Value::as_f64), Some(1.25));
+
+        // Aggregates grouped, mapped onto an entity by column name.
+        let mut totals: Vec<ItemTotal> = db
+            .query_as(
+                &format!("SELECT {active} AS {}, COUNT(*) AS {}, SUM({qty}) AS {} FROM {t} GROUP BY {active}", q("active"), q("n"), q("total")),
+                &[],
+            )
+            .await
+            .unwrap();
+        totals.sort_by_key(|t| t.active);
+        assert_eq!(
+            totals,
+            vec![ItemTotal { active: false, n: 3, total: 9 }, ItemTotal { active: true, n: 3, total: 12 }]
+        );
+        assert_eq!(
+            db.query_scalar(&format!("SELECT COUNT(*) FROM {t} WHERE {name} LIKE {}", p(0)), params!["r%"]).await.unwrap().as_i64(),
+            Some(6)
+        );
+
+        // Statements report rows affected; streaming visits every row.
+        let n = db.execute_with(&format!("UPDATE {t} SET {qty} = {qty} * 10 WHERE {qty} <= {}", p(0)), params![3]).await.unwrap();
+        assert_eq!(n, 3);
+        let mut sum = 0;
+        db.query_each(&format!("SELECT {qty} FROM {t}"), &[], |r| {
+            sum += r[0].as_i64().unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(sum, 10 + 20 + 30 + 4 + 5 + 6);
+
+        // NULL and text parameters.
+        let none: Option<String> = None;
+        let n = db
+            .execute_with(&format!("UPDATE {t} SET {} = {} WHERE {name} = {}", q("note"), p(0), p(1)), &[Param::from(none), "r1".into()])
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+
+        // Hand-written SQL inside a transaction rolls back with it.
+        let r: Result<(), OrmError> = db
+            .transaction(move |tx| {
+                let (t, qty) = (t.clone(), qty.clone());
+                Box::pin(async move {
+                    tx.execute_with(&format!("DELETE FROM {t} WHERE {qty} > {}", p(0)), params![0]).await?;
+                    let left = tx.query(&format!("SELECT COUNT(*) FROM {t}"), &[]).await?;
+                    assert_eq!(left.rows[0][0].as_i64(), Some(0));
+                    Err(OrmError::Query("abort".into()))
+                })
+            })
+            .await;
+        assert!(r.is_err());
+        assert_eq!(repo.count().await.unwrap(), 6, "raw DELETE rolled back");
+    });
+}

@@ -1,10 +1,10 @@
-//! `MySqlDriver` — the entry point, backed by the native async protocol and a
-//! per-core connection pool.
+//! `MySqlDriver` — the entry point: a [`SqlDb`] (pool, hand-written SQL,
+//! procedures, repositories, transactions — all shared) plus how to connect
+//! and what only MySQL has (`LOAD DATA LOCAL INFILE`).
 
-use crate::pool::{MySqlConnect, Pool};
-use crate::protocol::{BindValue, Conn, MysqlConfig, QueryResult};
-use crate::{MySqlRepository, MySqlTx};
-use kernway_orm_sql::engine;
+use crate::pool::MySqlConnect;
+use crate::protocol::MysqlConfig;
+use crate::MySqlTx;
 use kernway_orm_core::{
     driver::{Driver, DriverCapabilities},
     entity::Entity,
@@ -13,18 +13,23 @@ use kernway_orm_core::{
     transaction::TransactionalDriver,
     BoxFuture,
 };
+use kernway_orm_sql::SqlDb;
 use serde::{de::DeserializeOwned, Serialize};
-use std::rc::Rc;
+use std::ops::Deref;
 
 /// Default per-core pool size — connections opened on demand, up to this many.
 const DEFAULT_POOL_SIZE: usize = 8;
 
 /// A configured handle to a MySQL database, backed by a per-core async pool.
 ///
+/// Everything a [`SqlDb`] does is available directly (it derefs to one):
+/// `execute`, `execute_with`, `query`, `query_as`, `query_scalar`,
+/// `query_each`, `call`, `execute_script`, `ensure_table`.
+///
 /// `!Send` by design: the pool, its connections, and every future run on one
 /// shard. Create one `MySqlDriver` per shard.
 pub struct MySqlDriver {
-    pool: Rc<Pool>,
+    db: SqlDb<MySqlConnect>,
 }
 
 impl MySqlDriver {
@@ -37,79 +42,35 @@ impl MySqlDriver {
 
     /// Connect from an explicit config, with a chosen pool size.
     pub async fn connect_with(cfg: MysqlConfig, pool_size: usize) -> Result<Self, OrmError> {
-        let pool = Pool::new(MySqlConnect(cfg), pool_size);
-        pool.warm().await?;
-        Ok(Self { pool })
+        Ok(Self { db: SqlDb::open(MySqlConnect(cfg), pool_size).await? })
     }
 
-    /// Create `T`'s table if it does not exist (explicit schema step — the async
-    /// repository does not auto-create).
-    pub async fn ensure_table<T>(&self) -> Result<(), OrmError>
-    where
-        T: Entity,
-    {
-        let mut guard = self.pool.acquire().await?;
-        engine::ensure_table::<T, Conn>(&mut guard).await
-    }
-
-    /// Run one raw SQL statement (text protocol / `COM_QUERY`) and discard any rows. For DDL and
-    /// bulk setup the CRUD repository API does not cover — e.g. `CREATE DATABASE`, running a
-    /// schema file, or provisioning a tenant. ONE statement per call (no multi-statement).
-    pub async fn execute(&self, sql: &str) -> Result<(), OrmError> {
-        let mut guard = self.pool.acquire().await?;
-        let result = guard.query(sql).await;
-        if matches!(result, Err(OrmError::Connection(_))) {
-            guard.poison();
-        }
-        result.map(|_| ())
-    }
-
-    /// Call stored procedure `name` with bound `args` and return every result:
-    /// one [`QueryResult::Rows`] per result set the procedure produces, then the
-    /// [`QueryResult::Ok`] of the call itself. `name` may be `db.proc`.
+    /// Bulk-load `data` with `LOAD DATA LOCAL INFILE '<name>' INTO TABLE …`
+    /// (the fastest way to import CSV); returns the rows loaded. Only `data`
+    /// is ever sent — the client never reads a file the server names. Needs
+    /// `local_infile = ON` on the server.
     ///
     /// ```rust,ignore
-    /// let results = db.call("daily_totals", &[BindValue::Str("2026-11-26".into())]).await?;
+    /// db.load_local_infile(
+    ///     "LOAD DATA LOCAL INFILE 'x.csv' INTO TABLE items FIELDS TERMINATED BY ','",
+    ///     csv.as_bytes(),
+    /// ).await?;
     /// ```
-    pub async fn call(&self, name: &str, args: &[BindValue]) -> Result<Vec<QueryResult>, OrmError> {
-        let mut guard = self.pool.acquire().await?;
-        let result = guard.call(name, args).await;
-        if matches!(result, Err(OrmError::Connection(_))) {
-            guard.poison();
+    pub async fn load_local_infile(&self, sql: &str, data: &[u8]) -> Result<u64, OrmError> {
+        let mut g = self.db.pool().acquire().await?;
+        let r = g.load_local_infile(sql, data).await;
+        if matches!(r, Err(OrmError::Connection(_))) {
+            g.poison();
         }
-        result
+        r
     }
+}
 
-    /// Call stored procedure `name` and map its **first** result set into `T`,
-    /// matching columns to `T`'s fields **by name** (a procedure's `SELECT` need
-    /// not list them in the entity's order; a column `T` lacks is ignored, a
-    /// field the result lacks reads as `NULL`).
-    pub async fn call_as<T>(&self, name: &str, args: &[BindValue]) -> Result<Vec<T>, OrmError>
-    where
-        T: Entity + DeserializeOwned,
-    {
-        let results = self.call(name, args).await?;
-        let Some(QueryResult::Rows { columns, rows }) = results
-            .into_iter()
-            .find(|r| matches!(r, QueryResult::Rows { .. }))
-        else {
-            return Ok(Vec::new());
-        };
-        let cols = T::columns();
-        // For each entity column, where it sits in the result (if at all).
-        let position: Vec<Option<usize>> = cols
-            .iter()
-            .map(|c| columns.iter().position(|name| name.eq_ignore_ascii_case(c.name)))
-            .collect();
-        rows.iter()
-            .map(|row| {
-                let ordered: Vec<Option<String>> = position
-                    .iter()
-                    .map(|p| p.and_then(|i| row.get(i).cloned().flatten()))
-                    .collect();
-                crate::value::row_to_entity::<T>(&ordered, cols)
-            })
-            .collect()
+impl Deref for MySqlDriver {
+    type Target = SqlDb<MySqlConnect>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.db
     }
 }
 
@@ -118,27 +79,15 @@ impl Driver for MySqlDriver {
     where
         T: Entity + Serialize + DeserializeOwned + 'static,
     {
-        Box::new(MySqlRepository::<T>::new(Rc::clone(&self.pool)))
+        self.db.repository()
     }
 
     fn ping(&self) -> BoxFuture<'_, Result<(), OrmError>> {
-        let pool = Rc::clone(&self.pool);
-        Box::pin(async move {
-            let mut guard = pool.acquire().await?;
-            match guard.query("SELECT 1").await? {
-                QueryResult::Rows { .. } | QueryResult::Ok { .. } => Ok(()),
-            }
-        })
+        self.db.ping()
     }
 
     fn capabilities(&self) -> DriverCapabilities {
-        DriverCapabilities {
-            transactions: true,
-            raw_query: true,
-            full_text_search: false,
-            json_columns: true,
-            migrations: false,
-        }
+        Driver::capabilities(&self.db)
     }
 }
 
@@ -150,6 +99,6 @@ impl TransactionalDriver for MySqlDriver {
         F: FnOnce(MySqlTx) -> BoxFuture<'a, Result<R, OrmError>> + 'a,
         R: 'a,
     {
-        Box::pin(kernway_orm_sql::run_transaction(Rc::clone(&self.pool), work))
+        self.db.transaction(work)
     }
 }

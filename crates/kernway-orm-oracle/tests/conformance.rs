@@ -9,6 +9,7 @@ use kernway_orm_sql::conformance::{run_all, Harness};
 struct Oracle(String);
 
 impl Harness for Oracle {
+    type Connect = kernway_orm_oracle::OracleConnect;
     type Driver = OracleDriver;
     async fn connect(&self) -> OracleDriver {
         OracleDriver::connect(&self.0).await.expect("connect")

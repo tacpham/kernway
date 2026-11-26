@@ -12,24 +12,34 @@
 //! - [`SqlRepository`] and [`run_transaction`] / [`SqlTx`]: the pooled
 //!   autocommit repository and the transaction scope.
 //!
+//! - [`SqlDb`]: the pooled database handle every driver wraps — hand-written
+//!   SQL with bound parameters ([`SqlDb::query`], [`SqlDb::query_as`],
+//!   [`SqlDb::query_each`], [`SqlDb::execute_with`]), stored procedures with
+//!   `OUT` arguments ([`SqlDb::call`]), scripts, repositories, transactions.
+//!
 //! Values cross into the backend as neutral [`Param`]s and come back as
-//! entities through the shared row decoder (`kernway_orm_core::decode`), so
-//! every backend maps entity fields to SQL values the same way.
+//! entities through the shared row decoder (`kernway_orm_core::decode`) or as
+//! typed [`Value`]s, so every backend maps SQL values the same way.
 
 #[cfg(feature = "conformance")]
 pub mod conformance;
+mod db;
 pub mod engine;
 mod param;
 mod query;
+mod raw;
 mod repository;
 mod transaction;
+
+pub use db::SqlDb;
+pub use raw::{CallArg, CallResult, OutKind, Outcome, Rows, Value};
 
 pub use param::{column_for_field, filter_param, id_to_params, is_auto_pk, is_new_auto_entity, json_to_param, pk_cols, Param};
 pub use query::SqlQueryBuilder;
 pub use repository::SqlRepository;
 pub use transaction::{run_transaction, SqlTx};
 
-use kernway_orm_core::{entity::Entity, error::OrmError, SqlDialect};
+use kernway_orm_core::{driver::DriverCapabilities, entity::Entity, error::OrmError, SqlDialect};
 use serde::de::DeserializeOwned;
 use std::future::Future;
 
@@ -86,6 +96,49 @@ pub trait SqlConn {
 
     /// Roll the transaction back.
     fn rollback(&mut self) -> impl Future<Output = Result<(), OrmError>>;
+
+    /// Run any statement with bound parameters, handing each row of its
+    /// (first) result set to `each` as it is read — nothing is collected, so
+    /// a large result streams in constant memory. Values are typed by column
+    /// (see [`Value`]).
+    fn query_each<F>(&mut self, sql: &str, params: &[Param], each: F) -> impl Future<Output = Result<Outcome, OrmError>>
+    where
+        F: FnMut(Vec<Value>) -> Result<(), OrmError>;
+
+    /// Run any statement with bound parameters and collect its result set.
+    fn query_rows(&mut self, sql: &str, params: &[Param]) -> impl Future<Output = Result<Rows, OrmError>> {
+        async move {
+            let mut rows = Vec::new();
+            let outcome = self
+                .query_each(sql, params, |r| {
+                    rows.push(r);
+                    Ok(())
+                })
+                .await?;
+            Ok(Rows { columns: outcome.columns, rows })
+        }
+    }
+
+    /// Call stored procedure `name` (may be schema-qualified) with `args`.
+    fn call(&mut self, name: &str, args: &[CallArg]) -> impl Future<Output = Result<CallResult, OrmError>> {
+        let _ = (name, args);
+        async { Err(OrmError::Unsupported("stored procedure calls".into())) }
+    }
+
+    /// Run a script of several `;`-separated statements (schema files,
+    /// migrations), stopping at the first error.
+    fn execute_script(&mut self, script: &str) -> impl Future<Output = Result<(), OrmError>> {
+        let _ = script;
+        async { Err(OrmError::Unsupported("multi-statement scripts".into())) }
+    }
+
+    /// What this backend supports.
+    fn capabilities() -> DriverCapabilities
+    where
+        Self: Sized,
+    {
+        DriverCapabilities { transactions: true, raw_query: true, full_text_search: false, json_columns: true, migrations: false }
+    }
 }
 
 /// A pool connector whose connections speak [`SqlConn`].

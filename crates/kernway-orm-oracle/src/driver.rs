@@ -1,8 +1,8 @@
-//! `OracleDriver` — the ORM entry point over a per-core session pool. The
-//! repositories, query builder and transactions are the shared SQL layer.
+//! `OracleDriver` — a [`SqlDb`] (pool, hand-written SQL, repositories,
+//! transactions — all shared) plus how to connect to Oracle.
 
-use crate::conn::{Conn, OracleConfig};
-use crate::pool::{OracleConnect, Pool};
+use crate::conn::OracleConfig;
+use crate::pool::OracleConnect;
 use kernway_orm_core::{
     driver::{Driver, DriverCapabilities},
     entity::Entity,
@@ -11,16 +11,17 @@ use kernway_orm_core::{
     transaction::TransactionalDriver,
     BoxFuture,
 };
-use kernway_orm_sql::{engine, SqlConn, SqlRepository, SqlTx};
+use kernway_orm_sql::{SqlDb, SqlRepository, SqlTx};
 use serde::{de::DeserializeOwned, Serialize};
-use std::rc::Rc;
+use std::ops::Deref;
 
 const DEFAULT_POOL_SIZE: usize = 8;
 
 /// A configured handle to an Oracle database, backed by a per-core pool.
-/// `!Send` by design: create one per shard.
+/// Derefs to [`SqlDb`] for hand-written SQL. `!Send` by design: create one
+/// per shard.
 pub struct OracleDriver {
-    pool: Rc<Pool>,
+    db: SqlDb<OracleConnect>,
 }
 
 impl OracleDriver {
@@ -32,25 +33,15 @@ impl OracleDriver {
 
     /// Connect from an explicit config with a chosen pool size.
     pub async fn connect_with(cfg: OracleConfig, pool_size: usize) -> Result<Self, OrmError> {
-        let pool = Pool::new(OracleConnect(cfg), pool_size);
-        pool.warm().await?;
-        Ok(Self { pool })
+        Ok(Self { db: SqlDb::open(OracleConnect(cfg), pool_size).await? })
     }
+}
 
-    /// Create `T`'s table if it does not exist.
-    pub async fn ensure_table<T: Entity>(&self) -> Result<(), OrmError> {
-        let mut g = self.pool.acquire().await?;
-        engine::ensure_table::<T, Conn>(&mut g).await
-    }
+impl Deref for OracleDriver {
+    type Target = SqlDb<OracleConnect>;
 
-    /// Run one raw SQL statement or PL/SQL block without binds, committed.
-    pub async fn execute(&self, sql: &str) -> Result<(), OrmError> {
-        let mut g = self.pool.acquire().await?;
-        let r = SqlConn::execute(&mut *g, sql, &[]).await;
-        if matches!(r, Err(OrmError::Connection(_))) {
-            g.poison();
-        }
-        r.map(|_| ())
+    fn deref(&self) -> &Self::Target {
+        &self.db
     }
 }
 
@@ -64,21 +55,15 @@ impl Driver for OracleDriver {
     where
         T: Entity + Serialize + DeserializeOwned + 'static,
     {
-        Box::new(OracleRepository::<T>::new(Rc::clone(&self.pool)))
+        self.db.repository()
     }
 
     fn ping(&self) -> BoxFuture<'_, Result<(), OrmError>> {
-        Box::pin(async move { self.execute("SELECT 1 FROM dual").await })
+        self.db.ping()
     }
 
     fn capabilities(&self) -> DriverCapabilities {
-        DriverCapabilities {
-            transactions: true,
-            raw_query: true,
-            full_text_search: false,
-            json_columns: true,
-            migrations: false,
-        }
+        Driver::capabilities(&self.db)
     }
 }
 
@@ -90,6 +75,6 @@ impl TransactionalDriver for OracleDriver {
         F: FnOnce(OracleTx) -> BoxFuture<'a, Result<R, OrmError>> + 'a,
         R: 'a,
     {
-        Box::pin(kernway_orm_sql::run_transaction(Rc::clone(&self.pool), work))
+        self.db.transaction(work)
     }
 }
