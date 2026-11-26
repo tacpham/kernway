@@ -1,0 +1,28 @@
+[package]
+name        = "kernway-orm-oracle"
+description = "Oracle Database backend for kernway — a self-written thin-protocol driver (TNS/TTC, no Oracle Client), incl. PL/SQL"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+
+[dependencies]
+kernway-orm-core = { workspace = true }
+serde            = { workspace = true }
+thiserror        = { workspace = true }
+rt-core          = { workspace = true }
+rt-net           = { workspace = true }
+# Shared driver plumbing (buffered socket, pool, statement cache).
+kernway-wire     = { workspace = true }
+# Auth crypto (O5LOGON): PBKDF2-HMAC-SHA512, SHA-1/512 and randomness from ring
+# (already in the tree via rustls), AES for the zero-IV CBC Oracle uses, MD5 for
+# the 11g key combine.
+ring  = "0.17"
+aes   = "0.8"
+md-5  = "0.11"
+
+[dev-dependencies]
+serde_json = { workspace = true }
+kernway-wire = { workspace = true }
+
+[lints]
+workspace = true
