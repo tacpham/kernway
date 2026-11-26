@@ -3,7 +3,7 @@
 
 use crate::pool::Pool;
 use crate::protocol::QueryResult;
-use crate::value::{escape_like, filter_literal_for_field, resolve_column_name, row_to_entity};
+use crate::value::{escape_like, filter_literal_for_field, resolve_column_name, cells_to_entity};
 use kernway_orm_core::{
     entity::Entity, error::OrmError, page::Page, query::QueryBuilder, spec::Spec, BoxFuture,
 };
@@ -159,13 +159,15 @@ where
             return Err(err);
         }
         let sql = self.select_sql();
-        match self.run(&sql).await? {
-            QueryResult::Rows { rows, .. } => rows
-                .iter()
-                .map(|r| row_to_entity::<T>(r, T::columns()))
-                .collect(),
-            QueryResult::Ok { .. } => Ok(Vec::new()),
+        let cols = T::columns();
+        let mut g = self.pool.acquire().await?;
+        let r = g
+            .query_with(&sql, |cells| cells_to_entity::<T>(cells, cols))
+            .await;
+        if matches!(r, Err(OrmError::Connection(_))) {
+            g.poison();
         }
+        Ok(r?.into_rows())
     }
 
     async fn fetch_one_run(mut self: Box<Self>) -> Result<Option<T>, OrmError> {

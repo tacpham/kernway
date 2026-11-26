@@ -8,7 +8,7 @@
 
 use crate::protocol::{BindValue, Conn, QueryResult};
 use crate::value::{
-    id_to_binds, is_auto_pk, is_new_auto_entity, json_to_bind, pk_cols, pk_where_ph, row_to_entity,
+    id_to_binds, is_auto_pk, is_new_auto_entity, json_to_bind, pk_cols, pk_where_ph, cells_to_entity,
 };
 use crate::MySqlDialect;
 use kernway_orm_core::{entity::Entity, error::OrmError, ColumnDef, SqlDialect};
@@ -38,11 +38,26 @@ fn placeholders(n: usize) -> String {
     vec!["?"; n].join(", ")
 }
 
-fn rows_to_entities<T: Entity + DeserializeOwned>(result: QueryResult) -> Result<Vec<T>, OrmError> {
-    match result {
-        QueryResult::Rows { rows, .. } => rows.iter().map(|r| row_to_entity::<T>(r, T::columns())).collect(),
-        QueryResult::Ok { .. } => Ok(Vec::new()),
-    }
+/// Run a prepared `SELECT` and deserialize each row into `T` as it arrives.
+async fn select_prepared<T: Entity + DeserializeOwned>(
+    conn: &mut Conn,
+    sql: &str,
+    binds: &[BindValue],
+) -> Result<Vec<T>, OrmError> {
+    let cols = T::columns();
+    Ok(conn
+        .exec_prepared_with(sql, binds, |cells| cells_to_entity::<T>(cells, cols))
+        .await?
+        .into_rows())
+}
+
+/// Run a parameterless `SELECT` (text protocol) and deserialize each row into `T`.
+async fn select_text<T: Entity + DeserializeOwned>(conn: &mut Conn, sql: &str) -> Result<Vec<T>, OrmError> {
+    let cols = T::columns();
+    Ok(conn
+        .query_with(sql, |cells| cells_to_entity::<T>(cells, cols))
+        .await?
+        .into_rows())
 }
 
 /// `CREATE TABLE IF NOT EXISTS` for `T` (no params → text path).
@@ -71,9 +86,7 @@ where
             sql.push_str(suffix);
         }
     }
-    Ok(rows_to_entities::<T>(conn.exec_prepared(&sql, &binds).await?)?
-        .into_iter()
-        .next())
+    Ok(select_prepared::<T>(conn, &sql, &binds).await?.into_iter().next())
 }
 
 /// Load every row (no params → text path).
@@ -82,7 +95,7 @@ where
     T: Entity + DeserializeOwned,
 {
     let sql = format!("SELECT {} FROM `{}`", col_list::<T>(), T::table_name());
-    rows_to_entities::<T>(conn.query(&sql).await?)
+    select_text::<T>(conn, &sql).await
 }
 
 /// Total row count (no params → text path).
@@ -175,7 +188,8 @@ where
             T::table_name(),
             pk_col_name::<T>()
         );
-        rows_to_entities::<T>(conn.exec_prepared(&sql, &[BindValue::UInt(last_id)]).await?)?
+        select_prepared::<T>(conn, &sql, &[BindValue::UInt(last_id)])
+            .await?
             .into_iter()
             .next()
             .ok_or(OrmError::NotFound)
@@ -290,10 +304,7 @@ where
         pk,
         pk
     );
-    rows_to_entities::<T>(
-        conn.exec_prepared(&sql, &[BindValue::UInt(first_id), BindValue::UInt(first_id + n - 1)])
-            .await?,
-    )
+    select_prepared::<T>(conn, &sql, &[BindValue::UInt(first_id), BindValue::UInt(first_id + n - 1)]).await
 }
 
 /// Load many rows by id. Single-column keys use one `WHERE pk IN (?, …)`; a
@@ -326,7 +337,7 @@ where
         pk_col_name::<T>(),
         placeholders(ids.len())
     );
-    rows_to_entities::<T>(conn.exec_prepared(&sql, &binds).await?)
+    select_prepared::<T>(conn, &sql, &binds).await
 }
 
 /// Delete many rows by id. Single-column keys use one `WHERE pk IN (?, …)`; a

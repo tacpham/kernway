@@ -185,6 +185,96 @@ pub enum QueryResult {
     },
 }
 
+/// One result-set cell, borrowed from the packet it arrived in where possible —
+/// decoding a row allocates nothing for its cells.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Cell<'a> {
+    /// SQL `NULL`.
+    Null,
+    /// A text-protocol value, or a binary string / decimal / blob / JSON value:
+    /// the raw bytes as sent.
+    Bytes(&'a [u8]),
+    /// A binary signed integer (`TINY` … `LONGLONG`).
+    Int(i64),
+    /// A binary unsigned integer.
+    UInt(u64),
+    /// A binary `FLOAT`.
+    F32(f32),
+    /// A binary `DOUBLE`.
+    F64(f64),
+    /// A binary `DATE` / `DATETIME` / `TIMESTAMP` / `TIME`, already formatted.
+    Owned(String),
+}
+
+impl Cell<'_> {
+    /// The cell as text, as the text protocol would have sent it (`None` = NULL).
+    pub fn to_text(&self) -> Option<String> {
+        match self {
+            Cell::Null => None,
+            Cell::Bytes(b) => Some(String::from_utf8_lossy(b).into_owned()),
+            Cell::Int(i) => Some(i.to_string()),
+            Cell::UInt(u) => Some(u.to_string()),
+            Cell::F32(f) => Some(f.to_string()),
+            Cell::F64(f) => Some(f.to_string()),
+            Cell::Owned(s) => Some(s.clone()),
+        }
+    }
+}
+
+/// Outcome of a statement whose rows were decoded by a caller-supplied
+/// function (see [`Conn::query_with`] / [`Conn::exec_prepared_with`]).
+#[derive(Debug)]
+pub enum Fetched<R> {
+    /// No result set.
+    Ok {
+        /// Rows affected by the statement.
+        affected_rows: u64,
+        /// Auto-increment value generated, or 0.
+        last_insert_id: u64,
+    },
+    /// A result set: column names and one decoded value per row.
+    Rows {
+        /// Column names in `SELECT` order.
+        columns: Vec<String>,
+        /// What the row function returned for each row.
+        rows: Vec<R>,
+    },
+}
+
+impl<R> Fetched<R> {
+    /// The decoded rows; empty for a statement without a result set.
+    pub fn into_rows(self) -> Vec<R> {
+        match self {
+            Fetched::Rows { rows, .. } => rows,
+            Fetched::Ok { .. } => Vec::new(),
+        }
+    }
+}
+
+impl From<Fetched<Vec<Option<String>>>> for QueryResult {
+    fn from(f: Fetched<Vec<Option<String>>>) -> Self {
+        match f {
+            Fetched::Ok { affected_rows, last_insert_id } => {
+                QueryResult::Ok { affected_rows, last_insert_id }
+            }
+            Fetched::Rows { columns, rows } => QueryResult::Rows { columns, rows },
+        }
+    }
+}
+
+/// A row as text cells — the [`QueryResult`] shape.
+fn cells_to_text(cells: &[Cell<'_>]) -> Result<Vec<Option<String>>, OrmError> {
+    Ok(cells.iter().map(Cell::to_text).collect())
+}
+
+/// Re-type an **empty** cell vector to a new lifetime, keeping its allocation
+/// (an in-place collect: same layout, no element is ever mapped). Lets one
+/// scratch vector serve every row although each row borrows a different packet.
+fn recycle<'b>(mut cells: Vec<Cell<'_>>) -> Vec<Cell<'b>> {
+    cells.clear();
+    cells.into_iter().map(|_| unreachable!("the vector is empty")).collect()
+}
+
 /// Bytes requested from the socket per read: one syscall drains many small
 /// packets (a result set is one packet per row) instead of two reads per packet.
 const READ_CHUNK: usize = 16 * 1024;
@@ -243,6 +333,8 @@ pub struct Conn {
     rlen: usize,
     /// Reused outgoing frame buffer (header + payload).
     wbuf: Vec<u8>,
+    /// Assembly area for a payload split over 16 MiB continuation packets.
+    big: Vec<u8>,
     /// Prepared statements by SQL text, plus their insertion order for eviction.
     stmts: HashMap<String, Stmt>,
     stmt_order: VecDeque<String>,
@@ -269,6 +361,7 @@ impl Conn {
             rpos: 0,
             rlen: 0,
             wbuf: Vec::with_capacity(READ_CHUNK),
+            big: Vec::new(),
             stmts: HashMap::new(),
             stmt_order: VecDeque::new(),
         };
@@ -280,6 +373,7 @@ impl Conn {
     /// from the socket only when needed and up to [`READ_CHUNK`] (or the rest of
     /// a large packet) at a time — so a burst of small packets costs one syscall.
     async fn fill(&mut self, n: usize) -> Result<(), OrmError> {
+        self.release_drained();
         while self.rlen - self.rpos < n {
             // Slide the unconsumed tail to the front before reading more.
             if self.rpos > 0 {
@@ -306,28 +400,9 @@ impl Conn {
 
     // --- Packet framing ---------------------------------------------------
 
-    /// Read one logical packet payload, transparently joining the 16 MiB
-    /// continuation packets MySQL splits large payloads into. The payload is cut
-    /// straight out of the read buffer: one allocation, one copy.
-    async fn read_packet(&mut self) -> Result<Vec<u8>, OrmError> {
-        let mut payload: Option<Vec<u8>> = None;
-        loop {
-            self.fill(4).await?;
-            let h = &self.rbuf[self.rpos..self.rpos + 4];
-            let len = (h[0] as usize) | (h[1] as usize) << 8 | (h[2] as usize) << 16;
-            self.seq = h[3].wrapping_add(1);
-            self.rpos += 4;
-            self.fill(len).await?;
-            let chunk = &self.rbuf[self.rpos..self.rpos + len];
-            match payload.as_mut() {
-                None => payload = Some(chunk.to_vec()),
-                Some(p) => p.extend_from_slice(chunk),
-            }
-            self.rpos += len;
-            if len < 0xFF_FFFF {
-                break;
-            }
-        }
+    /// Once every buffered byte is consumed, rewind the read buffer — and give
+    /// back memory a large packet made it (or the assembly area) grow.
+    fn release_drained(&mut self) {
         if self.rpos == self.rlen {
             self.rpos = 0;
             self.rlen = 0;
@@ -336,7 +411,53 @@ impl Conn {
                 self.rbuf.shrink_to(READ_CHUNK);
             }
         }
-        Ok(payload.unwrap_or_default())
+        if self.big.capacity() > READ_RETAIN {
+            self.big = Vec::new();
+        }
+    }
+
+    /// Read one logical packet payload **in place**: the slice points into the
+    /// read buffer and stays valid until the next read. A payload split over
+    /// 16 MiB continuation packets is joined in a side buffer instead.
+    async fn read_packet_ref(&mut self) -> Result<&[u8], OrmError> {
+        self.fill(4).await?;
+        let mut len = self.take_header();
+        if len < 0xFF_FFFF {
+            self.fill(len).await?;
+            let start = self.rpos;
+            self.rpos += len;
+            return Ok(&self.rbuf[start..start + len]);
+        }
+        self.big.clear();
+        loop {
+            self.fill(len).await?;
+            self.big
+                .extend_from_slice(&self.rbuf[self.rpos..self.rpos + len]);
+            self.rpos += len;
+            if len < 0xFF_FFFF {
+                return Ok(&self.big);
+            }
+            self.fill(4).await?;
+            len = self.take_header();
+        }
+    }
+
+    /// Consume a 4-byte packet header: returns the payload length and advances
+    /// the sequence id.
+    fn take_header(&mut self) -> usize {
+        let h = &self.rbuf[self.rpos..self.rpos + 4];
+        let len = (h[0] as usize) | (h[1] as usize) << 8 | (h[2] as usize) << 16;
+        self.seq = h[3].wrapping_add(1);
+        self.rpos += 4;
+        len
+    }
+
+    /// Read one logical packet as an owned payload (handshake, OK/ERR, the
+    /// first packet of a response) — one allocation, one copy.
+    async fn read_packet(&mut self) -> Result<Vec<u8>, OrmError> {
+        let payload = self.read_packet_ref().await?.to_vec();
+        self.release_drained();
+        Ok(payload)
     }
 
     /// Write one packet, using (and advancing) the current sequence id. The frame
@@ -481,8 +602,18 @@ impl Conn {
 
     // --- Command phase ----------------------------------------------------
 
-    /// Run one textual statement (`COM_QUERY`) and collect its result.
+    /// Run one textual statement (`COM_QUERY`) and collect its result as text.
     pub async fn query(&mut self, sql: &str) -> Result<QueryResult, OrmError> {
+        self.query_with(sql, cells_to_text).await.map(QueryResult::from)
+    }
+
+    /// Run one textual statement (`COM_QUERY`), handing each result row to `row`
+    /// as it is read — decoded straight from the read buffer, so no per-cell
+    /// allocation and no intermediate row representation.
+    pub async fn query_with<R, F>(&mut self, sql: &str, mut row: F) -> Result<Fetched<R>, OrmError>
+    where
+        F: FnMut(&[Cell<'_>]) -> Result<R, OrmError>,
+    {
         // Each command starts a fresh sequence.
         self.seq = 0;
         let mut payload = Vec::with_capacity(sql.len() + 1);
@@ -492,54 +623,60 @@ impl Conn {
 
         let first = self.read_packet().await?;
         match first.first().copied() {
-            Some(0x00) => Ok(parse_ok_packet(&first)),
+            Some(0x00) => Ok(ok_fetched(&first)),
             Some(0xFF) => Err(parse_err_packet(&first)),
             Some(0xFB) => Err(OrmError::Query("LOCAL INFILE not supported".into())),
             _ => {
                 let (col_count, _) = read_lenenc_int(&first, 0)
                     .ok_or_else(|| OrmError::Query("bad column count packet".into()))?;
-                self.read_result_set(col_count as usize).await
+                self.read_rows(col_count as usize, false, &mut row).await
             }
         }
     }
 
-    async fn read_result_set(&mut self, col_count: usize) -> Result<QueryResult, OrmError> {
-        // Column definition packets.
-        let mut columns = Vec::with_capacity(col_count);
-        for _ in 0..col_count {
-            let def = self.read_packet().await?;
-            columns.push(parse_column_name(&def));
-        }
-        // EOF after column defs (we do not set CLIENT_DEPRECATE_EOF).
-        let after_cols = self.read_packet().await?;
-        if !is_eof(&after_cols) {
-            // Some servers may send a row straight away; treat it as the first row.
-            let mut rows = Vec::new();
-            rows.push(parse_text_row(&after_cols, col_count)?);
-            self.collect_rows(col_count, &mut rows).await?;
-            return Ok(QueryResult::Rows { columns, rows });
-        }
-        let mut rows = Vec::new();
-        self.collect_rows(col_count, &mut rows).await?;
-        Ok(QueryResult::Rows { columns, rows })
-    }
-
-    async fn collect_rows(
+    /// Read a result set — column definitions, EOF, rows, EOF — decoding each
+    /// row (text or binary protocol) in place and handing it to `row`.
+    async fn read_rows<R, F>(
         &mut self,
         col_count: usize,
-        rows: &mut Vec<Vec<Option<String>>>,
-    ) -> Result<(), OrmError> {
+        binary: bool,
+        row: &mut F,
+    ) -> Result<Fetched<R>, OrmError>
+    where
+        F: FnMut(&[Cell<'_>]) -> Result<R, OrmError>,
+    {
+        let mut metas = Vec::with_capacity(col_count);
+        for _ in 0..col_count {
+            metas.push(parse_col_meta(self.read_packet_ref().await?));
+        }
+        let columns: Vec<String> = metas.iter().map(|m| m.name.clone()).collect();
+
+        let mut rows = Vec::new();
+        let mut scratch: Vec<Cell<'static>> = Vec::with_capacity(col_count);
+        // EOF after the column definitions (CLIENT_DEPRECATE_EOF is not set). A
+        // text result set that skips it starts with its first row instead.
+        let after_cols = self.read_packet_ref().await?;
+        if !binary && !is_eof(after_cols) {
+            let mut cells = recycle(std::mem::take(&mut scratch));
+            decode_row(after_cols, binary, &metas, &mut cells)?;
+            rows.push(row(&cells)?);
+            scratch = recycle(cells);
+        }
         loop {
-            let packet = self.read_packet().await?;
-            if is_eof(&packet) {
+            let packet = self.read_packet_ref().await?;
+            if is_eof(packet) {
                 break;
             }
             if packet.first() == Some(&0xFF) {
-                return Err(parse_err_packet(&packet));
+                return Err(parse_err_packet(packet));
             }
-            rows.push(parse_text_row(&packet, col_count)?);
+            let mut cells = recycle(std::mem::take(&mut scratch));
+            decode_row(packet, binary, &metas, &mut cells)?;
+            rows.push(row(&cells)?);
+            scratch = recycle(cells);
         }
-        Ok(())
+        self.release_drained();
+        Ok(Fetched::Rows { columns, rows })
     }
 
     // --- Prepared statements (binary protocol) ---------------------------
@@ -558,17 +695,33 @@ impl Conn {
         sql: &str,
         params: &[BindValue],
     ) -> Result<QueryResult, OrmError> {
+        self.exec_prepared_with(sql, params, cells_to_text)
+            .await
+            .map(QueryResult::from)
+    }
+
+    /// [`exec_prepared`](Self::exec_prepared), handing each result row to `row`
+    /// as it is read (decoded in place from the binary protocol).
+    pub async fn exec_prepared_with<R, F>(
+        &mut self,
+        sql: &str,
+        params: &[BindValue],
+        mut row: F,
+    ) -> Result<Fetched<R>, OrmError>
+    where
+        F: FnMut(&[Cell<'_>]) -> Result<R, OrmError>,
+    {
         let cached = self.stmts.get(sql).copied();
         let stmt = match cached {
             Some(stmt) => stmt,
             None => self.prepare_cached(sql).await?,
         };
-        match self.stmt_execute(stmt.id, stmt.num_params, params).await? {
+        match self.stmt_execute(stmt.id, stmt.num_params, params, &mut row).await? {
             Exec::Done(result) => Ok(result),
             Exec::Stale if cached.is_some() => {
                 self.forget_stmt(sql);
                 let stmt = self.prepare_cached(sql).await?;
-                match self.stmt_execute(stmt.id, stmt.num_params, params).await? {
+                match self.stmt_execute(stmt.id, stmt.num_params, params, &mut row).await? {
                     Exec::Done(result) => Ok(result),
                     Exec::Stale => Err(OrmError::Query(
                         "MySQL rejected a freshly prepared statement".into(),
@@ -645,12 +798,16 @@ impl Conn {
         Ok((stmt_id, num_params))
     }
 
-    async fn stmt_execute(
+    async fn stmt_execute<R, F>(
         &mut self,
         stmt_id: u32,
         num_params: u16,
         params: &[BindValue],
-    ) -> Result<Exec, OrmError> {
+        row: &mut F,
+    ) -> Result<Exec<R>, OrmError>
+    where
+        F: FnMut(&[Cell<'_>]) -> Result<R, OrmError>,
+    {
         if params.len() != num_params as usize {
             return Err(OrmError::Query(format!(
                 "prepared statement expects {num_params} params, got {}",
@@ -688,7 +845,7 @@ impl Conn {
 
         let first = self.read_packet().await?;
         match first.first().copied() {
-            Some(0x00) => Ok(Exec::Done(parse_ok_packet(&first))),
+            Some(0x00) => Ok(Exec::Done(ok_fetched(&first))),
             Some(0xFF) => match err_code(&first) {
                 Some(ER_UNKNOWN_STMT_HANDLER | ER_NEED_REPREPARE) => Ok(Exec::Stale),
                 _ => Err(parse_err_packet(&first)),
@@ -696,36 +853,11 @@ impl Conn {
             _ => {
                 let (col_count, _) = read_lenenc_int(&first, 0)
                     .ok_or_else(|| OrmError::Query("bad column count packet".into()))?;
-                self.read_binary_result_set(col_count as usize)
+                self.read_rows(col_count as usize, true, row)
                     .await
                     .map(Exec::Done)
             }
         }
-    }
-
-    async fn read_binary_result_set(&mut self, col_count: usize) -> Result<QueryResult, OrmError> {
-        let mut metas = Vec::with_capacity(col_count);
-        let mut columns = Vec::with_capacity(col_count);
-        for _ in 0..col_count {
-            let def = self.read_packet().await?;
-            let meta = parse_col_meta(&def);
-            columns.push(meta.name.clone());
-            metas.push(meta);
-        }
-        self.read_packet().await?; // EOF after column defs
-
-        let mut rows = Vec::new();
-        loop {
-            let packet = self.read_packet().await?;
-            if is_eof(&packet) {
-                break;
-            }
-            if packet.first() == Some(&0xFF) {
-                return Err(parse_err_packet(&packet));
-            }
-            rows.push(parse_binary_row(&packet, &metas)?);
-        }
-        Ok(QueryResult::Rows { columns, rows })
     }
 
     async fn stmt_close(&mut self, stmt_id: u32) -> Result<(), OrmError> {
@@ -909,6 +1041,16 @@ fn is_eof(p: &[u8]) -> bool {
     p.first() == Some(&0xFE) && p.len() < 9
 }
 
+/// An `OK` packet as a row-less [`Fetched`].
+fn ok_fetched<R>(p: &[u8]) -> Fetched<R> {
+    match parse_ok_packet(p) {
+        QueryResult::Ok { affected_rows, last_insert_id } => {
+            Fetched::Ok { affected_rows, last_insert_id }
+        }
+        QueryResult::Rows { .. } => unreachable!("an OK packet has no rows"),
+    }
+}
+
 fn parse_ok_packet(p: &[u8]) -> QueryResult {
     // 0x00, lenenc affected_rows, lenenc last_insert_id, …
     let mut i = 1usize;
@@ -919,9 +1061,9 @@ fn parse_ok_packet(p: &[u8]) -> QueryResult {
 }
 
 /// Outcome of executing a (possibly cached) prepared statement.
-enum Exec {
+enum Exec<R> {
     /// The statement ran; here is its result.
-    Done(QueryResult),
+    Done(Fetched<R>),
     /// The server no longer knows this statement id — re-prepare and retry.
     Stale,
 }
@@ -959,40 +1101,47 @@ fn parse_err_packet(p: &[u8]) -> OrmError {
     }
 }
 
-fn parse_column_name(def: &[u8]) -> String {
-    // ColumnDefinition41: catalog, schema, table, org_table, name, org_name …
-    // all length-encoded strings. The 5th lenenc string is the column name.
-    let mut i = 0usize;
-    let mut name = String::new();
-    for field in 0..5 {
-        match read_lenenc_str(def, i) {
-            Some((bytes, next)) => {
-                if field == 4 {
-                    name = String::from_utf8_lossy(bytes).to_string();
-                }
-                i = next;
-            }
-            None => break,
-        }
+/// Decode one result row (text or binary protocol) into `cells`.
+fn decode_row<'a>(
+    p: &'a [u8],
+    binary: bool,
+    metas: &[ColMeta],
+    cells: &mut Vec<Cell<'a>>,
+) -> Result<(), OrmError> {
+    if binary {
+        decode_binary_cells(p, metas, cells)
+    } else {
+        decode_text_cells(p, metas.len(), cells)
     }
-    name
 }
 
-fn parse_text_row(p: &[u8], col_count: usize) -> Result<Vec<Option<String>>, OrmError> {
+/// Decode a text-protocol row into `cells`, borrowing each value from `p`.
+fn decode_text_cells<'a>(
+    p: &'a [u8],
+    col_count: usize,
+    cells: &mut Vec<Cell<'a>>,
+) -> Result<(), OrmError> {
     let mut i = 0usize;
-    let mut out = Vec::with_capacity(col_count);
     for _ in 0..col_count {
         if p.get(i) == Some(&0xFB) {
-            out.push(None);
+            cells.push(Cell::Null);
             i += 1;
         } else {
             let (bytes, next) =
                 read_lenenc_str(p, i).ok_or_else(|| OrmError::Query("truncated text row".into()))?;
-            out.push(Some(String::from_utf8_lossy(bytes).to_string()));
+            cells.push(Cell::Bytes(bytes));
             i = next;
         }
     }
-    Ok(out)
+    Ok(())
+}
+
+/// A text-protocol row as owned strings (tests and the [`QueryResult`] shape).
+#[cfg(test)]
+fn parse_text_row(p: &[u8], col_count: usize) -> Result<Vec<Option<String>>, OrmError> {
+    let mut cells = Vec::with_capacity(col_count);
+    decode_text_cells(p, col_count, &mut cells)?;
+    cells_to_text(&cells)
 }
 
 /// Read a length-encoded integer at `i`; returns (value, bytes_consumed).
@@ -1159,7 +1308,12 @@ fn parse_col_meta(def: &[u8]) -> ColMeta {
     ColMeta { name, col_type, unsigned: flags & 0x0020 != 0 }
 }
 
-fn parse_binary_row(packet: &[u8], metas: &[ColMeta]) -> Result<Vec<Option<String>>, OrmError> {
+/// Decode a binary-protocol row into `cells`; strings borrow from `packet`.
+fn decode_binary_cells<'a>(
+    packet: &'a [u8],
+    metas: &[ColMeta],
+    cells: &mut Vec<Cell<'a>>,
+) -> Result<(), OrmError> {
     // 0x00 header, then a null bitmap of (num_cols + 7 + 2) / 8 bytes (offset 2).
     let n = metas.len();
     let bitmap_len = (n + 7 + 2) / 8;
@@ -1167,62 +1321,61 @@ fn parse_binary_row(packet: &[u8], metas: &[ColMeta]) -> Result<Vec<Option<Strin
         .get(1..1 + bitmap_len)
         .ok_or_else(|| OrmError::Query("short binary row".into()))?;
     let mut i = 1 + bitmap_len;
-    let mut out = Vec::with_capacity(n);
     for (col, meta) in metas.iter().enumerate() {
         let is_null = bitmap[(col + 2) / 8] & (1 << ((col + 2) % 8)) != 0;
         if is_null {
-            out.push(None);
+            cells.push(Cell::Null);
             continue;
         }
         let (value, next) = decode_binary_value(packet, i, meta)?;
-        out.push(Some(value));
+        cells.push(value);
         i = next;
     }
-    Ok(out)
+    Ok(())
 }
 
-/// Decode one binary value to its text form, so the existing column-typed
-/// text→JSON mapping can turn it into the entity field.
-fn decode_binary_value(p: &[u8], i: usize, meta: &ColMeta) -> Result<(String, usize), OrmError> {
+/// Decode one binary value. Numbers stay numbers (no text round trip); strings
+/// and blobs borrow from the packet; temporal values are formatted as text.
+fn decode_binary_value<'a>(p: &'a [u8], i: usize, meta: &ColMeta) -> Result<(Cell<'a>, usize), OrmError> {
     let short = || OrmError::Query("truncated binary value".into());
+    let int = |raw: u64, signed: i64| if meta.unsigned { Cell::UInt(raw) } else { Cell::Int(signed) };
     match meta.col_type {
         MYSQL_TYPE_TINY => {
             let b = *p.get(i).ok_or_else(short)?;
-            let s = if meta.unsigned { (b as u64).to_string() } else { (b as i8 as i64).to_string() };
-            Ok((s, i + 1))
+            Ok((int(u64::from(b), i64::from(b as i8)), i + 1))
         }
         MYSQL_TYPE_SHORT | MYSQL_TYPE_YEAR => {
             let b = p.get(i..i + 2).ok_or_else(short)?;
             let raw = u16::from_le_bytes([b[0], b[1]]);
-            let s = if meta.unsigned { raw.to_string() } else { (raw as i16 as i64).to_string() };
-            Ok((s, i + 2))
+            Ok((int(u64::from(raw), i64::from(raw as i16)), i + 2))
         }
         MYSQL_TYPE_LONG | MYSQL_TYPE_INT24 => {
             let b = p.get(i..i + 4).ok_or_else(short)?;
             let raw = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-            let s = if meta.unsigned { raw.to_string() } else { (raw as i32 as i64).to_string() };
-            Ok((s, i + 4))
+            Ok((int(u64::from(raw), i64::from(raw as i32)), i + 4))
         }
         MYSQL_TYPE_LONGLONG => {
             let b = p.get(i..i + 8).ok_or_else(short)?;
             let raw = u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
-            let s = if meta.unsigned { raw.to_string() } else { (raw as i64).to_string() };
-            Ok((s, i + 8))
+            Ok((int(raw, raw as i64), i + 8))
         }
         MYSQL_TYPE_FLOAT => {
             let b = p.get(i..i + 4).ok_or_else(short)?;
-            Ok((f32::from_le_bytes([b[0], b[1], b[2], b[3]]).to_string(), i + 4))
+            Ok((Cell::F32(f32::from_le_bytes([b[0], b[1], b[2], b[3]])), i + 4))
         }
         MYSQL_TYPE_DOUBLE => {
             let b = p.get(i..i + 8).ok_or_else(short)?;
-            Ok((f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]).to_string(), i + 8))
+            let f = f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
+            Ok((Cell::F64(f), i + 8))
         }
-        MYSQL_TYPE_DATE | MYSQL_TYPE_DATETIME | MYSQL_TYPE_TIMESTAMP => decode_datetime(p, i),
-        MYSQL_TYPE_TIME => decode_time(p, i),
+        MYSQL_TYPE_DATE | MYSQL_TYPE_DATETIME | MYSQL_TYPE_TIMESTAMP => {
+            decode_datetime(p, i).map(|(s, next)| (Cell::Owned(s), next))
+        }
+        MYSQL_TYPE_TIME => decode_time(p, i).map(|(s, next)| (Cell::Owned(s), next)),
         // DECIMAL / NEWDECIMAL / VARCHAR / VAR_STRING / STRING / BLOB / JSON / BIT / …
         _ => {
             let (bytes, next) = read_lenenc_str(p, i).ok_or_else(short)?;
-            Ok((String::from_utf8_lossy(bytes).to_string(), next))
+            Ok((Cell::Bytes(bytes), next))
         }
     }
 }
@@ -1627,5 +1780,44 @@ mod tests {
                 .expect("wrong password must fail");
             assert!(err.to_string().contains("only does over TLS"), "{err}");
         });
+    }
+
+    #[test]
+    fn recycle_keeps_the_allocation_across_lifetimes() {
+        let packet = [1u8, b'x'];
+        let mut cells: Vec<Cell<'_>> = Vec::with_capacity(8);
+        cells.push(Cell::Bytes(&packet[1..]));
+        let ptr = cells.as_ptr() as usize;
+        let back: Vec<Cell<'static>> = recycle(cells);
+        assert!(back.is_empty());
+        assert_eq!(back.capacity(), 8);
+        assert_eq!(back.as_ptr() as usize, ptr, "same buffer, no new allocation");
+    }
+
+    #[test]
+    fn binary_cells_keep_numbers_as_numbers() {
+        // Header 0x00, null bitmap (offset 2) marking column 2 NULL, then an
+        // unsigned TINY 200, a signed LONGLONG -5, and a VAR_STRING "hi".
+        let metas = [
+            ColMeta { name: "a".into(), col_type: MYSQL_TYPE_TINY, unsigned: true },
+            ColMeta { name: "b".into(), col_type: MYSQL_TYPE_LONGLONG, unsigned: false },
+            ColMeta { name: "c".into(), col_type: MYSQL_TYPE_LONG, unsigned: false },
+            ColMeta { name: "d".into(), col_type: MYSQL_TYPE_VAR_STRING, unsigned: false },
+        ];
+        let mut p = vec![0x00, 0b0001_0000];
+        p.push(200);
+        p.extend_from_slice(&(-5i64).to_le_bytes());
+        p.extend_from_slice(&[2, b'h', b'i']);
+        let mut cells = Vec::new();
+        decode_binary_cells(&p, &metas, &mut cells).unwrap();
+        assert_eq!(
+            cells,
+            [Cell::UInt(200), Cell::Int(-5), Cell::Null, Cell::Bytes(b"hi")]
+        );
+        // The text view matches what the text protocol would have sent.
+        assert_eq!(cells_to_text(&cells).unwrap(), [
+            Some("200".to_string()), Some("-5".to_string()), None, Some("hi".to_string())
+        ]);
+        assert_eq!(Cell::F32(0.1).to_text().as_deref(), Some("0.1"), "FLOAT keeps f32 formatting");
     }
 }
