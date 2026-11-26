@@ -254,11 +254,11 @@ fn opening_never_fails_on_a_lock_held_for_a_moment() {
     // while others already write, each with a 1 ms busy timeout: opening
     // waits out those brief locks itself; only statements use the timeout.
     let dir = Dir::new("open-race");
-    let path = dir.file("race.db");
     for round in 0..5 {
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("db-wal"));
-        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+        // A new file each round: the previous round's connections close on
+        // their own threads, and deleting a WAL database under a connection
+        // still closing is a disk I/O error by design.
+        let path = dir.file(&format!("race{round}.db"));
         let threads: Vec<_> = (0..8)
             .map(|i| {
                 let path = path.clone();
