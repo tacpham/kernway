@@ -69,8 +69,8 @@ impl Blowfish {
     /// variant used inside the cost loop. `key` bytes are cycled into the P-array.
     fn expand(&mut self, salt: &[u8; 16], key: &[u8]) {
         let mut kj = 0usize;
-        for i in 0..P_LEN {
-            self.p[i] ^= stream_word(key, &mut kj);
+        for p in &mut self.p {
+            *p ^= stream_word(key, &mut kj);
         }
         let mut sj = 0usize;
         let mut l = 0u32;

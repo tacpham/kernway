@@ -108,7 +108,9 @@ pub fn on_interrupt(callback: impl FnOnce() + Send + 'static) -> io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::sync::mpsc;
+    #[cfg(unix)]
     use std::time::Duration;
 
     #[test]

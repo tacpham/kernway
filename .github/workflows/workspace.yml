@@ -28,10 +28,12 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # --all-features: code behind a feature (drivers, Redis backends,
+      # Meilisearch, presence, …) is built, linted and tested too.
       - name: Clippy (warnings are errors)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
       - name: Every crate's tests
-        run: cargo test --workspace
+        run: cargo test --workspace --all-features
 
   services:
     name: service-backed tests (Redis, Meilisearch, network)
@@ -60,6 +62,11 @@ jobs:
         run: for _ in $(seq 1 30); do curl -fs http://127.0.0.1:7700/health && break; sleep 2; done
       - name: The ignored tests, with their services
         shell: bash
-        run: >
-          cargo test -p kernway-redis -p kernway-security -p kernway-orm-meilisearch
-          -p kernway-dns -p kernway-http-client --lib --tests -- --ignored --test-threads=1
+        run: |
+          CRATES="-p kernway-redis -p kernway-security -p kernway-orm-meilisearch -p kernway-dns -p kernway-http-client"
+          want=$(cargo test $CRATES --all-features --lib --tests -- --ignored --list 2>/dev/null | grep -c ': test$')
+          cargo test $CRATES --all-features --lib --tests -- --ignored --test-threads=1 2>&1 | tee services.log
+          ran=$(grep -E '^test result' services.log | awk '{p+=$4} END{print p}')
+          echo "ignored tests: $want, passed: $ran"
+          # Green must mean they all ran: a test compiled out or skipped is a failure.
+          test "$ran" -eq "$want" && test "$want" -ge 30
