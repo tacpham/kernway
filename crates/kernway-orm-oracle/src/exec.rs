@@ -1107,7 +1107,7 @@ impl Conn {
         rows: &[&[Bind]],
         autocommit: bool,
         sink: &mut RowSink<'_>,
-        mut open: Option<&mut Option<OpenCursor>>,
+        open: Option<&mut Option<OpenCursor>>,
     ) -> Result<Executed, OrmError> {
         let kind = stmt::classify(sql);
         let names = stmt::bind_names(sql, kind);
@@ -1193,7 +1193,7 @@ impl Conn {
             emit!(std::mem::take(&mut resp.rows));
         }
         if kind == Kind::Query {
-            if let Some(slot) = open.as_deref_mut() {
+            if let Some(slot) = open {
                 match &status.error {
                     Some(e) if e.code == ERR_NO_DATA_FOUND => {}
                     Some(e) => {
