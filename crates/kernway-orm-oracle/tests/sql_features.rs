@@ -127,7 +127,6 @@ fn unsupported_types_are_refused_cleanly() {
             "SELECT kwo_point(1, 2) FROM dual",
             "SELECT XMLTYPE('<a>1</a>') FROM dual",
             "SELECT BFILENAME('DATA_PUMP_DIR', 'x') FROM dual",
-            "SELECT CURSOR(SELECT 1 FROM dual) FROM dual",
         ] {
             let e = db.query(sql, &[]).await.expect_err(sql);
             assert!(matches!(e, OrmError::Unsupported(_)), "{sql}: {e}");
@@ -533,5 +532,45 @@ END;
         assert_eq!(r.out[0], Value::Text("ab".repeat(40_000)));
         let r = db.call("kwo_lob.grow", &[CallArg::InOut(text.clone().into())]).await.unwrap();
         assert_eq!(r.out[0], Value::Text(text.repeat(2)));
+    });
+}
+
+#[test]
+fn nested_cursor_columns_come_back_as_result_sets() {
+    let Some(url) = url() else { return eprintln!("skip: KERNWAY_ORACLE_HOST not set") };
+    run(async move {
+        let db = OracleDriver::connect_with(kernway_orm_oracle::OracleConfig::from_url(&url).unwrap(), 1).await.unwrap();
+        // 120 outer rows (several fetch rounds), each with its own cursor.
+        let r = db
+            .query(
+                "SELECT d.n, CURSOR(SELECT LEVEL * d.n AS m, 'x' || LEVEL AS s FROM dual CONNECT BY LEVEL <= 3) AS c
+                   FROM (SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= 120) d ORDER BY d.n",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.rows.len(), 120);
+        for (i, row) in r.rows.iter().enumerate() {
+            let n = i as i64 + 1;
+            assert_eq!(row[0], Value::Int(n));
+            let Value::Rows(inner) = &row[1] else { panic!("row {n}: {:?}", row[1]) };
+            assert_eq!(inner.columns, ["M", "S"]);
+            let ms: Vec<i64> = inner.rows.iter().map(|r| r[0].as_i64().unwrap()).collect();
+            assert_eq!(ms, [n, 2 * n, 3 * n]);
+            assert_eq!(inner.rows[2][1].as_str(), Some("x3"));
+        }
+        // An empty nested cursor, and one inside a REF CURSOR from PL/SQL.
+        let r = db.query("SELECT CURSOR(SELECT 1 FROM dual WHERE 1 = 0) AS c FROM dual", &[]).await.unwrap();
+        let Value::Rows(empty) = &r.rows[0][0] else { panic!() };
+        assert!(empty.rows.is_empty());
+        let r = db
+            .call_function(
+                "kwo_nested_fn",
+                OutKind::Cursor,
+                &[],
+            )
+            .await;
+        assert!(r.is_err(), "no such function: the session stays usable");
+        assert_eq!(db.query_scalar("SELECT 7 FROM dual", &[]).await.unwrap(), Value::Int(7));
     });
 }

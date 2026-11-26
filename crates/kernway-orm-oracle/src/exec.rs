@@ -449,6 +449,7 @@ fn unsupported_column(cols: &[Column]) -> Option<&Column> {
                 c.ora_type,
                 VARCHAR | NUMBER | BINARY_INTEGER | LONG | DATE | RAW | LONG_RAW | CHAR | BINARY_FLOAT
                     | BINARY_DOUBLE | TIMESTAMP | TIMESTAMP_TZ | TIMESTAMP_LTZ | BOOLEAN | JSON | VECTOR | INTERVAL_YM | INTERVAL_DS | ROWID | UROWID
+                    | CURSOR
             )
     })
 }
@@ -576,9 +577,9 @@ struct Response {
     cursors: Vec<(usize, u16, Vec<Column>)>,
     /// Implicit result sets (`DBMS_SQL.RETURN_RESULT`): cursor id, columns.
     implicit: Vec<(u16, Vec<Column>)>,
-    /// Nested cursors (`CURSOR(…)` columns) the server opened: closed, as
-    /// they are not supported.
-    nested: Vec<u16>,
+    /// Nested cursors (`CURSOR(…)` columns) the server opened, in the order
+    /// their placeholders appear in `rows`: id and columns.
+    nested: Vec<(u16, Vec<Column>)>,
     status: CallStatus,
     flush_out_binds: bool,
 }
@@ -767,7 +768,7 @@ fn skip_bytes_with_length(r: &mut Reader<'_>) -> PResult<()> {
     Ok(())
 }
 
-fn read_column(r: &mut Reader<'_>, c: &Column, fv: u8, nested: &mut Vec<u16>) -> PResult<Value> {
+fn read_column(r: &mut Reader<'_>, c: &Column, fv: u8, nested: &mut Vec<(u16, Vec<Column>)>) -> PResult<Value> {
     use ora_type::*;
     let (t, csfrm) = c.wire();
     if c.buffer_size == 0 && !matches!(t, LONG | LONG_RAW | UROWID) {
@@ -794,10 +795,12 @@ fn read_column(r: &mut Reader<'_>, c: &Column, fv: u8, nested: &mut Vec<u16>) ->
                 return Ok(Value::Null);
             }
             CURSOR => {
+                // A nested cursor: its columns and id; the caller fetches
+                // its rows into this placeholder (a result set without columns).
                 r.u8()?;
-                parse_describe(r, fv)?;
-                nested.push(r.ub2()?);
-                return Ok(Value::Null);
+                let cols = parse_describe(r, fv)?;
+                nested.push((r.ub2()?, cols));
+                return Ok(Value::Cursor(ResultSet::default()));
             }
             _ => {}
         }
@@ -1357,7 +1360,18 @@ impl Conn {
     async fn read_call(&mut self, columns: Option<&[Column]>, binds: &[Bind], prev_row: &[Value]) -> Result<Response, OrmError> {
         let (fv, eor) = (self.field_version, self.end_of_response());
         let mut r = self.read_response(|b| parse_response(b, fv, eor, columns, binds, prev_row)).await?;
-        for id in std::mem::take(&mut r.nested) {
+        // Nested cursors: fetch each to the end into its placeholder.
+        let mut nested = std::mem::take(&mut r.nested).into_iter();
+        for row in &mut r.rows {
+            for v in row.iter_mut() {
+                if matches!(v, Value::Cursor(rs) if rs.columns.is_empty()) {
+                    if let Some((id, cols)) = nested.next() {
+                        *v = Value::Cursor(Box::pin(self.fetch_ref_cursor(id, cols)).await?);
+                    }
+                }
+            }
+        }
+        for (id, _) in nested {
             self.queue_close(id);
         }
         Ok(r)
