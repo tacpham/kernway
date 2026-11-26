@@ -315,7 +315,11 @@ impl SqlConn for SqliteConn {
     /// of one failing at its first write. A read-only database begins plain.
     async fn begin(&mut self) -> Result<(), OrmError> {
         let sql = if self.read_only { "BEGIN" } else { "BEGIN IMMEDIATE" };
-        self.simple(sql).await
+        self.run(move |ctx| {
+            ctx.sessions_for_new_transaction();
+            ctx.conn.execute_batch(sql).map_err(map_err)
+        })
+        .await
     }
 
     async fn commit(&mut self) -> Result<(), OrmError> {

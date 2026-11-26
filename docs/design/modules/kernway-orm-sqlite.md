@@ -51,9 +51,24 @@ URL forms: `sqlite::memory:`, `sqlite:relative.db`, `sqlite://relative.db`,
 `sqlite:///abs/path.db`, `sqlite:///C:/data/app.db`, a bare path; options
 `?mode=ro|rw|rwc&journal_mode=…&busy_timeout=<ms>&foreign_keys=on|off&synchronous=…&pool=<n>`.
 
+## SQLite-only features
+
+- **Change capture** (session extension): `track_changes(tables, |tx| …)` runs a
+  transaction and returns what it changed as a `Changeset` (bytes to ship);
+  `apply_changeset(cs, OnConflict::{Abort, Skip, Replace})` replays it
+  elsewhere; `invert`, `concat`, `operations`; `track_patch` for patchsets.
+  The session lives on the transaction's connection
+  (`kernway_orm_sql::run_transaction_on`); an abandoned capture is dropped when
+  that connection next begins a transaction.
+- **Native extensions**: `unsafe SqliteConfig::extension(path, entry_point)`
+  loads into every connection; SQL's own `load_extension()` stays refused.
+  Proven with `tests/ext`, a real extension the test builds (a separate
+  workspace, so rusqlite's `loadable_extension` feature never reaches the
+  driver).
+- Incremental BLOB I/O, change / commit / rollback hooks, serialize /
+  `from_bytes`, online backup, Rust scalar functions, FTS5, JSON.
+
 ## Not available
 
 - Stored procedures: SQLite has none — `call()` is `Unsupported`; register a
   Rust function and call it from SQL or with `call_function`.
-- Loadable extensions and the session extension: not exposed yet (listed as
-  gaps in the acceptance report).

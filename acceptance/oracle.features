@@ -31,7 +31,8 @@ Types | BFILE columns: the server file read through its locator (open / read / c
 Types | Object types (nested), VARRAY / nested tables (of scalars and objects, with NULLs), XMLType (inline and as a CLOB) in query results; LOB / date / BOOLEAN attributes; mapped onto nested structs | objects_collections_and_xmltype_columns_decode
 Types | TIMESTAMP WITH TIME ZONE in a named region: local time, offset at that instant (daylight saving) and IANA region name, computed by the server (region ids from V$TIMEZONE_NAMES); columns and PL/SQL results — beyond python-oracledb thin, which refuses them | timestamps_in_named_regions_come_back_as_the_server_computes_them
 
-ORM (shared layer) | Shared conformance suite (CRUD, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL, joins/aggregates, execute_many failure semantics, server cursors) | oracle_conforms
+ORM (shared layer) | A transaction abandoned half-way (timeout) commits nothing and never hands an open transaction to the next caller | oracle_conforms
+ORM (shared layer) | Shared conformance suite (CRUD, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL, joins/aggregates, execute_many failure semantics, server cursors, cancelled transactions) | oracle_conforms
 ORM (shared layer) | Select builder: INNER / LEFT JOIN, WHERE on any joined entity, GROUP BY, COUNT/COUNT DISTINCT/SUM/AVG/MIN/MAX, HAVING, ORDER BY, OFFSET/FETCH, counting groups, entity pairs from a join | oracle_conforms
 ORM (shared layer) | Results into any struct / tuple by column name (no entity needed), per-field conversion | oracle_conforms
 

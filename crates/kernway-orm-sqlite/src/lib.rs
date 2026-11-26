@@ -37,6 +37,7 @@
 //! is `Unsupported`. Register Rust functions instead ([`SqliteConfig::function`])
 //! and call them from SQL or with `call_function`.
 
+mod changeset;
 mod config;
 mod conn;
 mod dialect;
@@ -45,6 +46,7 @@ mod oneshot;
 mod worker;
 
 pub use config::{Change, ChangeKind, FunctionBody, JournalMode, Location, OpenMode, ScalarFunction, SqliteConfig, Synchronous};
+pub use changeset::{Applied, ChangeFormat, ChangeOp, Changeset, OnConflict};
 pub use conn::SqliteConn;
 pub use dialect::SqliteDialect;
 pub use driver::{SqliteConnect, SqliteDriver};

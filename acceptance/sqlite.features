@@ -27,7 +27,8 @@ Types | Values typed by declared column type: BOOLEAN, DATE, DATETIME/TIMESTAMP,
 Types | Parameters: count checked, u64 beyond i64 refused (no silent rounding), arrays / objects bound as JSON text | parameters_are_checked, values_are_typed_by_the_declared_column_type
 Types | Errors: UNIQUE / PRIMARY KEY violations name the column (incl. multi-column keys); foreign key violations; NOT NULL / CHECK as query errors | unique_violations_name_the_column, a_file_database_persists_uses_wal_and_enforces_foreign_keys
 
-ORM (shared layer) | Shared conformance suite (CRUD, values, batch, query builder, binary and long text, unique violation, transactions, row locks, raw SQL, joins/aggregates, execute_many failure semantics, cursors) | sqlite_conforms
+ORM (shared layer) | Shared conformance suite (CRUD, values, batch, query builder, binary and long text, unique violation, transactions, row locks, raw SQL, joins/aggregates, execute_many failure semantics, cursors, cancelled transactions) | sqlite_conforms
+ORM (shared layer) | A transaction abandoned half-way (timeout) commits nothing and never hands an open transaction to the next caller | sqlite_conforms
 ORM (shared layer) | Batch insert with generated keys (one multi-row INSERT) | sqlite_conforms
 ORM (shared layer) | Select builder: INNER / LEFT JOIN, GROUP BY, aggregates, HAVING, ORDER BY, LIMIT / OFFSET (incl. OFFSET without LIMIT) | sqlite_conforms
 ORM (shared layer) | Transactions: commit, rollback on error, hand-written SQL inside them | sqlite_conforms
@@ -48,8 +49,11 @@ SQLite features | Stored procedures | N/A: SQLite has no procedural language —
 SQLite features | Incremental BLOB I/O: a 5 MiB BLOB filled 64 KiB at a time in place, a piece read across chunks; never grows; names are not SQL | incremental_blob_io_reads_and_writes_pieces_in_place
 SQLite features | Change hooks: every inserted / updated / deleted row through any pooled connection, commits and rollbacks | change_hooks_report_every_row_and_transaction_end
 SQLite features | Serialize a whole database to bytes (a valid database file) and open an in-memory copy from bytes (WAL images included) | a_database_serializes_to_bytes_and_opens_from_them
-SQLite features | Loadable extensions (load_extension) | GAP: not exposed — loading native code is unsafe, and there is no portable test extension to prove it on Linux / macOS / Windows yet
-SQLite features | Session extension (changesets / patchsets) | GAP: not exposed — needs SQLite built with SQLITE_ENABLE_SESSION
+SQLite features | Native extensions loaded into every connection (a real extension built by the test: .so / .dylib / .dll), named entry points, load failures fail the open; SQL's own load_extension() stays refused | a_native_extension_is_loaded_into_every_connection, a_named_entry_point_and_load_failures
+SQLite features | Change capture (session extension): a transaction's changes as a changeset, replayed on another database, only tracked tables, nothing from before / after | a_transaction_recorded_on_one_database_replays_on_another
+SQLite features | Changesets inverted to undo; patchsets (smaller, not invertible); concatenated into their net effect | the_inverse_undoes_the_transaction, patchsets_are_smaller_and_changesets_concatenate
+SQLite features | Applying with conflicts: abort (nothing applied), skip, replace — conflicts counted | conflicts_abort_skip_or_replace
+SQLite features | A failed or abandoned (timed-out) capture never leaks into a later one | a_failed_or_abandoned_transaction_records_nothing_later
 SQLite features | Encryption at rest | N/A: not part of SQLite (SQLCipher / SEE are separate products)
 
 Platform & runtime | Runs on Linux: whole driver suite (CI) | ci::test_ubuntu_latest

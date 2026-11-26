@@ -22,6 +22,9 @@ pub(crate) struct Ctx<'c> {
     pub(crate) conn: &'c Connection,
     pub(crate) cursors: HashMap<u64, Cursor<'c>>,
     pub(crate) next_cursor: u64,
+    /// Change-capture sessions: `(session, armed)` — armed until the
+    /// transaction it was started for begins.
+    pub(crate) sessions: HashMap<u64, (rusqlite::session::Session<'c>, bool)>,
 }
 
 /// A statement being stepped across requests.
@@ -49,7 +52,7 @@ pub(crate) async fn spawn(cfg: SqliteConfig) -> Result<(mpsc::Sender<Job>, Inter
                 Err(e) => return ready_tx.send(Err(e)),
             };
             ready_tx.send(Ok(conn.get_interrupt_handle()));
-            let mut ctx = Ctx { conn: &conn, cursors: HashMap::new(), next_cursor: 1 };
+            let mut ctx = Ctx { conn: &conn, cursors: HashMap::new(), next_cursor: 1, sessions: HashMap::new() };
             while let Ok(job) = rx.recv() {
                 job(&mut ctx);
             }
@@ -99,6 +102,19 @@ fn open(cfg: &SqliteConfig) -> Result<Connection, OrmError> {
         load_image(&mut conn, image)?;
     }
     install_hooks(&conn, cfg);
+    for (path, entry) in &cfg.extensions {
+        // SAFETY: `SqliteConfig::extension` is unsafe; its caller vouched for
+        // the library. Loading is enabled only around this call, so SQL's own
+        // load_extension() stays refused.
+        let loaded = unsafe {
+            conn.load_extension_enable()
+                .and_then(|()| {
+                    let r = conn.load_extension(path, entry.as_deref());
+                    conn.load_extension_disable().and(r)
+                })
+        };
+        loaded.map_err(|e| OrmError::Connection(format!("load extension {}: {e}", path.display())))?;
+    }
     for f in &cfg.functions {
         // rusqlite catches a panic in the body and reports it as an SQL error.
         let body = std::panic::AssertUnwindSafe(std::sync::Arc::clone(&f.body));
@@ -278,6 +294,61 @@ impl Ctx<'_> {
     /// SQLite as such, never SQL text.
     pub(crate) fn blob(&self, table: &str, column: &str, rowid: i64, read_only: bool) -> Result<rusqlite::blob::Blob<'_>, OrmError> {
         self.conn.blob_open(rusqlite::DatabaseName::Main, table, column, rowid, read_only).map_err(map_err)
+    }
+
+    /// Start recording changes to `tables` (all tables when empty) for the
+    /// transaction about to begin on this connection.
+    pub(crate) fn start_session(&mut self, tables: &[String]) -> Result<u64, OrmError> {
+        let mut session = rusqlite::session::Session::new(self.conn).map_err(map_err)?;
+        if tables.is_empty() {
+            session.attach(None).map_err(map_err)?;
+        }
+        for t in tables {
+            session.attach(Some(t)).map_err(map_err)?;
+        }
+        let id = self.next_cursor;
+        self.next_cursor += 1;
+        self.sessions.insert(id, (session, true));
+        Ok(id)
+    }
+
+    /// A transaction begins: the armed sessions now belong to it; any other
+    /// session is a leftover of an abandoned capture and is dropped.
+    pub(crate) fn sessions_for_new_transaction(&mut self) {
+        self.sessions.retain(|_, (_, armed)| *armed);
+        for (_, armed) in self.sessions.values_mut() {
+            *armed = false;
+        }
+    }
+
+    /// Stop a session and return what it recorded.
+    pub(crate) fn finish_session(&mut self, id: u64, format: crate::ChangeFormat) -> Result<Vec<u8>, OrmError> {
+        let (mut session, _) = self.sessions.remove(&id).ok_or_else(|| OrmError::Query("change session is gone".into()))?;
+        let mut out = Vec::new();
+        match format {
+            crate::ChangeFormat::Changeset => session.changeset_strm(&mut out),
+            crate::ChangeFormat::Patchset => session.patchset_strm(&mut out),
+        }
+        .map_err(map_err)?;
+        Ok(out)
+    }
+
+    /// Apply a changeset; the number of conflicts met.
+    pub(crate) fn apply(&self, bytes: &[u8], policy: crate::OnConflict) -> Result<u64, OrmError> {
+        use std::sync::atomic::AtomicU64 as Counter;
+        let conflicts = std::sync::Arc::new(Counter::new(0));
+        let seen = std::sync::Arc::clone(&conflicts);
+        let mut input = bytes;
+        self.conn
+            .apply_strm(&mut input, None::<fn(&str) -> bool>, move |kind, _item| {
+                seen.fetch_add(1, Ordering::Relaxed);
+                crate::changeset::resolve(policy, &kind)
+            })
+            .map_err(|e| match map_err(e) {
+                OrmError::Query(m) if policy == crate::OnConflict::Abort => OrmError::Query(format!("changeset conflict, nothing applied: {m}")),
+                other => other,
+            })?;
+        Ok(conflicts.load(Ordering::Relaxed))
     }
 
     /// Rows changed on this connection so far (SQL `total_changes()`).

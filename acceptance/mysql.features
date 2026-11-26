@@ -28,7 +28,8 @@ Types | Every column type typed correctly and identical over text and binary pro
 Types | Bound parameters of every kind (i64 min, u64 max, floats, bytes, NULL, decimals and datetimes as text) | bound_parameters_round_trip_every_kind, prepared_binds_special_values
 Types | LONGTEXT / LONGBLOB 0 B – 20 MiB byte-exact, over TLS and plaintext | large_text_and_binary_round_trip_over_tls_and_plaintext, writes_small_medium_and_large_values_byte_exact
 
-ORM (shared layer) | Shared conformance suite (CRUD, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL, joins/aggregates, execute_many failure semantics, server cursors) | mysql_conforms
+ORM (shared layer) | A transaction abandoned half-way (timeout) commits nothing and never hands an open transaction to the next caller (without the fix MySQL silently committed it) | mysql_conforms
+ORM (shared layer) | Shared conformance suite (CRUD, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL, joins/aggregates, execute_many failure semantics, server cursors, cancelled transactions) | mysql_conforms
 ORM (shared layer) | CRUD repository; DDL from entities; row -> entity decoding | crud_roundtrip, mysql_conforms, value::tests::create_table_is_mysql_flavoured, value::tests::row_roundtrips_into_entity
 ORM (shared layer) | Batch insert with generated keys | batch_insert_select_delete
 ORM (shared layer) | Transactions: commit, rollback on error | transaction_commit_with_row_lock, transaction_rolls_back_on_error

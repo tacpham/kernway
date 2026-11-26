@@ -12,7 +12,8 @@ use kernway_orm_core::{
     transaction::TransactionalDriver,
     BoxFuture,
 };
-use kernway_orm_sql::SqlDb;
+use crate::changeset::{Applied, ChangeFormat, Changeset, OnConflict};
+use kernway_orm_sql::{run_transaction_on, SqlDb};
 use kernway_wire::Connect;
 use serde::{de::DeserializeOwned, Serialize};
 use std::ops::Deref;
@@ -121,6 +122,72 @@ impl SqliteDriver {
             blob.write_at(&data, offset).map_err(crate::worker::map_err)
         })
         .await
+    }
+
+    /// Run `work` in a transaction and record what it changed in `tables`
+    /// (every table when empty) as a [`Changeset`] — returned with `work`'s
+    /// result once the transaction committed. A failed transaction records
+    /// nothing. Tables need a declared `PRIMARY KEY`.
+    ///
+    /// ```rust,ignore
+    /// let (_, changes) = db.track_changes(&["ticket"], |tx| Box::pin(async move {
+    ///     tx.execute_with("UPDATE ticket SET status = 'paid' WHERE id = ?", params![7]).await
+    /// })).await?;
+    /// cloud.apply_changeset(&changes, OnConflict::Abort).await?;   // elsewhere
+    /// ```
+    pub async fn track_changes<'a, R, F>(&'a self, tables: &[&str], work: F) -> Result<(R, Changeset), OrmError>
+    where
+        F: FnOnce(SqliteTx) -> BoxFuture<'a, Result<R, OrmError>> + 'a,
+        R: 'a,
+    {
+        self.capture(tables, ChangeFormat::Changeset, work).await
+    }
+
+    /// [`track_changes`](Self::track_changes), recording a smaller patchset
+    /// (keys and new values only; cannot be inverted).
+    pub async fn track_patch<'a, R, F>(&'a self, tables: &[&str], work: F) -> Result<(R, Changeset), OrmError>
+    where
+        F: FnOnce(SqliteTx) -> BoxFuture<'a, Result<R, OrmError>> + 'a,
+        R: 'a,
+    {
+        self.capture(tables, ChangeFormat::Patchset, work).await
+    }
+
+    async fn capture<'a, R, F>(&'a self, tables: &[&str], format: ChangeFormat, work: F) -> Result<(R, Changeset), OrmError>
+    where
+        F: FnOnce(SqliteTx) -> BoxFuture<'a, Result<R, OrmError>> + 'a,
+        R: 'a,
+    {
+        let tables: Vec<String> = tables.iter().map(|t| t.to_string()).collect();
+        let mut g = self.db.pool().acquire().await?;
+        let id = g.run(move |ctx| ctx.start_session(&tables)).await?;
+        let (g, result) = run_transaction_on(g, work).await;
+        let mut g = g.ok_or_else(|| OrmError::Transaction("connection lost during transaction".into()))?;
+        match result {
+            Ok(value) => {
+                let bytes = g.run(move |ctx| ctx.finish_session(id, format)).await?;
+                Ok((value, Changeset::from_bytes(bytes, format)))
+            }
+            Err(e) => {
+                let _ = g
+                    .run(move |ctx| {
+                        ctx.sessions.remove(&id);
+                        Ok(())
+                    })
+                    .await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Apply a changeset (from [`track_changes`](Self::track_changes), here
+    /// or on another database with the same tables) in one savepoint,
+    /// resolving conflicts per `on_conflict`.
+    pub async fn apply_changeset(&self, changes: &Changeset, on_conflict: OnConflict) -> Result<Applied, OrmError> {
+        let bytes = changes.as_bytes().to_vec();
+        let mut g = self.db.pool().acquire().await?;
+        let conflicts = g.run(move |ctx| ctx.apply(&bytes, on_conflict)).await?;
+        Ok(Applied { conflicts })
     }
 
     /// Copy the database into a new file (SQLite's online backup — a

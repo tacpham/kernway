@@ -173,6 +173,9 @@ pub struct SqliteConfig {
     /// Connections per pool (per core).
     pub pool_size: usize,
     pub(crate) hooks: Hooks,
+    /// Native extensions loaded into every connection: library path and
+    /// entry point (`None`: SQLite's default name).
+    pub(crate) extensions: Vec<(PathBuf, Option<String>)>,
     /// A database image to load into a fresh in-memory database.
     pub(crate) image: Option<Arc<Vec<u8>>>,
 }
@@ -193,6 +196,7 @@ impl SqliteConfig {
             functions: Vec::new(),
             pool_size: 4,
             hooks: Hooks::default(),
+            extensions: Vec::new(),
             image: None,
         }
     }
@@ -341,6 +345,26 @@ impl SqliteConfig {
     /// Call `f` after each rollback.
     pub fn on_rollback(mut self, f: impl Fn() + Send + Sync + 'static) -> Self {
         self.hooks.rollback = Some(Arc::new(f));
+        self
+    }
+
+    /// Load the SQLite extension library at `path` (`.so` / `.dylib` /
+    /// `.dll`; SQLite also tries the platform suffix when it is left out)
+    /// into every connection, calling `entry_point` (default: SQLite's
+    /// `sqlite3_extension_init` / `sqlite3_<name>_init` rule) — e.g.
+    /// `sqlite-vec` for vector search or SpatiaLite.
+    ///
+    /// Extension loading stays switched off for SQL: `SELECT
+    /// load_extension(…)` in a query is refused, so only the application
+    /// chooses what is loaded. A library that fails to load fails the open.
+    ///
+    /// # Safety
+    ///
+    /// The library is native code run inside this process with full access to
+    /// it: load only extensions you trust, from a path an attacker cannot
+    /// write to.
+    pub unsafe fn extension(mut self, path: impl Into<PathBuf>, entry_point: Option<&str>) -> Self {
+        self.extensions.push((path.into(), entry_point.map(str::to_string)));
         self
     }
 
