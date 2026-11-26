@@ -27,12 +27,14 @@ pub fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         match b[i] {
-            b'%' if i + 2 < b.len() => match u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                Ok(n) => {
-                    out.push(n);
+            // Hex digits are read as bytes: slicing the `&str` here would panic
+            // when a multi-byte character follows the `%` (`"%€"`).
+            b'%' if i + 2 < b.len() => match (hex(b[i + 1]), hex(b[i + 2])) {
+                (Some(hi), Some(lo)) => {
+                    out.push(hi << 4 | lo);
                     i += 3;
                 }
-                Err(_) => {
+                _ => {
                     out.push(b'%');
                     i += 1;
                 }
@@ -48,6 +50,10 @@ pub fn percent_decode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex(b: u8) -> Option<u8> {
+    (b as char).to_digit(16).map(|d| d as u8)
 }
 
 /// Read one field from an `application/x-www-form-urlencoded` body by name, percent-decoded
@@ -84,6 +90,14 @@ mod tests {
         assert_eq!(percent_decode("a+b"), "a b");
         assert_eq!(percent_decode("100%"), "100%"); // malformed escape kept
         assert_eq!(percent_decode("plain.value-1~"), "plain.value-1~");
+    }
+
+    #[test]
+    fn a_percent_before_a_multibyte_character_does_not_panic() {
+        assert_eq!(percent_decode("%€"), "%€");
+        assert_eq!(percent_decode("a%é"), "a%é");
+        assert_eq!(percent_decode("%1€"), "%1€");
+        assert_eq!(percent_decode("%C3%A9%"), "é%");
     }
 
     #[test]

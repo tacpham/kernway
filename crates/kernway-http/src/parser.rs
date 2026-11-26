@@ -6,6 +6,7 @@ use std::net::TcpStream;
 
 use kernway_core::fields::{Headers, QueryParams};
 use kernway_core::request::{HttpVersion, Request};
+use kernway_core::url::percent_decode;
 use thiserror::Error;
 
 /// Why a request could not be decoded.
@@ -330,7 +331,15 @@ fn parse_query_string(query: &str) -> QueryParams {
             None => (pair, ""),
         };
         if !key.is_empty() {
-            params.append(key, val);
+            // Stored decoded (`%XX` and `+`), so every reader — `query.get`,
+            // the `Query<T>` extractor — sees the text the client meant.
+            // Plain pairs, the common case, skip the copy.
+            let needs = |s: &str| s.bytes().any(|b| b == b'%' || b == b'+');
+            if needs(key) || needs(val) {
+                params.append(&percent_decode(key), &percent_decode(val));
+            } else {
+                params.append(key, val);
+            }
         }
     }
     params
@@ -403,6 +412,15 @@ mod tests {
     fn parse_query_string_empty() {
         let req = parse("GET /ping HTTP/1.1\r\n\r\n").unwrap();
         assert!(req.query.is_empty());
+    }
+
+    #[test]
+    fn query_keys_and_values_are_percent_decoded() {
+        let req = parse("GET /s?q=Nguy%E1%BB%85n+Anh&a%20b=1%2B1&bad=%zz&cut=%4 HTTP/1.1\r\n\r\n").unwrap();
+        assert_eq!(req.query.get("q"), Some("Nguyễn Anh"));
+        assert_eq!(req.query.get("a b"), Some("1+1"), "an encoded + is a plus, a bare + a space");
+        assert_eq!(req.query.get("bad"), Some("%zz"), "a malformed escape stays literal");
+        assert_eq!(req.query.get("cut"), Some("%4"));
     }
 
     #[test]
