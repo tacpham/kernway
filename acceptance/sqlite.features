@@ -19,6 +19,7 @@ Opening & configuration | Network, authentication, TLS | N/A: SQLite is an embed
 
 Concurrency & async | Fully async: every SQLite call on the connection's own thread; a long query leaves the reactor running (proved by a timer ticking during it) | a_long_query_does_not_stall_the_reactor
 Concurrency & async | Waiting for another connection's lock (busy timeout) queues without stalling the reactor; a short timeout fails with "database is locked"; WAL readers unaffected | waiting_for_a_lock_queues_without_stalling_and_times_out_cleanly
+Concurrency & async | Opening never fails on a lock held for a moment: 8 drivers opening a fresh file at once (WAL switch, recovery) while others write, with a 1 ms busy timeout | opening_never_fails_on_a_lock_held_for_a_moment
 Concurrency & async | A cancelled / timed-out query is interrupted at once (sqlite3_interrupt) and the connection is free immediately | a_cancelled_query_is_interrupted_and_the_connection_is_free_at_once
 Concurrency & async | Writers serialised (BEGIN IMMEDIATE): concurrent read-modify-write transactions lose no update | sqlite_conforms
 Concurrency & async | Dropping the driver closes every connection and its file (the file can be deleted — strict on Windows) | dropping_the_driver_closes_its_files

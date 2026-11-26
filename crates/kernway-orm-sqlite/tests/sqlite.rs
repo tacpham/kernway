@@ -249,6 +249,37 @@ fn waiting_for_a_lock_queues_without_stalling_and_times_out_cleanly() {
 }
 
 #[test]
+fn opening_never_fails_on_a_lock_held_for_a_moment() {
+    // Many drivers open the same fresh file at once (WAL set up, recovered)
+    // while others already write, each with a 1 ms busy timeout: opening
+    // waits out those brief locks itself; only statements use the timeout.
+    let dir = Dir::new("open-race");
+    let path = dir.file("race.db");
+    for round in 0..5 {
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    run(async move {
+                        let cfg = SqliteConfig::file(&path).busy_timeout(Duration::from_millis(1)).pool_size(1);
+                        let db = SqliteDriver::with_config(cfg).await.unwrap_or_else(|e| panic!("round {round}, opener {i}: {e}"));
+                        // Writes may lose the race (1 ms timeout); opening must not.
+                        let _ = db.execute("CREATE TABLE IF NOT EXISTS t (n INTEGER)").await;
+                        let _ = db.execute_with("INSERT INTO t VALUES (?)", params![i]).await;
+                    })
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+    }
+}
+
+#[test]
 fn values_are_typed_by_the_declared_column_type() {
     run(async {
         let db = SqliteDriver::open_in_memory().await.unwrap();

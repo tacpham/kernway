@@ -37,6 +37,9 @@ pub(crate) type Job = Box<dyn for<'c> FnOnce(&mut Ctx<'c>) + Send>;
 
 static NEXT_THREAD: AtomicU64 = AtomicU64::new(0);
 
+/// The least time opening a connection waits for a lock during setup.
+const SETUP_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Start a connection thread, open the database on it and set it up. The
 /// returned sender submits jobs; dropping it ends the thread and closes the
 /// connection.
@@ -86,8 +89,16 @@ fn open(cfg: &SqliteConfig) -> Result<Connection, OrmError> {
         ),
     }
     .map_err(conn_err)?;
-    conn.busy_timeout(cfg.busy_timeout).map_err(conn_err)?;
+    // Setup may meet a lock another connection holds for a moment (WAL
+    // recovery on first open, a journal-mode change): wait for it at least
+    // a few seconds on this thread whatever the configured busy timeout,
+    // which applies from the first statement on.
+    conn.busy_timeout(cfg.busy_timeout.max(SETUP_BUSY_TIMEOUT)).map_err(conn_err)?;
     for sql in cfg.setup_sql() {
+        if let Some(want) = sql.strip_prefix("PRAGMA journal_mode = ") {
+            set_journal_mode(&conn, want).map_err(|e| OrmError::Connection(format!("{sql}: {e}")))?;
+            continue;
+        }
         // Pragmas may return a row (journal_mode); step through it.
         conn.prepare(&sql)
             .and_then(|mut s| {
@@ -97,6 +108,7 @@ fn open(cfg: &SqliteConfig) -> Result<Connection, OrmError> {
             })
             .map_err(|e| OrmError::Connection(format!("{sql}: {e}")))?;
     }
+    conn.busy_timeout(cfg.busy_timeout).map_err(conn_err)?;
     conn.set_prepared_statement_cache_capacity(64);
     if let (Location::Memory(_), Some(image)) = (&cfg.location, &cfg.image) {
         load_image(&mut conn, image)?;
@@ -134,6 +146,36 @@ fn open(cfg: &SqliteConfig) -> Result<Connection, OrmError> {
         .map_err(|e| OrmError::Connection(format!("register function {}: {e}", f.name)))?;
     }
     Ok(conn)
+}
+
+/// Switch the journal mode to `want`. It is often already set (a file opened
+/// before), which needs no lock. Switching needs the database to itself, and
+/// SQLite answers "locked" at once rather than waiting — several connections
+/// opening a fresh file together all try — so retry until the mode is in
+/// place (by us or by one of them) or the setup time is up.
+fn set_journal_mode(conn: &Connection, want: &str) -> Result<(), String> {
+    let current = || conn.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0)).map_err(|e| e.to_string());
+    let deadline = std::time::Instant::now() + SETUP_BUSY_TIMEOUT;
+    loop {
+        if current()?.eq_ignore_ascii_case(want) {
+            return Ok(());
+        }
+        let attempt = conn.query_row(&format!("PRAGMA journal_mode = {want}"), [], |r| r.get::<_, String>(0));
+        let busy = matches!(&attempt, Err(rusqlite::Error::SqliteFailure(e, _))
+            if matches!(e.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked));
+        match attempt {
+            Err(e) if !busy => return Err(e.to_string()),
+            Ok(now) if !now.eq_ignore_ascii_case(want) => return Err(format!("journal mode {want} not available here; it is {now}")),
+            _ => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            let now = current()?;
+            return if now.eq_ignore_ascii_case(want) { Ok(()) } else { Err(format!("database is locked; journal mode stayed {now}")) };
+        }
+        if busy {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
 }
 
 /// Copy a serialized database into `conn` (a fresh in-memory database):
