@@ -33,7 +33,7 @@ ORM (shared layer) | Batch insert with generated keys | batch_insert_select_dele
 ORM (shared layer) | Transactions: commit, rollback on error | transaction_commit_with_row_lock, transaction_rolls_back_on_error
 ORM (shared layer) | SELECT … FOR UPDATE under concurrency (no lost update) | concurrent_for_update_no_lost_update
 ORM (shared layer) | Select builder: INNER / LEFT JOIN, WHERE on any joined entity, GROUP BY, COUNT/COUNT DISTINCT/SUM/AVG/MIN/MAX, HAVING, ORDER BY, LIMIT, counting groups, entity pairs from a join | mysql_conforms
-ORM (shared layer) | Results into any struct / tuple by column name (no entity needed), per-field conversion | mysql_conforms, value_de::tests::structs_match_columns_by_name_and_convert_per_field, value_de::tests::tuples_take_values_by_position_and_single_columns_read_directly, value_de::tests::a_value_that_does_not_fit_is_an_error
+ORM (shared layer) | Results into any struct / tuple by column name (no entity needed), per-field conversion | mysql_conforms
 
 Hand-written SQL | Any query with bound params; joins, GROUP BY, CTE, window functions mapped onto an entity by name | joins_and_aggregates_map_onto_an_entity_by_column_name
 Hand-written SQL | Streaming large results (200k rows) without collecting; callback errors stop cleanly | large_results_stream_without_being_collected

@@ -5,20 +5,20 @@
 
 | | |
 |---|---|
-| generated | 2026-11-26 11:46 UTC |
+| generated | 2026-11-26 14:01 UTC |
 | server | MySQL 8.0.46 |
 | image | mysql:8.0 |
 | container | kernway-mysql |
-| driver commit | 61c5a5f on feat/plsql-full |
+| driver commit | f0c54fe on feat/plsql-full |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
-| command | `cargo test -p kernway-orm-mysql --features mysql --lib --tests -- --test-threads=1 --nocapture` |
+| command | `cargo test -p kernway-orm-mysql --features mysql --lib --tests -- --test-threads=1 --nocapture --skip unix_socket_; unix_socket_* inside kernway-mysql` |
 
-## Verdict: implemented features **PASSED** · completeness **32/37** — NOT complete
+## Verdict: implemented features **FAILED** · completeness **37/38** — complete
 
 - *Implemented features* passes only if every test ran and passed (no skips) in this run.
 - *Completeness* counts 🚧 gaps (listed below) against the full feature catalog.
-- Features verified: **32 / 37** (5 not implemented yet, 0 failing; 1 not applicable to MySQL).
-- Tests run: 47 — 47 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
+- Features verified: **37 / 38** (0 not implemented yet, 1 failing; 2 not applicable to MySQL).
+- Tests run: 54 — 54 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
 - A feature is ✅ only when every test listed as its evidence ran and passed in this run.
 
 ## Connection & security
@@ -32,8 +32,9 @@
 | Mutual TLS (client certificate, REQUIRE X509) | ✅ PASS | `mutual_tls_presents_the_client_certificate` |
 | Connection URL parsing | ✅ PASS | `protocol::tests::url_parsing` |
 | Auth scrambles (native SHA-1, caching_sha2 SHA-256) match the reference construction | ✅ PASS | `protocol::tests::native_scramble_shape`<br>`protocol::tests::sha256_scramble_matches_the_reference_construction` |
-| Unix-domain socket connections | 🚧 GAP | TCP only |
-| Compressed protocol (CLIENT_COMPRESS / zstd) | 🚧 GAP | not implemented |
+| Unix-domain socket connections (run inside the MySQL container; server sees a socket client; caching_sha2 full auth over the socket; TLS-requiring ssl-mode refused) | ✅ PASS | `unix_socket_connects_through_the_server_socket_file`<br>`unix_socket_carries_a_caching_sha2_full_authentication`<br>`unix_socket_refuses_an_ssl_mode_that_requires_tls` |
+| Compressed protocol (zlib): server reports Compression=ON; >16 MiB values, TLS, binary/text, streaming, pipelining, cursors over it; the wire carries far fewer bytes | ✅ PASS | `compressed_protocol_is_negotiated_and_carries_every_kind_of_traffic`<br>`compression_shrinks_what_crosses_the_wire` |
+| zstd compression algorithm | ➖ N/A | the client picks the algorithm; zlib is offered by every MySQL / MariaDB server |
 
 ## Protocol
 
@@ -45,7 +46,7 @@
 | Packet framing: length-encoded ints / strings, OK / ERR / EOF status flags, text rows with NULL | ✅ PASS | `protocol::tests::lenenc_int_widths`<br>`protocol::tests::lenenc_str_reads_payload`<br>`protocol::tests::ok_and_err_packets`<br>`protocol::tests::status_flags_are_read_from_ok_and_eof_packets`<br>`protocol::tests::text_row_handles_null_and_values` |
 | Multi-result responses read to the end; errors never desync the connection | ✅ PASS | `call_returns_every_result_set_then_the_call_status`<br>`an_error_inside_a_procedure_leaves_the_connection_usable`<br>`a_row_that_fails_to_decode_does_not_desync_the_connection` |
 | Injection safety: values always bound, stacked statements refused | ✅ PASS | `prepared_binds_special_values`<br>`scripts_run_several_statements_but_ordinary_calls_never_stack`<br>`protocol::tests::escape_blocks_injection` |
-| Server-side cursors (COM_STMT_FETCH) | 🚧 GAP | rows are streamed client-side instead (query_each) |
+| Server-side cursors (COM_STMT_FETCH): batches on demand, other statements in between, closed with the transaction | ✅ PASS | `server_side_cursor_fetches_on_demand_and_leaves_the_connection_usable`<br>`mysql_conforms` |
 
 ## Types
 
@@ -59,12 +60,13 @@
 
 | Feature | Status | Evidence / note |
 |---|---|---|
-| Shared conformance suite (CRUD, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL) | ✅ PASS | `mysql_conforms` |
+| Shared conformance suite (CRUD, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL, joins/aggregates, execute_many failure semantics, server cursors) | ✅ PASS | `mysql_conforms` |
 | CRUD repository; DDL from entities; row -> entity decoding | ✅ PASS | `crud_roundtrip`<br>`mysql_conforms`<br>`value::tests::create_table_is_mysql_flavoured`<br>`value::tests::row_roundtrips_into_entity` |
 | Batch insert with generated keys | ✅ PASS | `batch_insert_select_delete` |
 | Transactions: commit, rollback on error | ✅ PASS | `transaction_commit_with_row_lock`<br>`transaction_rolls_back_on_error` |
 | SELECT … FOR UPDATE under concurrency (no lost update) | ✅ PASS | `concurrent_for_update_no_lost_update` |
-| Query builder aggregates / GROUP BY / JOIN | 🚧 GAP | use hand-written SQL (query_as) for now |
+| Select builder: INNER / LEFT JOIN, WHERE on any joined entity, GROUP BY, COUNT/COUNT DISTINCT/SUM/AVG/MIN/MAX, HAVING, ORDER BY, LIMIT, counting groups, entity pairs from a join | ✅ PASS | `mysql_conforms` |
+| Results into any struct / tuple by column name (no entity needed), per-field conversion | ❌ FAIL | `mysql_conforms`<br>`value_de::tests::structs_match_columns_by_name_and_convert_per_field` **NOT RUN**<br>`value_de::tests::tuples_take_values_by_position_and_single_columns_read_directly` **NOT RUN**<br>`value_de::tests::a_value_that_does_not_fit_is_an_error` **NOT RUN** |
 
 ## Hand-written SQL
 
@@ -74,7 +76,7 @@
 | Streaming large results (200k rows) without collecting; callback errors stop cleanly | ✅ PASS | `large_results_stream_without_being_collected` |
 | Raw SQL inside transactions (commit / rollback) | ✅ PASS | `raw_sql_inside_a_transaction_commits_or_rolls_back_with_it` |
 | execute_many (one statement per row) | ✅ PASS | `mysql_conforms` |
-| execute_many as a single multi-row round trip | 🚧 GAP | runs row by row on MySQL |
+| execute_many pipelined (1200 rows in a handful of round trips, counted on the wire), same outcome as row by row on a failure part-way | ✅ PASS | `execute_many_is_pipelined_into_a_few_round_trips`<br>`mysql_conforms` |
 
 ## Stored programs
 
@@ -124,6 +126,10 @@
 | `caching_sha2_full_auth_without_tls_uses_the_servers_rsa_key` | PASS | yes |
 | `mutual_tls_presents_the_client_certificate` | PASS | yes |
 | `mysql_conforms` | PASS | yes |
+| `compressed_protocol_is_negotiated_and_carries_every_kind_of_traffic` | PASS | yes |
+| `compression_shrinks_what_crosses_the_wire` | PASS | yes |
+| `execute_many_is_pipelined_into_a_few_round_trips` | PASS | yes |
+| `server_side_cursor_fetches_on_demand_and_leaves_the_connection_usable` | PASS | yes |
 | `batch_insert_select_delete` | PASS | yes |
 | `concurrent_for_update_no_lost_update` | PASS | yes |
 | `crud_roundtrip` | PASS | yes |
@@ -145,4 +151,7 @@
 | `load_data_local_infile_sends_only_the_given_bytes` | PASS | yes |
 | `raw_sql_inside_a_transaction_commits_or_rolls_back_with_it` | PASS | yes |
 | `scripts_run_several_statements_but_ordinary_calls_never_stack` | PASS | yes |
+| `unix_socket_carries_a_caching_sha2_full_authentication` | PASS | yes |
+| `unix_socket_connects_through_the_server_socket_file` | PASS | yes |
+| `unix_socket_refuses_an_ssl_mode_that_requires_tls` | PASS | yes |
 
