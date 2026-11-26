@@ -52,6 +52,10 @@ jwt = ["security", "kernway-security/jwt", "kernway-server/jwt"]
 ## content-type + size + Accept-Encoding).
 compression = ["kernway-server/compression"]
 
+[dev-dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+
 [lints]
 workspace = true
 
