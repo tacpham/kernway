@@ -185,6 +185,64 @@ impl Router {
         let handler = walk(&self.root, path, method, &mut params)?;
         Some((Arc::clone(handler), params))
     }
+
+    /// Every method some route answers at `path`, uppercase, in registration order
+    /// and without duplicates. Empty when no route matches the path at all.
+    ///
+    /// This is the union over **every** pattern that matches the path, not just the
+    /// one `find` would pick for a given method: `GET /users/me` and
+    /// `DELETE /users/{id}` both apply to `/users/me`, so both are allowed there.
+    /// It feeds the `Allow` header of an automatic `OPTIONS` answer.
+    pub fn allowed_methods(&self, path: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        collect_methods(&self.root, path, &mut out);
+        out
+    }
+
+    /// Every method registered on any route, uppercase and deduplicated, in
+    /// registration order within each node — the `Allow` set for `OPTIONS *`.
+    pub fn all_methods(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![&self.root];
+        while let Some(node) = stack.pop() {
+            push_methods(node, &mut out);
+            stack.extend(node.statics.values());
+            if let Some(pc) = &node.param {
+                stack.push(&pc.node);
+            }
+        }
+        out
+    }
+}
+
+/// Add `node`'s methods to `out`, skipping any already present.
+fn push_methods(node: &Node, out: &mut Vec<String>) {
+    for (m, _) in &node.handlers {
+        if !out.iter().any(|seen| seen == m) {
+            out.push(m.clone());
+        }
+    }
+}
+
+/// Like [`walk`], but explores **both** the static and the parameter branch at each
+/// step (no short-circuit) and collects the methods of every endpoint the path
+/// reaches. No parameters are bound — only the method set is wanted.
+fn collect_methods(node: &Node, path: &str, out: &mut Vec<String>) {
+    let path = path.trim_start_matches('/');
+    if path.is_empty() {
+        push_methods(node, out);
+        return;
+    }
+    let (seg, rest) = match path.find('/') {
+        Some(i) => (&path[..i], &path[i + 1..]),
+        None => (path, ""),
+    };
+    if let Some(child) = node.statics.get(seg) {
+        collect_methods(child, rest, out);
+    }
+    if let Some(pc) = &node.param {
+        collect_methods(&pc.node, rest, out);
+    }
 }
 
 /// Walk the trie down `path`, static-first with backtracking, collecting
@@ -425,5 +483,43 @@ mod tests {
         assert!(router.find("GET", "/ping").is_some());
         assert!(router.find("POST", "/ping").is_none());
         assert!(router.find("GET", "/other").is_none());
+    }
+
+    #[test]
+    fn allowed_methods_lists_each_method_once_in_registration_order() {
+        let r = labelled(&[
+            ("GET", "/items", "list"),
+            ("post", "/items", "create"),
+            ("GET", "/items", "dup"),
+        ]);
+        assert_eq!(r.allowed_methods("/items"), ["GET", "POST"]);
+        assert_eq!(r.allowed_methods("/items/"), ["GET", "POST"]);
+    }
+
+    #[test]
+    fn allowed_methods_unions_static_and_param_routes() {
+        let r = labelled(&[("GET", "/users/me", "me"), ("DELETE", "/users/{id}", "del")]);
+        assert_eq!(r.allowed_methods("/users/me"), ["GET", "DELETE"]);
+        assert_eq!(r.allowed_methods("/users/42"), ["DELETE"]);
+    }
+
+    #[test]
+    fn allowed_methods_is_empty_without_a_matching_route() {
+        let r = labelled(&[("GET", "/users/{id}", "u")]);
+        assert!(r.allowed_methods("/users").is_empty());
+        assert!(r.allowed_methods("/nope").is_empty());
+        assert!(r.allowed_methods("/users/1/extra").is_empty());
+    }
+
+    #[test]
+    fn all_methods_covers_every_route() {
+        let r = labelled(&[
+            ("GET", "/a", "a"),
+            ("PUT", "/b/{x}", "b"),
+            ("GET", "/c", "c"),
+        ]);
+        let mut all = r.all_methods();
+        all.sort();
+        assert_eq!(all, ["GET", "PUT"]);
     }
 }

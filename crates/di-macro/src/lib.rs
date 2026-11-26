@@ -570,10 +570,11 @@ fn route_registration(
         "PUT" => quote! { put },
         "DELETE" => quote! { delete },
         "PATCH" => quote! { patch },
+        "OPTIONS" => quote! { options },
         other => {
             return Err(syn::Error::new(
                 method.span(),
-                format!("unknown HTTP method `{other}` in #[route] (expected GET/POST/PUT/DELETE/PATCH)"),
+                format!("unknown HTTP method `{other}` in #[route] (expected GET/POST/PUT/DELETE/PATCH/OPTIONS)"),
             ));
         }
     };

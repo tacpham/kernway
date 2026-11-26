@@ -39,6 +39,8 @@ struct PathItem {
     delete: Option<Operation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     patch: Option<Operation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<Operation>,
 }
 
 #[derive(Serialize)]
@@ -196,6 +198,7 @@ impl OpenApiSpec {
                 "PUT" => path_item.put = Some(op),
                 "DELETE" => path_item.delete = Some(op),
                 "PATCH" => path_item.patch = Some(op),
+                "OPTIONS" => path_item.options = Some(op),
                 _ => {}
             }
         }

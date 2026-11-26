@@ -161,6 +161,8 @@ pub enum Method {
     Delete,
     /// `HEAD`.
     Head,
+    /// `OPTIONS`.
+    Options,
 }
 
 impl Method {
@@ -174,6 +176,7 @@ impl Method {
             Method::Patch => "PATCH",
             Method::Delete => "DELETE",
             Method::Head => "HEAD",
+            Method::Options => "OPTIONS",
         }
     }
 }

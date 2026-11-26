@@ -102,15 +102,41 @@ fn run_handler(
             req.path_params = params;
             handler(req, scope)
         }
-        None => {
-            let body = format!(r#"{{"error":"no route for {} {}"}}"#, req.method, req.path);
+        None if req.method.eq_ignore_ascii_case("OPTIONS") => {
+            // No explicit OPTIONS route: answer it from the routing table
+            // (RFC 9110 §9.3.7). `OPTIONS *` asks about the server as a whole.
+            let server_wide = req.path == "*";
+            let mut methods = if server_wide {
+                router.all_methods()
+            } else {
+                router.allowed_methods(&req.path)
+            };
+            // A path no route serves is still a 404, OPTIONS or not.
+            if methods.is_empty() && !server_wide {
+                return not_found(&req);
+            }
+            if !methods.iter().any(|m| m == "OPTIONS") {
+                methods.push("OPTIONS".to_string());
+            }
+            let allow = methods.join(", ");
             Box::pin(async move {
-                Response::new(StatusCode::NOT_FOUND)
-                    .content_type("application/json")
-                    .body(body.into_bytes())
+                let mut response = Response::new(StatusCode::NO_CONTENT);
+                response.headers.insert("allow", &allow);
+                response
             })
         }
+        None => not_found(&req),
     }
+}
+
+/// The `404` for a request no route answers.
+fn not_found(req: &Request) -> BoxFuture<'static, Response> {
+    let body = format!(r#"{{"error":"no route for {} {}"}}"#, req.method, req.path);
+    Box::pin(async move {
+        Response::new(StatusCode::NOT_FOUND)
+            .content_type("application/json")
+            .body(body.into_bytes())
+    })
 }
 
 /// App builder — fluent API similar to Spring Boot.
@@ -353,6 +379,18 @@ impl AppBuilder {
     /// Register a PATCH route.
     pub fn patch<M>(mut self, pattern: &str, handler: impl crate::router::IntoHandler<M>) -> Self {
         self.router.add("PATCH", pattern, handler.into_handler());
+        self
+    }
+
+    /// Register an OPTIONS route.
+    ///
+    /// Optional: a path with no OPTIONS route already answers `OPTIONS` with
+    /// `204 No Content` and an `Allow` header listing the methods its routes serve
+    /// (and `OPTIONS *` lists every method the app serves). Register one only to
+    /// answer differently. A CORS preflight never reaches it: the [`crate::Cors`]
+    /// middleware answers those first.
+    pub fn options<M>(mut self, pattern: &str, handler: impl crate::router::IntoHandler<M>) -> Self {
+        self.router.add("OPTIONS", pattern, handler.into_handler());
         self
     }
 
@@ -1847,6 +1885,108 @@ mod tests {
         assert!(got.starts_with("HTTP/1.1 200 OK\r\n"), "got {got:?}");
         assert!(got.contains("content-length: 2\r\n"));
         assert!(got.ends_with("hi"));
+    }
+
+    /// A router with `GET`+`POST /items` and `DELETE /items/{id}`.
+    fn items_router() -> Router {
+        let mut router = Router::new();
+        for (method, pattern) in [
+            ("GET", "/items"),
+            ("POST", "/items"),
+            ("DELETE", "/items/{id}"),
+        ] {
+            router.add(
+                method,
+                pattern,
+                sync_handler(|_req, _ctx| Response::new(StatusCode::OK)),
+            );
+        }
+        router
+    }
+
+    fn options(path: &str) -> Request {
+        Request::new("OPTIONS", path)
+    }
+
+    #[test]
+    fn options_without_a_route_answers_204_with_allow() {
+        let router = items_router();
+        let response = block_on(handle(options("/items"), &router, &AppContext::new(), &[]));
+        assert_eq!(response.status, StatusCode::NO_CONTENT);
+        assert_eq!(response.headers.get("allow").unwrap(), "GET, POST, OPTIONS");
+        assert!(response.body_bytes().is_empty());
+
+        let response = block_on(handle(
+            options("/items/7"),
+            &router,
+            &AppContext::new(),
+            &[],
+        ));
+        assert_eq!(response.headers.get("allow").unwrap(), "DELETE, OPTIONS");
+    }
+
+    #[test]
+    fn options_on_an_unknown_path_is_still_404() {
+        let response = block_on(handle(
+            options("/nope"),
+            &items_router(),
+            &AppContext::new(),
+            &[],
+        ));
+        assert_eq!(response.status, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn options_star_lists_every_method_the_app_serves() {
+        let response = block_on(handle(
+            options("*"),
+            &items_router(),
+            &AppContext::new(),
+            &[],
+        ));
+        assert_eq!(response.status, StatusCode::NO_CONTENT);
+        let allow = response.headers.get("allow").unwrap();
+        for m in ["GET", "POST", "DELETE", "OPTIONS"] {
+            assert!(allow.contains(m), "{m} missing from {allow:?}");
+        }
+
+        // Even an app with no routes answers `OPTIONS *`.
+        let response = block_on(handle(
+            options("*"),
+            &Router::new(),
+            &AppContext::new(),
+            &[],
+        ));
+        assert_eq!(response.status, StatusCode::NO_CONTENT);
+        assert_eq!(response.headers.get("allow").unwrap(), "OPTIONS");
+    }
+
+    #[test]
+    fn an_explicit_options_route_wins_over_the_automatic_answer() {
+        let mut router = items_router();
+        router.add(
+            "OPTIONS",
+            "/items",
+            sync_handler(|_req, _ctx| Response::new(StatusCode::OK).body(b"custom".to_vec())),
+        );
+        let response = block_on(handle(options("/items"), &router, &AppContext::new(), &[]));
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.body_bytes(), b"custom");
+        assert!(response.headers.get("allow").is_none());
+
+        // …and the automatic answer now lists OPTIONS once, in place.
+        assert_eq!(router.allowed_methods("/items"), ["GET", "POST", "OPTIONS"]);
+    }
+
+    #[test]
+    fn options_round_trips_over_http() {
+        let got = round_trip(items_router(), "OPTIONS /items HTTP/1.1\r\nHost: x\r\n\r\n");
+        assert!(
+            got.starts_with("HTTP/1.1 204 No Content\r\n"),
+            "got {got:?}"
+        );
+        assert!(got.contains("allow: GET, POST, OPTIONS\r\n"), "got {got:?}");
+        assert!(got.ends_with("\r\n\r\n"), "204 carries no body: {got:?}");
     }
 
     #[test]
