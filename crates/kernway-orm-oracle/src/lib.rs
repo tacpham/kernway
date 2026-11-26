@@ -55,5 +55,5 @@ pub use conn::{Conn, OracleConfig, SslMode};
 pub use dialect::OracleDialect;
 pub use driver::{OracleDriver, OracleRepository, OracleTx};
 pub use pool::OracleConnect;
-pub use exec::{Bind, Column, Executed, OutType};
+pub use exec::{Bind, Column, Executed, OpenCursor, OutType};
 pub use value::{DateTime, ResultSet, Value};

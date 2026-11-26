@@ -687,8 +687,7 @@ fn execute_many_failure_semantics<H: Harness>(h: H) {
 }
 
 /// Server-side cursors: batches fetched on demand, other statements on the
-/// same transaction in between. A backend without them reports
-/// `Unsupported` (listed as a gap in its acceptance report).
+/// same transaction in between. Every backend must support them.
 fn server_cursors<H: Harness>(h: H) {
     block(async move {
         let db = h.connect().await;
@@ -700,13 +699,7 @@ fn server_cursors<H: Harness>(h: H) {
         let d = h.dialect();
         let q = |s: &str| d.quote_identifier(s);
         let select = format!("SELECT {}, {} FROM {} WHERE {} > {} ORDER BY {}", q("id"), q("qty"), q("conf_items"), q("qty"), d.placeholder(1), q("qty"));
-        let mut cur = match db.cursor(&select, params![0]).await {
-            Err(OrmError::Unsupported(what)) => {
-                eprintln!("server_cursors: unsupported by this backend ({what})");
-                return;
-            }
-            other => other.unwrap(),
-        };
+        let mut cur = db.cursor(&select, params![0]).await.unwrap();
         assert_eq!(cur.columns().iter().map(|c| c.to_ascii_lowercase()).collect::<Vec<_>>(), ["id", "qty"]);
         let mut seen = Vec::new();
         let mut batches = 0;

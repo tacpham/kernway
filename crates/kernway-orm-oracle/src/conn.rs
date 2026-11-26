@@ -204,6 +204,9 @@ pub struct Conn {
     pub(crate) pending_close: Vec<u32>,
     /// Inside an ORM transaction: statements are not committed on their own.
     pub(crate) in_tx: bool,
+    /// Server-side cursors opened through `SqlConn::cursor_open`, by id.
+    pub(crate) cursors: HashMap<u64, crate::exec::CursorState>,
+    pub(crate) next_cursor: u64,
 }
 
 /// Map a parse error to the driver's error type.
@@ -257,6 +260,8 @@ impl Conn {
             max_string_size: 4000,
             pending_close: Vec::new(),
             in_tx: false,
+            cursors: HashMap::new(),
+            next_cursor: 1,
         };
         conn.negotiate().await?;
         conn.authenticate(cfg).await?;

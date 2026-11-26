@@ -3,7 +3,7 @@
 //! statements outside a transaction committed (Oracle has no autocommit).
 
 use crate::dialect::OracleDialect;
-use crate::exec::{Bind, Column, OutType};
+use crate::exec::{Bind, Column, CursorState, OutType};
 use crate::value::{fmt_interval, fmt_offset, ora_type, DateTime, ResultSet, Value};
 use crate::Conn;
 use kernway_orm_core::{
@@ -12,7 +12,7 @@ use kernway_orm_core::{
     error::OrmError,
     SqlDialect,
 };
-use kernway_orm_sql::{CallArg, CallResult, OutKind, Outcome, Param, Rows, SqlConn};
+use kernway_orm_sql::{CallArg, CallResult, OutKind, Outcome, Param, Rows, ServerCursor, SqlConn};
 use serde::de::DeserializeOwned;
 
 static DIALECT: OracleDialect = OracleDialect;
@@ -598,6 +598,74 @@ impl SqlConn for Conn {
         let columns: Vec<String> = r.columns.iter().map(|c| c.name.clone()).collect();
         let affected_rows = if columns.is_empty() { r.row_count } else { 0 };
         Ok(Outcome { columns, affected_rows, last_insert_id: None })
+    }
+
+    /// The query is executed; its first rows arrive with the execute and are
+    /// buffered, the rest stay on the server until fetched (FETCH calls).
+    /// Other statements may run on the connection in between.
+    async fn cursor_open(&mut self, sql: &str, params: &[Param]) -> Result<ServerCursor, OrmError> {
+        let mut first = Vec::new();
+        let (columns, open) = self.open_cursor(sql, &binds(params), &mut first).await?;
+        let names = columns.iter().map(|c| c.name.clone()).collect();
+        let id = self.next_cursor;
+        self.next_cursor += 1;
+        self.cursors.insert(id, CursorState { columns, buffered: first.into(), open });
+        Ok(ServerCursor::new(id, names))
+    }
+
+    async fn cursor_fetch(&mut self, cursor: &mut ServerCursor, max_rows: usize) -> Result<Vec<Vec<kernway_orm_sql::Value>>, OrmError> {
+        if cursor.is_done() {
+            return Ok(Vec::new());
+        }
+        let mut st = self
+            .cursors
+            .remove(&cursor.id())
+            .ok_or_else(|| OrmError::Query("cursor is closed".into()))?;
+        let want = max_rows.max(1);
+        let mut failed = None;
+        while st.buffered.len() < want {
+            let Some(open) = st.open.as_mut() else { break };
+            let mut more = Vec::new();
+            let need = u32::try_from(want - st.buffered.len()).unwrap_or(u32::MAX);
+            match self.fetch_open(open, need, &mut more).await {
+                Ok(done) => {
+                    st.buffered.extend(more);
+                    if done {
+                        st.open = None;
+                    }
+                }
+                Err(e) => {
+                    st.open = None;
+                    failed = Some(e);
+                    break;
+                }
+            }
+        }
+        if let Some(e) = failed {
+            cursor.finish();
+            return Err(e);
+        }
+        let n = want.min(st.buffered.len());
+        let rows: Vec<Vec<kernway_orm_sql::Value>> = st
+            .buffered
+            .drain(..n)
+            .map(|row| row.into_iter().zip(&st.columns).map(|(v, c)| to_shared(v, Some(c))).collect())
+            .collect();
+        if st.open.is_none() && st.buffered.is_empty() {
+            cursor.finish();
+        } else {
+            self.cursors.insert(cursor.id(), st);
+        }
+        Ok(rows)
+    }
+
+    async fn cursor_close(&mut self, cursor: ServerCursor) -> Result<(), OrmError> {
+        if let Some(st) = self.cursors.remove(&cursor.id()) {
+            if let Some(open) = st.open {
+                self.close_open(open);
+            }
+        }
+        Ok(())
     }
 
     async fn execute_many(&mut self, sql: &str, rows: &[Vec<Param>]) -> Result<u64, OrmError> {

@@ -121,6 +121,23 @@ impl Column {
     }
 }
 
+/// A query cursor left open on the server (see [`Conn::open_cursor`]).
+#[derive(Debug, Clone)]
+pub struct OpenCursor {
+    id: u16,
+    columns: Vec<Column>,
+    /// The last row fetched: the server sends repeated column values only once.
+    last_row: Vec<Value>,
+}
+
+/// A cursor of the shared `SqlConn` cursor API: rows the server already sent,
+/// and the cursor still open on the server (`None` once exhausted).
+pub(crate) struct CursorState {
+    pub(crate) columns: Vec<Column>,
+    pub(crate) buffered: std::collections::VecDeque<Vec<Value>>,
+    pub(crate) open: Option<OpenCursor>,
+}
+
 /// The outcome of [`Conn::execute`].
 #[derive(Debug, Clone, Default)]
 pub struct Executed {
@@ -1078,6 +1095,20 @@ impl Conn {
         autocommit: bool,
         sink: &mut RowSink<'_>,
     ) -> Result<Executed, OrmError> {
+        self.execute_open(sql, rows, autocommit, sink, None).await
+    }
+
+    /// Execute; with `open`, a query stops after its first round of rows and
+    /// leaves the cursor open on the server (stored in `open`) for
+    /// [`fetch_open`](Self::fetch_open), unless it is already exhausted.
+    async fn execute_open(
+        &mut self,
+        sql: &str,
+        rows: &[&[Bind]],
+        autocommit: bool,
+        sink: &mut RowSink<'_>,
+        mut open: Option<&mut Option<OpenCursor>>,
+    ) -> Result<Executed, OrmError> {
         let kind = stmt::classify(sql);
         let names = stmt::bind_names(sql, kind);
         let binds: &[Bind] = rows.first().copied().unwrap_or(&[]);
@@ -1162,6 +1193,20 @@ impl Conn {
             emit!(std::mem::take(&mut resp.rows));
         }
         if kind == Kind::Query {
+            if let Some(slot) = open.as_deref_mut() {
+                match &status.error {
+                    Some(e) if e.code == ERR_NO_DATA_FOUND => {}
+                    Some(e) => {
+                        self.queue_close(cursor_id);
+                        return Err(server_error(e));
+                    }
+                    None => {
+                        *slot = Some(OpenCursor { id: cursor_id, columns: result.columns.clone(), last_row });
+                        result.row_count = fetched;
+                        return Ok(result);
+                    }
+                }
+            }
             loop {
                 match &status.error {
                     Some(e) if e.code == ERR_NO_DATA_FOUND => break,
@@ -1254,6 +1299,53 @@ impl Conn {
         }
         self.queue_close(cursor_id);
         Ok(ResultSet { columns, rows })
+    }
+
+    /// Open a server-side cursor over a query: its first rows (already sent
+    /// by the server with the execute) go to `first`; `None` comes back when
+    /// those were all the rows (the cursor is then closed).
+    pub async fn open_cursor(&mut self, sql: &str, binds: &[Bind], first: &mut Vec<Vec<Value>>) -> Result<(Vec<Column>, Option<OpenCursor>), OrmError> {
+        if stmt::classify(sql) != Kind::Query {
+            return Err(OrmError::Query("cursor_open: the statement returns no rows".into()));
+        }
+        let mut slot = None;
+        let mut sink = |_: &[Column], row: Vec<Value>| {
+            first.push(row);
+            Ok(())
+        };
+        let ex = self.execute_open(sql, &[binds], false, &mut sink, Some(&mut slot)).await?;
+        Ok((ex.columns, slot))
+    }
+
+    /// Fetch up to `max_rows` more rows of an open cursor into `rows`;
+    /// returns whether the cursor is exhausted (then it is closed).
+    pub async fn fetch_open(&mut self, cur: &mut OpenCursor, max_rows: u32, rows: &mut Vec<Vec<Value>>) -> Result<bool, OrmError> {
+        let mut w = Writer::new();
+        self.begin_call(&mut w, func::FETCH);
+        w.ub(u64::from(cur.id)).ub(u64::from(max_rows.max(1)));
+        self.send_data(&w.buf).await?;
+        let cols = cur.columns.clone();
+        let r = self.read_call(Some(&cols), &[], &cur.last_row).await?;
+        if let Some(last) = r.rows.last() {
+            cur.last_row.clone_from(last);
+        }
+        rows.extend(r.rows);
+        match &r.status.error {
+            Some(e) if e.code == ERR_NO_DATA_FOUND => {
+                self.queue_close(cur.id);
+                Ok(true)
+            }
+            Some(e) => {
+                self.queue_close(cur.id);
+                Err(server_error(e))
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Close an open cursor (with the next call).
+    pub fn close_open(&mut self, cur: OpenCursor) {
+        self.queue_close(cur.id);
     }
 
     fn queue_close(&mut self, cursor_id: u16) {
