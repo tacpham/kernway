@@ -26,6 +26,8 @@
 //! - Client certificates (mutual TLS).
 
 use kernway_orm_core::error::OrmError;
+pub use kernway_orm_core::decode::Cell;
+use kernway_orm_core::decode::recycle;
 use kernway_tls::{AsyncTlsStream, CertCheck};
 use rt_net::AsyncTcpStream;
 use std::collections::{HashMap, VecDeque};
@@ -196,42 +198,6 @@ pub enum QueryResult {
     },
 }
 
-/// One result-set cell, borrowed from the packet it arrived in where possible —
-/// decoding a row allocates nothing for its cells.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Cell<'a> {
-    /// SQL `NULL`.
-    Null,
-    /// A text-protocol value, or a binary string / decimal / blob / JSON value:
-    /// the raw bytes as sent.
-    Bytes(&'a [u8]),
-    /// A binary signed integer (`TINY` … `LONGLONG`).
-    Int(i64),
-    /// A binary unsigned integer.
-    UInt(u64),
-    /// A binary `FLOAT`.
-    F32(f32),
-    /// A binary `DOUBLE`.
-    F64(f64),
-    /// A binary `DATE` / `DATETIME` / `TIMESTAMP` / `TIME`, already formatted.
-    Owned(String),
-}
-
-impl Cell<'_> {
-    /// The cell as text, as the text protocol would have sent it (`None` = NULL).
-    pub fn to_text(&self) -> Option<String> {
-        match self {
-            Cell::Null => None,
-            Cell::Bytes(b) => Some(String::from_utf8_lossy(b).into_owned()),
-            Cell::Int(i) => Some(i.to_string()),
-            Cell::UInt(u) => Some(u.to_string()),
-            Cell::F32(f) => Some(f.to_string()),
-            Cell::F64(f) => Some(f.to_string()),
-            Cell::Owned(s) => Some(s.clone()),
-        }
-    }
-}
-
 /// Outcome of a statement whose rows were decoded by a caller-supplied
 /// function (see [`Conn::query_with`] / [`Conn::exec_prepared_with`]).
 #[derive(Debug)]
@@ -276,14 +242,6 @@ impl From<Fetched<Vec<Option<String>>>> for QueryResult {
 /// A row as text cells — the [`QueryResult`] shape.
 fn cells_to_text(cells: &[Cell<'_>]) -> Result<Vec<Option<String>>, OrmError> {
     Ok(cells.iter().map(Cell::to_text).collect())
-}
-
-/// Re-type an **empty** cell vector to a new lifetime, keeping its allocation
-/// (an in-place collect: same layout, no element is ever mapped). Lets one
-/// scratch vector serve every row although each row borrows a different packet.
-fn recycle<'b>(mut cells: Vec<Cell<'_>>) -> Vec<Cell<'b>> {
-    cells.clear();
-    cells.into_iter().map(|_| unreachable!("the vector is empty")).collect()
 }
 
 /// Bytes requested from the socket per read: one syscall drains many small
@@ -1941,18 +1899,6 @@ mod tests {
                 .expect("wrong password must fail");
             assert!(err.to_string().contains("only does over TLS"), "{err}");
         });
-    }
-
-    #[test]
-    fn recycle_keeps_the_allocation_across_lifetimes() {
-        let packet = [1u8, b'x'];
-        let mut cells: Vec<Cell<'_>> = Vec::with_capacity(8);
-        cells.push(Cell::Bytes(&packet[1..]));
-        let ptr = cells.as_ptr() as usize;
-        let back: Vec<Cell<'static>> = recycle(cells);
-        assert!(back.is_empty());
-        assert_eq!(back.capacity(), 8);
-        assert_eq!(back.as_ptr() as usize, ptr, "same buffer, no new allocation");
     }
 
     #[test]

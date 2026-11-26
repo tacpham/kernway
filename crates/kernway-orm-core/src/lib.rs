@@ -94,6 +94,7 @@ use std::pin::Pin;
 /// runtime that has no work-stealing.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
+pub mod decode;
 /// SQL syntax adapters shared by relational backends.
 pub mod dialect;
 /// The entry-point driver abstraction implemented by backends.
