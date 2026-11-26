@@ -93,7 +93,7 @@ fn named_unsupported() -> OrmError {
 /// A positional `CALL` argument: `OUT` slots are bound as NULL.
 fn positional(a: &CallArg) -> Result<BindValue, OrmError> {
     match a {
-        CallArg::In(p) | CallArg::InOut(p) => Ok(bind(p)),
+        CallArg::In(p) | CallArg::InOut(p) | CallArg::InOutAs(p, _) => Ok(bind(p)),
         CallArg::Out(_) => Ok(BindValue::Null),
         CallArg::Named(..) => Err(named_unsupported()),
     }

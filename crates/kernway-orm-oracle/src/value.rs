@@ -163,6 +163,9 @@ pub enum Value {
     Timestamp(DateTime),
     /// RAW / LONG RAW bytes.
     Raw(Vec<u8>),
+    /// A CLOB / BLOB locator (the driver reads it into [`Str`](Self::Str) /
+    /// [`Raw`](Self::Raw) before returning; used internally for binds).
+    Lob(crate::lob::Lob),
     /// BOOLEAN (Oracle 23ai+).
     Bool(bool),
     /// TIMESTAMP WITH TIME ZONE: the local wall time and its UTC offset in
@@ -214,6 +217,7 @@ impl Value {
             Value::Raw(b) => Some(b.iter().map(|x| format!("{x:02X}")).collect()),
             Value::Bool(b) => Some(if *b { "1" } else { "0" }.to_string()),
             Value::Cursor(rs) => Some(format!("<cursor: {} rows>", rs.rows.len())),
+            Value::Lob(_) => Some("<LOB locator>".into()),
         }
     }
 

@@ -34,6 +34,7 @@ pub(crate) mod msg {
     pub const RENEGOTIATE: u8 = 28;
     pub const END_OF_RESPONSE: u8 = 29;
     pub const TOKEN: u8 = 33;
+    pub const LOB_DATA: u8 = 14;
 }
 
 /// TTC function codes.
@@ -47,6 +48,7 @@ pub(crate) mod func {
     pub const ROLLBACK: u8 = 15;
     pub const LOGOFF: u8 = 9;
     pub const CLOSE_CURSORS: u8 = 105;
+    pub const LOB_OP: u8 = 96;
 }
 
 const DATA_FLAGS_EOF: u16 = 0x0040;

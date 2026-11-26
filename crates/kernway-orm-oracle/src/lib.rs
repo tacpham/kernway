@@ -44,6 +44,7 @@ mod driver;
 mod pool;
 mod data_types_table;
 mod exec;
+mod lob;
 mod stmt;
 mod tns;
 mod value;

@@ -44,7 +44,7 @@ PL/SQL | OUT of every scalar kind: NUMBER, BINARY_DOUBLE, VARCHAR2, RAW, BOOLEAN
 PL/SQL | Compilation errors reported with line / column / message (not left INVALID silently) | compilation_errors_are_reported_with_their_lines
 PL/SQL | Scripts: SQL + PL/SQL units ended by '/', quotes / q'[…]' / comments respected | scripts_run_sql_and_plsql_units_and_stop_at_the_first_error, backend::tests::scripts_split_on_semicolons_and_slash_lines
 PL/SQL | Procedure names / parameter names validated (never SQL) | backend::tests::procedure_names_are_identifiers_only, procedure_calls_return_out_values_cursors_implicit_results_and_output
-PL/SQL | CLOB / BLOB as OUT or function result; IN values over 32 KB (LOB locators) | GAP: planned phase 2
+PL/SQL | CLOB / BLOB of any size: OUT arguments and function results read through locators, IN values past 32 KB as temporary LOBs, IN OUT; UTF-16 CLOB data incl. surrogates; temporary LOBs freed (checked in v$temporary_lobs) | out_clob_and_blob_of_any_size_come_back_whole, in_values_past_32k_travel_as_temporary_lobs, in_out_clob_and_blob, lobs_through_call_and_call_function_of_any_size
 PL/SQL | RECORD, collections (VARRAY, nested table), associative arrays, object types as arguments | GAP: planned phase 3
 
 Other Oracle features | Advanced Queuing, Continuous Query Notification, SODA, two-phase commit | GAP: not implemented

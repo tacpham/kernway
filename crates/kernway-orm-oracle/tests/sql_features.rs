@@ -478,3 +478,60 @@ END;
         assert!(db.call("kwo_api.kinds", &[CallArg::named("bad name", 1)]).await.is_err());
     });
 }
+
+#[test]
+fn lobs_through_call_and_call_function_of_any_size() {
+    let Some(url) = url() else { return eprintln!("skip: KERNWAY_ORACLE_HOST not set") };
+    run(async move {
+        let db = OracleDriver::connect(&url).await.unwrap();
+        db.execute_script(
+            "CREATE OR REPLACE PACKAGE kwo_lob AS
+  FUNCTION repeat_text(p_s IN VARCHAR2, p_n IN NUMBER) RETURN CLOB;
+  FUNCTION bytes_of(p_n IN NUMBER) RETURN BLOB;
+  PROCEDURE measure(p_c IN CLOB, p_b IN BLOB, p_clen OUT NUMBER, p_blen OUT NUMBER, p_copy OUT CLOB);
+  PROCEDURE grow(p_c IN OUT CLOB);
+END;
+/
+CREATE OR REPLACE PACKAGE BODY kwo_lob AS
+  FUNCTION repeat_text(p_s IN VARCHAR2, p_n IN NUMBER) RETURN CLOB IS c CLOB;
+  BEGIN DBMS_LOB.CREATETEMPORARY(c, TRUE);
+    FOR i IN 1 .. p_n LOOP DBMS_LOB.APPEND(c, TO_CLOB(p_s)); END LOOP; RETURN c; END;
+  FUNCTION bytes_of(p_n IN NUMBER) RETURN BLOB IS b BLOB;
+  BEGIN DBMS_LOB.CREATETEMPORARY(b, TRUE);
+    FOR i IN 1 .. p_n LOOP DBMS_LOB.WRITEAPPEND(b, 4, HEXTORAW('DEADBEEF')); END LOOP; RETURN b; END;
+  PROCEDURE measure(p_c IN CLOB, p_b IN BLOB, p_clen OUT NUMBER, p_blen OUT NUMBER, p_copy OUT CLOB) IS
+  BEGIN p_clen := DBMS_LOB.GETLENGTH(p_c); p_blen := DBMS_LOB.GETLENGTH(p_b); p_copy := p_c; END;
+  PROCEDURE grow(p_c IN OUT CLOB) IS BEGIN DBMS_LOB.APPEND(p_c, p_c); END;
+END;
+/",
+        )
+        .await
+        .unwrap();
+
+        // Function results of any size.
+        let r = db.call_function("kwo_lob.repeat_text", OutKind::LongText, &["Đà Lạt ".into(), 20_000.into()]).await.unwrap();
+        assert_eq!(r.value, Value::Text("Đà Lạt ".repeat(20_000)));
+        let r = db.call_function("kwo_lob.bytes_of", OutKind::LongBytes, &[15_000.into()]).await.unwrap();
+        assert_eq!(r.value, Value::Bytes([0xDE, 0xAD, 0xBE, 0xEF].repeat(15_000)));
+
+        // IN values past 32 KB, OUT CLOB back.
+        let text = "chữ ".repeat(30_000);
+        let bytes: Vec<u8> = (0..100_000u32).map(|i| i as u8).collect();
+        let r = db
+            .call(
+                "kwo_lob.measure",
+                &[text.clone().into(), bytes.into(), OutKind::Number.into(), OutKind::Number.into(), OutKind::LongText.into()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.out[0], Value::Int(text.encode_utf16().count() as i64));
+        assert_eq!(r.out[1], Value::Int(100_000));
+        assert_eq!(r.out[2], Value::Text(text.clone()));
+
+        // IN OUT: small in, large out; and large in, larger out.
+        let r = db.call("kwo_lob.grow", &[CallArg::InOutAs("ab".repeat(20_000).into(), OutKind::LongText)]).await.unwrap();
+        assert_eq!(r.out[0], Value::Text("ab".repeat(40_000)));
+        let r = db.call("kwo_lob.grow", &[CallArg::InOut(text.clone().into())]).await.unwrap();
+        assert_eq!(r.out[0], Value::Text(text.repeat(2)));
+    });
+}

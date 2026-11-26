@@ -62,6 +62,10 @@ pub enum OutType {
     IntervalYm,
     /// INTERVAL DAY TO SECOND.
     IntervalDs,
+    /// CLOB of any size: returned as [`Value::Str`] (read through its locator).
+    Clob,
+    /// BLOB of any size: returned as [`Value::Raw`].
+    Blob,
 }
 
 /// A bind variable, by position.
@@ -150,6 +154,8 @@ fn out_meta(t: OutType) -> (u8, u8, u32) {
         OutType::TimestampTz => (ora_type::TIMESTAMP_TZ, 0, 13),
         OutType::IntervalYm => (ora_type::INTERVAL_YM, 0, 5),
         OutType::IntervalDs => (ora_type::INTERVAL_DS, 0, 11),
+        OutType::Clob => (ora_type::CLOB, 1, LOB_BIND_SIZE),
+        OutType::Blob => (ora_type::BLOB, 0, LOB_BIND_SIZE),
     }
 }
 
@@ -167,8 +173,16 @@ fn value_meta(v: &Value) -> (u8, u8, u32) {
         Value::Raw(b) => (ora_type::RAW, 0, (b.len() as u32).max(1)),
         Value::Bool(_) => (ora_type::BOOLEAN, 0, 4),
         Value::Cursor(_) => (ora_type::CURSOR, 0, 4),
+        Value::Lob(l) if l.blob => (ora_type::BLOB, 0, LOB_BIND_SIZE),
+        Value::Lob(_) => (ora_type::CLOB, 1, LOB_BIND_SIZE),
     }
 }
+
+/// Bind buffer size of a LOB locator.
+const LOB_BIND_SIZE: u32 = 112;
+/// Longest value a PL/SQL VARCHAR2 / RAW bind can carry; past it, a value
+/// travels as a temporary LOB.
+const PLSQL_MAX_BIND: usize = 32767;
 
 impl Bind {
     /// (ora_type, csfrm, buffer_size) sent in the bind metadata.
@@ -233,6 +247,9 @@ fn write_value(w: &mut Writer, ora_type_num: u8, v: Option<&Value>) -> Result<()
             }
         }
         Value::Cursor(_) => return Err("a cursor cannot be passed as an input bind".into()),
+        Value::Lob(l) => {
+            w.bytes_2l(&l.locator);
+        }
     }
     Ok(())
 }
@@ -329,7 +346,8 @@ fn write_execute(
     if num_params > 0 {
         for &(t, csfrm, size) in &metas {
             w.u8(t).u8(BIND_USE_INDICATORS).u8(0).u8(0);
-            w.ub(u64::from(size)).ub(0).ub(0).ub(0).ub(0);
+            let cont = if matches!(t, ora_type::CLOB | ora_type::BLOB) { LOB_PREFETCH_FLAG } else { 0 };
+            w.ub(u64::from(size)).ub(0).ub(cont).ub(0).ub(0);
             w.ub(if csfrm != 0 { 873 } else { 0 }).u8(csfrm).ub(0);
             if fv >= 8 {
                 w.ub(0);
@@ -362,6 +380,22 @@ fn write_execute(
         }
     }
     Ok(())
+}
+
+/// Whether a PL/SQL bind must travel as a temporary LOB: a CLOB / BLOB
+/// IN OUT argument with an input value, or an IN value past the bind limit.
+fn needs_temp_lob(b: &Bind) -> bool {
+    let big = |v: &Value| match v {
+        Value::Str(s) => s.len() > PLSQL_MAX_BIND,
+        Value::Raw(r) => r.len() > PLSQL_MAX_BIND,
+        _ => false,
+    };
+    match b {
+        Bind::In(v) => big(v),
+        Bind::InOut(v, OutType::Clob | OutType::Blob) => !matches!(v, Value::Null | Value::Lob(_)),
+        Bind::InOut(v, _) => big(v),
+        Bind::Out(_) => false,
+    }
 }
 
 fn is_text_or_raw(t: u8) -> bool {
@@ -586,6 +620,20 @@ fn parse_response(
                             r.sb()?; // actual length
                             out.cursors.push((out.out_values.len(), id, cols));
                             out.out_values.push(Value::Null);
+                            continue;
+                        }
+                        if matches!(ot, ora_type::CLOB | ora_type::BLOB) {
+                            // A locator: size, chunk size, then the locator.
+                            let v = if r.ub4()? > 0 {
+                                r.ub8()?;
+                                r.ub4()?;
+                                let locator = r.bytes()?.unwrap_or_default();
+                                Value::Lob(crate::lob::Lob { locator, blob: ot == ora_type::BLOB })
+                            } else {
+                                Value::Null
+                            };
+                            r.sb()?; // actual length
+                            out.out_values.push(v);
                             continue;
                         }
                         let v = match r.bytes()? {
@@ -865,7 +913,7 @@ fn parse_describe(r: &mut Reader<'_>, fv: u8) -> PResult<Vec<Column>> {
     Ok(cols)
 }
 
-fn server_error(e: &crate::conn::ServerError) -> OrmError {
+pub(crate) fn server_error(e: &crate::conn::ServerError) -> OrmError {
     let msg = if e.message.starts_with("ORA-") { e.message.clone() } else { format!("ORA-{:05}: {}", e.code, e.message) };
     match e.code {
         1 => OrmError::UniqueViolation { field: unique_field(&e.message) },
@@ -948,7 +996,82 @@ impl Conn {
         Ok(self.execute_core(sql, &refs, autocommit, &mut sink).await?.row_count)
     }
 
+    /// [`execute_inner`](Self::execute_inner) with LOBs in PL/SQL: an IN
+    /// value past the 32 KB bind limit (or any IN value of a CLOB / BLOB
+    /// IN OUT argument) goes in a temporary LOB, and CLOB / BLOB OUT values
+    /// are read through their locators. Temporary LOBs are freed after.
     async fn execute_core(
+        &mut self,
+        sql: &str,
+        rows: &[&[Bind]],
+        autocommit: bool,
+        sink: &mut RowSink<'_>,
+    ) -> Result<Executed, OrmError> {
+        let plsql = stmt::classify(sql) == Kind::PlSql;
+        let mut temps: Vec<crate::lob::Lob> = Vec::new();
+        let lobbed: Option<Vec<Bind>> = match rows {
+            [one] if plsql && one.iter().any(needs_temp_lob) => {
+                let mut out = Vec::with_capacity(one.len());
+                for b in one.iter() {
+                    out.push(match b {
+                        b if !needs_temp_lob(b) => b.clone(),
+                        Bind::In(v) | Bind::InOut(v, _) => {
+                            let blob = match b {
+                                Bind::InOut(_, OutType::Blob) => true,
+                                Bind::InOut(_, OutType::Clob) => false,
+                                _ => matches!(v, Value::Raw(_)),
+                            };
+                            let mut lob = self.lob_create_temp(blob).await?;
+                            temps.push(lob.clone());
+                            self.lob_write(&mut lob, v).await?;
+                            match b {
+                                // The output comes back the way it went in: as a LOB.
+                                Bind::InOut(..) => Bind::InOut(Value::Lob(lob), if blob { OutType::Blob } else { OutType::Clob }),
+                                _ => Bind::In(Value::Lob(lob)),
+                            }
+                        }
+                        Bind::Out(_) => b.clone(),
+                    });
+                }
+                Some(out)
+            }
+            _ => None,
+        };
+        let result = match &lobbed {
+            Some(binds) => self.execute_inner(sql, &[binds.as_slice()], autocommit, sink).await,
+            None => self.execute_inner(sql, rows, autocommit, sink).await,
+        };
+        let result = match result {
+            Ok(mut ex) => {
+                let mut read = Ok(());
+                for v in &mut ex.out {
+                    if let Value::Lob(lob) = v {
+                        let lob = lob.clone();
+                        match self.lob_read_all(&lob).await {
+                            Ok(data) => *v = data,
+                            Err(e) => {
+                                read = Err(e);
+                                break;
+                            }
+                        }
+                        if lob.is_temporary() && !temps.contains(&lob) {
+                            temps.push(lob);
+                        }
+                    }
+                }
+                read.map(|()| ex)
+            }
+            Err(e) => Err(e),
+        };
+        for lob in temps {
+            if matches!(self.lob_free_temp(&lob).await, Err(OrmError::Connection(_))) {
+                break;
+            }
+        }
+        result
+    }
+
+    async fn execute_inner(
         &mut self,
         sql: &str,
         rows: &[&[Bind]],

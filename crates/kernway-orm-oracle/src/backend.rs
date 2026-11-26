@@ -51,7 +51,7 @@ fn cell<'a>(v: &'a Value, col: Option<&ColumnDef>) -> Cell<'a> {
         v @ (Value::IntervalYm { .. } | Value::IntervalDs { .. }) => Cell::Owned(fmt_interval(v, 2, 6)),
         Value::Raw(b) => Cell::Bytes(b),
         Value::Bool(b) => Cell::Bool(*b),
-        Value::Cursor(_) => Cell::Null,
+        Value::Cursor(_) | Value::Lob(_) => Cell::Null,
     }
 }
 
@@ -112,6 +112,7 @@ pub(crate) fn to_shared(v: Value, col: Option<&Column>) -> kernway_orm_sql::Valu
         Value::Raw(b) => V::Bytes(b),
         Value::Bool(b) => V::Bool(b),
         Value::Cursor(rs) => V::Rows(Box::new(result_set(rs))),
+        Value::Lob(_) => V::Null,
         v @ (Value::IntervalYm { .. } | Value::IntervalDs { .. }) => {
             // Leading precision and fractional digits as declared (Oracle's
             // defaults: 2 and 6).
@@ -144,6 +145,8 @@ fn out_type(kind: OutKind) -> OutType {
         OutKind::DateTimeTz => OutType::TimestampTz,
         OutKind::IntervalYm => OutType::IntervalYm,
         OutKind::IntervalDs => OutType::IntervalDs,
+        OutKind::LongText => OutType::Clob,
+        OutKind::LongBytes => OutType::Blob,
     }
 }
 
@@ -162,6 +165,10 @@ fn arg_bind(a: &CallArg) -> Bind {
         CallArg::Out(k) => Bind::Out(out_type(*k)),
         CallArg::InOut(p) => match bind(p) {
             Bind::In(v) => Bind::InOut(v, inout_type(p)),
+            other => other,
+        },
+        CallArg::InOutAs(p, k) => match bind(p) {
+            Bind::In(v) => Bind::InOut(v, out_type(*k)),
             other => other,
         },
         CallArg::Named(..) => unreachable!("inner() unwraps names"),
@@ -213,6 +220,9 @@ fn inout_type(p: &Param) -> OutType {
         Param::Int(_) | Param::UInt(_) => OutType::Number,
         Param::Float(_) => OutType::Float,
         Param::Bool(_) => OutType::Bool,
+        // Past the PL/SQL bind limit an IN OUT value is a LOB both ways.
+        Param::Bytes(b) if b.len() > 32767 => OutType::Blob,
+        Param::Str(s) if s.len() > 32767 => OutType::Clob,
         Param::Bytes(_) => OutType::Raw(32767),
         Param::Str(_) | Param::Null => OutType::Str(8191),
     }

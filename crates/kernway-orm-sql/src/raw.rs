@@ -263,6 +263,11 @@ pub enum OutKind {
     IntervalYm,
     /// Interval in days to seconds.
     IntervalDs,
+    /// Character data of any size (a CLOB): no length limit, read back as
+    /// [`Value::Text`].
+    LongText,
+    /// Binary data of any size (a BLOB): read back as [`Value::Bytes`].
+    LongBytes,
 }
 
 /// One argument of a stored-procedure call.
@@ -272,8 +277,12 @@ pub enum CallArg {
     In(Param),
     /// An `OUT` argument.
     Out(OutKind),
-    /// An `IN OUT` argument with its initial value.
+    /// An `IN OUT` argument with its initial value (its output read back as
+    /// the value's own kind).
     InOut(Param),
+    /// An `IN OUT` argument read back as `OutKind` — e.g. a CLOB parameter
+    /// whose output may outgrow a string: `CallArg::InOutAs(text, OutKind::LongText)`.
+    InOutAs(Param, OutKind),
     /// An argument passed by parameter name (`name => value`), in any order
     /// and skipping defaulted parameters. Oracle only: MySQL has no named
     /// arguments.
