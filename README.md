@@ -402,5 +402,3 @@ Progress follows the [walking-skeleton milestones](docs/design/MILESTONES.md) �
 ## License
 
 Source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE): free for personal and other noncommercial use (including schools, charities and government); **commercial use — building or running a product or service for a business — needs a commercial license** from the author.
-
-Versions published earlier under GPL-3.0 / MIT keep the license they were published with.
