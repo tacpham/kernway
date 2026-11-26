@@ -215,12 +215,10 @@ pub(crate) fn proto_err(e: ParseError) -> OrmError {
 impl Conn {
     /// Open a session: TCP connect, TNS connect, negotiate, authenticate.
     pub async fn connect(cfg: &OracleConfig) -> Result<Self, OrmError> {
-        use std::net::ToSocketAddrs;
-        let addr = (cfg.host.as_str(), cfg.port)
-            .to_socket_addrs()
-            .map_err(|e| conn_err(format!("resolve {}:{}: {e}", cfg.host, cfg.port)))?
-            .next()
-            .ok_or_else(|| conn_err(format!("no address for {}:{}", cfg.host, cfg.port)))?;
+        // Nothing blocks the shard: a host name resolves on the blocking pool.
+        let addr = kernway_wire::offload::resolve(&cfg.host, cfg.port)
+            .await
+            .map_err(|e| conn_err(format!("resolve {}:{}: {e}", cfg.host, cfg.port)))?;
         let tcp = AsyncTcpStream::connect(addr)
             .await
             .map_err(|e| conn_err(format!("connect {}:{}: {e}", cfg.host, cfg.port)))?;
@@ -228,7 +226,11 @@ impl Conn {
         let mut tls_config = None;
         if cfg.ssl_mode != SslMode::Disabled {
             let ca = match &cfg.ssl_ca {
-                Some(p) => Some(std::fs::read(p).map_err(|e| conn_err(format!("read ssl-ca {}: {e}", p.display())))?),
+                Some(p) => Some(
+                    kernway_wire::offload::read_file(p)
+                        .await
+                        .map_err(|e| conn_err(format!("read ssl-ca {}: {e}", p.display())))?,
+                ),
                 None => None,
             };
             let check = match cfg.ssl_mode {
@@ -461,17 +463,29 @@ impl Conn {
             .find(|(k, _, _)| k == "AUTH_VFR_DATA")
             .map(|(_, _, f)| *f)
             .ok_or_else(|| conn_err("server sent no password verifier (AUTH_VFR_DATA)"))?;
-        let get = |k: &str| self.session.get(k).map(String::as_str);
+        let get = |k: &str| self.session.get(k).cloned();
         let num = |k: &str| get(k).and_then(|v| v.parse::<u32>().ok());
-        let challenge = ServerChallenge {
-            verifier_type,
-            vfr_data: get("AUTH_VFR_DATA").unwrap_or_default(),
-            sesskey: get("AUTH_SESSKEY").ok_or_else(|| conn_err("server sent no AUTH_SESSKEY"))?,
-            vgen_count: num("AUTH_PBKDF2_VGEN_COUNT"),
-            sder_count: num("AUTH_PBKDF2_SDER_COUNT"),
-            csk_salt: get("AUTH_PBKDF2_CSK_SALT"),
-        };
-        let proof = auth_crypto::prove(cfg.password.as_bytes(), &challenge, None).map_err(conn_err)?;
+        let vfr_data = get("AUTH_VFR_DATA").unwrap_or_default();
+        let sesskey = get("AUTH_SESSKEY").ok_or_else(|| conn_err("server sent no AUTH_SESSKEY"))?;
+        let (vgen_count, sder_count, csk_salt) =
+            (num("AUTH_PBKDF2_VGEN_COUNT"), num("AUTH_PBKDF2_SDER_COUNT"), get("AUTH_PBKDF2_CSK_SALT"));
+        let password = cfg.password.clone().into_bytes();
+        // PBKDF2-SHA512 with the server's iteration counts is deliberate CPU
+        // work (milliseconds): it runs on the blocking pool, not the shard.
+        let proof = rt_core::spawn_blocking(move || {
+            let challenge = ServerChallenge {
+                verifier_type,
+                vfr_data: &vfr_data,
+                sesskey: &sesskey,
+                vgen_count,
+                sder_count,
+                csk_salt: csk_salt.as_deref(),
+            };
+            auth_crypto::prove(&password, &challenge, None)
+        })
+        .await
+        .ok_or_else(|| conn_err("auth: blocking-pool worker panicked"))?
+        .map_err(conn_err)?;
 
         let mut phase_two: Vec<(&str, String, u32)> = vec![("AUTH_SESSKEY", proof.sesskey.clone(), 1)];
         if let Some(speedy) = &proof.speedy_key {

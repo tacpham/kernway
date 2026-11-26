@@ -15,8 +15,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  mysql:
-    name: mysql (${{ matrix.os }})
+  drivers:
+    name: drivers (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -61,5 +61,41 @@ jobs:
           cargo test -p kernway-orm-mysql --features mysql --test connection local_socket_ -- --test-threads=1 --nocapture 2>&1
           | tee local.log; ! grep -qi "skip:" local.log; grep -q "3 passed" local.log
 
-      - name: Oracle driver builds
-        run: cargo build -p kernway-orm-oracle --all-targets
+      - name: Oracle driver — builds; unit and protocol tests on this OS
+        shell: bash
+        run: cargo test -p kernway-orm-oracle --lib --test no_blocking -- --test-threads=1
+
+  # Oracle Database ships a server image for Linux only (no macOS / Windows
+  # runner can host one), so the live suite runs here; the client code it
+  # exercises is the same on every OS (above: it builds and its unit tests pass
+  # there, and its sockets are rt-net's, proven by the MySQL jobs).
+  oracle:
+    name: oracle live (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Start Oracle Database Free
+        shell: bash
+        run: |
+          docker run -d --name kw-oracle -p 1521:1521 -e ORACLE_PASSWORD=oracle_pw \
+            -e APP_USER=kernway -e APP_USER_PASSWORD=kernway_pw gvenzl/oracle-free:23-slim
+          for _ in $(seq 1 90); do
+            docker exec kw-oracle /opt/oracle/healthcheck.sh >/dev/null 2>&1 && break
+            sleep 5
+          done
+          docker exec kw-oracle /opt/oracle/healthcheck.sh
+
+      - name: Oracle driver — whole suite, live (TCPS needs a wallet: verified by acceptance/run.sh)
+        shell: bash
+        env:
+          KERNWAY_ORACLE_HOST: 127.0.0.1
+        run: |
+          cargo test -p kernway-orm-oracle -- --test-threads=1 --nocapture --skip tcps_ 2>&1 | tee oracle.log
+          grep -q "^test result: FAILED" oracle.log && exit 1
+          # Every live test must have run: a skip is a failure here.
+          if grep -E "^\s*skip\b" oracle.log; then echo "a live test skipped"; exit 1; fi

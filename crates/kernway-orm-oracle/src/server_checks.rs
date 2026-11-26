@@ -29,7 +29,7 @@ const NUMBERS: &[&str] = &[
 
 #[test]
 fn number_encoding_matches_the_servers_own_bytes() {
-    let Some(cfg) = cfg() else { return };
+    let Some(cfg) = cfg() else { return eprintln!("skip: KERNWAY_ORACLE_HOST not set") };
     rt_core::Executor::new()
         .unwrap()
         .block_on(async move {
@@ -63,7 +63,7 @@ fn number_encoding_matches_the_servers_own_bytes() {
 
 #[test]
 fn dates_timestamps_and_floats_compare_equal_on_the_server() {
-    let Some(cfg) = cfg() else { return };
+    let Some(cfg) = cfg() else { return eprintln!("skip: KERNWAY_ORACLE_HOST not set") };
     rt_core::Executor::new()
         .unwrap()
         .block_on(async move {

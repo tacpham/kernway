@@ -12,8 +12,12 @@
 //! - [`StmtCache`]: a bounded map of prepared statements by SQL text that hands
 //!   back the evicted statement for the driver to close its own way.
 //!
+//! - [`offload`]: what blocks when opening a connection — host-name lookup,
+//!   reading certificate files — run on the blocking pool and awaited.
+//!
 //! All of it is single-shard, like the rest of the thread-per-core stack.
 
+pub mod offload;
 mod pool;
 mod stmt_cache;
 mod stream;

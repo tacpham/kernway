@@ -139,7 +139,7 @@ ci_evidence() {
     >> "$WORK/test.log" 2>/dev/null || true
   CMD="$CMD; CI run $run (Linux / macOS / Windows)"
 }
-if [ "$DB" = mysql ]; then ci_evidence; fi
+ci_evidence
 
 python3 - "$WORK/meta.json" <<PY
 import json, subprocess, sys, datetime

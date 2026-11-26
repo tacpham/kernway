@@ -33,7 +33,6 @@ use kernway_orm_core::decode::recycle;
 use kernway_tls::CertCheck;
 use kernway_wire::{BufStream, StmtCache, READ_RETAIN};
 use rt_net::AsyncTcpStream;
-use std::net::ToSocketAddrs;
 
 // --- Capability flags (only the ones we assert) ---
 const CLIENT_LONG_PASSWORD: u32 = 0x0000_0001;
@@ -1277,31 +1276,14 @@ fn compress_frames(plain_all: &[u8], mut seq: u8, wire: &mut Vec<u8>) -> Result<
     Ok(seq)
 }
 
-/// Read a configured file (CA, certificate, key) on the blocking pool.
+/// Read a configured file (CA, certificate, key) off the shard.
 async fn read_file(path: &std::path::Path, what: &'static str) -> Result<Vec<u8>, OrmError> {
-    let p = path.to_path_buf();
-    rt_core::spawn_blocking(move || std::fs::read(&p).map_err(|e| conn_err(format!("read {what} {}: {e}", p.display()))))
-        .await
-        .ok_or_else(|| conn_err(format!("read {what}: worker panicked")))?
+    kernway_wire::offload::read_file(path).await.map_err(|e| conn_err(format!("read {what} {}: {e}", path.display())))
 }
 
-/// The address of `host:port`: an IP literal is parsed in place; a name is
-/// resolved on the blocking pool (the system resolver blocks).
+/// The address of `host:port`, resolved off the shard.
 async fn resolve(host: &str, port: u16) -> Result<std::net::SocketAddr, OrmError> {
-    let literal = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
-    if let Ok(ip) = literal.parse::<std::net::IpAddr>() {
-        return Ok(std::net::SocketAddr::new(ip, port));
-    }
-    let name = host.to_string();
-    rt_core::spawn_blocking(move || {
-        (name.as_str(), port)
-            .to_socket_addrs()
-            .map_err(|e| conn_err(format!("resolve {name}:{port} failed: {e}")))?
-            .next()
-            .ok_or_else(|| conn_err(format!("no address for {name}:{port}")))
-    })
-    .await
-    .ok_or_else(|| conn_err("resolve: worker panicked"))?
+    kernway_wire::offload::resolve(host, port).await.map_err(|e| conn_err(format!("resolve {host}:{port} failed: {e}")))
 }
 
 /// Open the server's local channel.

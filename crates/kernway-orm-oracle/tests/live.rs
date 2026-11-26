@@ -2,7 +2,7 @@
 
 #[test]
 fn logs_in_with_user_and_password() {
-    let Ok(host) = std::env::var("KERNWAY_ORACLE_HOST") else { return };
+    let Ok(host) = std::env::var("KERNWAY_ORACLE_HOST") else { return eprintln!("skip: KERNWAY_ORACLE_HOST not set") };
     rt_core::Executor::new().unwrap().block_on(async move {
         let cfg = kernway_orm_oracle::OracleConfig::from_url(&format!("oracle://kernway:kernway_pw@{host}:1521/FREEPDB1")).unwrap();
         let conn = kernway_orm_oracle::Conn::connect(&cfg).await.unwrap();
@@ -34,7 +34,7 @@ fn s(v: &Value) -> String {
 
 #[test]
 fn select_with_binds_and_types() {
-    let Some(cfg) = cfg() else { return };
+    let Some(cfg) = cfg() else { return eprintln!("skip: KERNWAY_ORACLE_HOST not set") };
     run(async move {
         let mut c = Conn::connect(&cfg).await.unwrap();
         let r = c
@@ -67,7 +67,7 @@ fn select_with_binds_and_types() {
 
 #[test]
 fn many_rows_are_fetched_in_rounds() {
-    let Some(cfg) = cfg() else { return };
+    let Some(cfg) = cfg() else { return eprintln!("skip: KERNWAY_ORACLE_HOST not set") };
     run(async move {
         let mut c = Conn::connect(&cfg).await.unwrap();
         let r = c
@@ -92,7 +92,7 @@ fn many_rows_are_fetched_in_rounds() {
 
 #[test]
 fn dml_commit_rollback_and_errors() {
-    let Some(cfg) = cfg() else { return };
+    let Some(cfg) = cfg() else { return eprintln!("skip: KERNWAY_ORACLE_HOST not set") };
     run(async move {
         let mut c = Conn::connect(&cfg).await.unwrap();
         let _ = c.execute("DROP TABLE kw_items PURGE", &[]).await;
@@ -129,7 +129,7 @@ fn dml_commit_rollback_and_errors() {
 
 #[test]
 fn plsql_blocks_procedures_and_functions() {
-    let Some(cfg) = cfg() else { return };
+    let Some(cfg) = cfg() else { return eprintln!("skip: KERNWAY_ORACLE_HOST not set") };
     run(async move {
         let mut c = Conn::connect(&cfg).await.unwrap();
         c.execute(
@@ -201,7 +201,7 @@ fn plsql_blocks_procedures_and_functions() {
 
 #[test]
 fn clob_and_blob_read_and_write() {
-    let Some(cfg) = cfg() else { return };
+    let Some(cfg) = cfg() else { return eprintln!("skip: KERNWAY_ORACLE_HOST not set") };
     run(async move {
         let mut c = Conn::connect(&cfg).await.unwrap();
         let _ = c.execute("DROP TABLE kw_lobs PURGE", &[]).await;
@@ -248,7 +248,7 @@ fn clob_and_blob_read_and_write() {
 
 #[test]
 fn ref_cursors_from_procedures_and_functions() {
-    let Some(cfg) = cfg() else { return };
+    let Some(cfg) = cfg() else { return eprintln!("skip: KERNWAY_ORACLE_HOST not set") };
     run(async move {
         let mut c = Conn::connect(&cfg).await.unwrap();
         c.execute(
@@ -302,7 +302,9 @@ fn ref_cursors_from_procedures_and_functions() {
 
 #[test]
 fn tcps_connections_with_each_certificate_check() {
-    let (Ok(host), Ok(ca)) = (std::env::var("KERNWAY_ORACLE_HOST"), std::env::var("KERNWAY_ORACLE_CA")) else { return };
+    let (Ok(host), Ok(ca)) = (std::env::var("KERNWAY_ORACLE_HOST"), std::env::var("KERNWAY_ORACLE_CA")) else {
+        return eprintln!("skip: KERNWAY_ORACLE_HOST / KERNWAY_ORACLE_CA not set");
+    };
     let url = |q: &str| OracleConfig::from_url(&format!("oracle://kernway:kernway_pw@{host}:2484/FREEPDB1?{q}")).unwrap();
     run(async move {
         for q in [

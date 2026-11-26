@@ -48,3 +48,7 @@ PL/SQL | CLOB / BLOB as OUT or function result; IN values over 32 KB (LOB locato
 PL/SQL | RECORD, collections (VARRAY, nested table), associative arrays, object types as arguments | GAP: planned phase 3
 
 Other Oracle features | Advanced Queuing, Continuous Query Notification, SODA, two-phase commit | GAP: not implemented
+
+Platform & runtime | Runs on Linux: whole live suite against Oracle Database Free, no test skipped (CI) | ci::oracle_live_ubuntu_latest
+Platform & runtime | Builds and passes its unit / protocol tests on macOS and Windows (CI; Oracle ships no server for those runners — the sockets are rt-net's, proven live there by the MySQL jobs) | ci::drivers_macos_latest, ci::drivers_windows_latest
+Platform & runtime | Fully async on kernway's reactor: DNS and certificate reads on the blocking pool, PBKDF2 login proof there too; no blocking call on a shard — enforced by a source scan | no_blocking_call_runs_on_the_reactor

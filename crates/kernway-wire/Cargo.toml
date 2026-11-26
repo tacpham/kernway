@@ -9,9 +9,8 @@ license.workspace    = true
 # The per-core async socket the drivers speak over, and TLS on top of it.
 rt-net      = { workspace = true }
 kernway-tls = { workspace = true }
-
-[dev-dependencies]
-rt-core = { workspace = true }
+# The blocking pool (`offload`: DNS and file reads off the shard).
+rt-core     = { workspace = true }
 
 [lints]
 workspace = true
