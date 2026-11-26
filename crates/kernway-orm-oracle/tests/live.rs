@@ -305,13 +305,29 @@ fn tcps_connections_with_each_certificate_check() {
     let (Ok(host), Ok(ca)) = (std::env::var("KERNWAY_ORACLE_HOST"), std::env::var("KERNWAY_ORACLE_CA")) else {
         return eprintln!("skip: KERNWAY_ORACLE_HOST / KERNWAY_ORACLE_CA not set");
     };
+    // A server set up with --mtls also requires a client certificate.
+    let client = match (std::env::var("KERNWAY_ORACLE_CLIENT_CERT"), std::env::var("KERNWAY_ORACLE_CLIENT_KEY")) {
+        (Ok(c), Ok(k)) => Some((c, k, std::env::var("KERNWAY_ORACLE_CLIENT_PEM").ok())),
+        _ => None,
+    };
+    let id = client.as_ref().map_or(String::new(), |(c, k, _)| format!("&ssl-cert={c}&ssl-key={k}"));
     let url = |q: &str| OracleConfig::from_url(&format!("oracle://kernway:kernway_pw@{host}:2484/FREEPDB1?{q}")).unwrap();
     run(async move {
-        for q in [
-            "ssl-mode=required".to_string(),
-            format!("ssl-mode=verify_ca&ssl-ca={ca}"),
-            format!("ssl-mode=verify_identity&ssl-ca={ca}"),
-        ] {
+        let mut modes = vec![
+            format!("ssl-mode=required{id}"),
+            format!("ssl-mode=verify_ca&ssl-ca={ca}{id}"),
+            format!("ssl-mode=verify_identity&ssl-ca={ca}{id}"),
+        ];
+        if let Some((_, _, Some(pem))) = &client {
+            // Key and certificate in one PEM wallet file.
+            modes.push(format!("ssl-mode=verify_identity&ssl-ca={ca}&wallet={pem}"));
+        }
+        if client.is_some() {
+            // Without the client certificate the server refuses the session.
+            let e = Conn::connect(&url(&format!("ssl-mode=verify_identity&ssl-ca={ca}"))).await.err().expect("client certificate required");
+            eprintln!("without a client certificate: {e}");
+        }
+        for q in modes {
             let mut c = Conn::connect(&url(&q)).await.unwrap_or_else(|e| panic!("{q}: {e}"));
             let r = c
                 .execute("SELECT SYS_CONTEXT('USERENV', 'NETWORK_PROTOCOL') FROM dual", &[])
@@ -334,5 +350,33 @@ fn tcps_connections_with_each_certificate_check() {
         assert!(e.to_string().contains("TLS handshake"), "{e}");
         // Plain TCP to the TLS port is refused / fails cleanly, never hangs.
         assert!(Conn::connect(&url("ssl-mode=disabled")).await.is_err());
+    });
+}
+
+#[test]
+fn tcps_client_certificate_is_required_and_presented() {
+    let (Ok(host), Ok(ca), Ok(cert), Ok(key), Ok(pem)) = (
+        std::env::var("KERNWAY_ORACLE_HOST"),
+        std::env::var("KERNWAY_ORACLE_CA"),
+        std::env::var("KERNWAY_ORACLE_CLIENT_CERT"),
+        std::env::var("KERNWAY_ORACLE_CLIENT_KEY"),
+        std::env::var("KERNWAY_ORACLE_CLIENT_PEM"),
+    ) else {
+        return eprintln!("skip: needs a server set up with oracle-tcps-setup.sh --mtls (KERNWAY_ORACLE_CLIENT_*)");
+    };
+    let url = |q: &str| OracleConfig::from_url(&format!("oracle://kernway:kernway_pw@{host}:2484/FREEPDB1?ssl-mode=verify_identity&ssl-ca={ca}{q}")).unwrap();
+    run(async move {
+        // The server demands a certificate: without one the TLS handshake fails.
+        let e = Conn::connect(&url("")).await.err().expect("refused");
+        assert!(e.to_string().contains("CertificateRequired"), "{e}");
+        for q in [format!("&ssl-cert={cert}&ssl-key={key}"), format!("&wallet={pem}")] {
+            let mut c = Conn::connect(&url(&q)).await.unwrap_or_else(|e| panic!("{q}: {e}"));
+            let r = c.execute("SELECT SYS_CONTEXT('USERENV', 'NETWORK_PROTOCOL') FROM dual", &[]).await.unwrap();
+            assert_eq!(s(&r.rows[0][0]).to_lowercase(), "tcps");
+            c.close().await.unwrap();
+        }
+        // Only one of the pair is a configuration error, not a silent plaintext.
+        let bad = url(&format!("&ssl-cert={cert}"));
+        assert!(Conn::connect(&bad).await.is_err());
     });
 }

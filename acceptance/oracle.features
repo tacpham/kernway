@@ -2,6 +2,7 @@
 
 Connection & security | Login with user / password (O5LOGON, 11g and 12c verifiers) | logs_in_with_user_and_password, auth_crypto::tests::verifier_11g_matches_the_reference_vectors, auth_crypto::tests::verifier_12c_matches_the_reference_vectors, auth_crypto::tests::cbc_padding_always_adds_a_block_on_exact_multiples
 Connection & security | TCPS (TLS) with each certificate check, incl. listener TLS renegotiation | tcps_connections_with_each_certificate_check
+Connection & security | Mutual TLS: client certificate (ssl-cert / ssl-key, or one PEM wallet) presented to a server that requires it (SSL_CLIENT_AUTHENTICATION = TRUE); refused without it | tcps_client_certificate_is_required_and_presented
 Connection & security | Native network encryption (SQLNET.ENCRYPTION) | GAP: use TCPS
 Connection & security | Proxy authentication (user[target] / ?proxy-user=): the server reports USER = target, PROXY_USER = the connecting user; refused without the grant | proxy_authentication_connects_on_behalf_of_another_user
 Connection & security | Kerberos authentication | GAP: not in thin mode (python-oracledb thin lacks it too)

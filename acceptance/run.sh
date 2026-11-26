@@ -79,6 +79,11 @@ SQL
     export KERNWAY_ORACLE_HOST=127.0.0.1
     if docker cp "$C:/opt/oracle/wallet/server.crt" "$WORK/server.crt" 2>/dev/null; then
       export KERNWAY_ORACLE_CA="$WORK/server.crt"
+      # A server set up with --mtls: its client certificate.
+      if docker cp "$C:/opt/oracle/wallet/client" "$WORK/client" 2>/dev/null; then
+        export KERNWAY_ORACLE_CLIENT_CERT="$WORK/client/client.crt" KERNWAY_ORACLE_CLIENT_KEY="$WORK/client/client.key"
+        export KERNWAY_ORACLE_CLIENT_PEM="$WORK/client/client.pem"
+      fi
     else
       log "no TCPS wallet in $C: the TCPS test will be reported as skipped (run oracle-tcps-setup.sh)"
     fi
