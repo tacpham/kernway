@@ -1,0 +1,7 @@
+# Canonical identity for every commit in this repository (see `git help mailmap`).
+# Maps GitHub web-merge, GitHub noreply and bot addresses to the single author.
+tacpham <tac.pham.programmer@gmail.com>
+tacpham <tac.pham.programmer@gmail.com> <72726936+tacpham@users.noreply.github.com>
+tacpham <tac.pham.programmer@gmail.com> <noreply@github.com>
+tacpham <tac.pham.programmer@gmail.com> <49699333+dependabot[bot]@users.noreply.github.com>
+tacpham <tac.pham.programmer@gmail.com> <support@github.com>
