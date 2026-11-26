@@ -1,0 +1,17 @@
+[package]
+name        = "kernway-tls"
+description = "Client TLS on the Kernway runtime — rustls driven over the async socket (no tokio), with full / CA-only / no certificate verification; shared by the HTTP client and the MySQL driver"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+
+[dependencies]
+# The Kernway async socket the TLS records travel over.
+rt-net       = { workspace = true }
+# rustls is a sync state machine we pump over that socket ourselves (ring provider,
+# no C toolchain); webpki-roots ships Mozilla's root CAs for public servers.
+rustls       = { workspace = true }
+webpki-roots = { workspace = true }
+
+[lints]
+workspace = true

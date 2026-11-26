@@ -8,32 +8,15 @@
 //! [`writer`](rustls::Writer). That decoupling is exactly what lets us pump it over the
 //! Kernway async socket with no tokio — the same job `tokio-rustls` does for tokio.
 //!
-//! Server certificates are verified against Mozilla's root CAs (`webpki-roots`), so a
-//! forged or wrong-host certificate fails the handshake.
+//! How the server certificate is checked is the [`ClientConfig`]'s business — see
+//! [`crate::client_config`].
 
 use std::io::{self, Read, Write};
 use std::sync::Arc;
 
 use rt_net::AsyncTcpStream;
 use rustls::pki_types::ServerName;
-use rustls::{ClientConfig, ClientConnection, RootCertStore};
-
-/// Build the shared client TLS config once: the safe defaults + Mozilla roots, no
-/// client certificate. Cheap to clone (an `Arc`).
-pub fn default_config() -> Arc<ClientConfig> {
-    let mut roots = RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-    // Use the ring provider explicitly, so we never depend on a process-wide default
-    // provider being installed.
-    let config =
-        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .expect("ring provider supports the default protocol versions")
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-    Arc::new(config)
-}
+use rustls::{ClientConfig, ClientConnection};
 
 /// A TLS connection to a server: the async TCP socket plus the `rustls` state machine.
 /// Exposes `read`/`write_all` matching [`AsyncTcpStream`], so the HTTP layer treats it

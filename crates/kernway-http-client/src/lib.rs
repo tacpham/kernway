@@ -22,7 +22,9 @@
 mod compress;
 mod cookie;
 // Public: kernway-ws reuses the TLS transport (AsyncTlsStream + default_config) for wss://.
-pub mod tls;
+/// Client TLS — re-exported from [`kernway_tls`], where it now lives so the MySQL
+/// driver shares it.
+pub use kernway_tls as tls;
 
 use std::collections::HashMap;
 use std::fmt;

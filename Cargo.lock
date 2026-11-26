@@ -995,10 +995,10 @@ dependencies = [
  "httparse",
  "kernway-compress",
  "kernway-dns",
+ "kernway-tls",
  "rt-core",
  "rt-net",
  "rustls",
- "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -1092,11 +1092,13 @@ version = "0.1.0"
 dependencies = [
  "kernway-orm-core",
  "kernway-orm-macro",
+ "kernway-tls",
  "rt-core",
  "rt-net",
  "serde",
  "serde_json",
  "sha1",
+ "sha2",
  "thiserror",
 ]
 
@@ -1213,6 +1215,15 @@ version = "0.1.0"
 dependencies = [
  "rt-core",
  "rt-net",
+]
+
+[[package]]
+name = "kernway-tls"
+version = "0.1.0"
+dependencies = [
+ "rt-net",
+ "rustls",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

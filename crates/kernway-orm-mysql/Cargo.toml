@@ -11,10 +11,14 @@ serde            = { workspace = true }
 serde_json       = { workspace = true }
 thiserror        = { workspace = true }
 
-# Driver implementation (behind the `mysql` feature). Pure std::net wire
-# protocol — the only outside help is SHA-1 for mysql_native_password auth, and
-# rt-core's blocking pool so the sync socket work satisfies orm-core's Send futures.
+# Driver implementation (behind the `mysql` feature): a self-written async wire
+# protocol on the Kernway reactor (rt-net). Outside help is limited to the hashes the
+# auth plugins require and rustls for TLS.
 sha1    = { version = "0.10", optional = true }
+# SHA-256 for caching_sha2_password (MySQL 8's default auth plugin).
+sha2    = { version = "0.11", optional = true }
+# TLS (ssl-mode) — the shared async rustls stream, also used by the HTTP client.
+kernway-tls = { workspace = true, optional = true }
 rt-core = { path = "../rt-core", optional = true }
 rt-net  = { path = "../rt-net", optional = true }
 
@@ -22,7 +26,7 @@ rt-net  = { path = "../rt-net", optional = true }
 default = []
 # Enable to compile the actual MySQL driver. Without it the crate still exports
 # `MySqlDialect` for shared SQL generation.
-mysql = ["sha1", "rt-core", "rt-net"]
+mysql = ["sha1", "sha2", "kernway-tls", "rt-core", "rt-net"]
 
 [dev-dependencies]
 kernway-orm-macro = { workspace = true }

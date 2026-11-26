@@ -1,28 +1,28 @@
 //! A self-written MySQL client protocol — no external MySQL client crate.
 //!
-//! This speaks the classic MySQL protocol directly over a blocking
-//! [`std::net::TcpStream`]. It is intentionally run on a blocking thread (see
-//! [`crate::repository`]), not on the async `rt-net` reactor: `orm-core`'s
-//! `BoxFuture` requires `Send`, while `rt-net`'s thread-per-core futures are
-//! `!Send`, so the same `spawn_blocking` bridge the SQLite backend uses is the
-//! correct fit here.
+//! This speaks the classic MySQL protocol directly over the per-core async
+//! reactor ([`rt_net::AsyncTcpStream`]), optionally upgraded to TLS. Connections
+//! are `!Send` and live on one shard, like the rest of the thread-per-core stack.
 //!
-//! ## Scope (first cut)
+//! ## Scope
 //!
-//! - Handshake v10 + `mysql_native_password` authentication (SHA-1 scramble).
-//! - `COM_QUERY` (text protocol) with values inlined as escaped SQL literals.
-//! - Result-set parsing (column count → column defs → text rows → EOF), and
-//!   `OK` / `ERR` packets.
+//! - Handshake v10; auth with `mysql_native_password` (SHA-1 scramble) or
+//!   `caching_sha2_password` (MySQL 8's default: SHA-256 fast auth, and full auth
+//!   over TLS), including server-requested auth switches.
+//! - TLS via `SSLRequest` + rustls, per [`SslMode`] (mirrors the official
+//!   client's `--ssl-mode`).
+//! - `COM_QUERY` (text protocol) and prepared statements (binary protocol, cached
+//!   per connection) for server-side parameter binding.
+//! - Buffered packet I/O: one read syscall serves many small packets.
 //!
-//! ## Not yet (documented hardening path)
+//! ## Not yet
 //!
-//! - Prepared statements / binary protocol (safer parameter binding than text
-//!   escaping — the next step for money paths).
-//! - `caching_sha2_password` (MySQL 8 default): needs TLS or an RSA key
-//!   exchange. Until then, the MySQL account must use `mysql_native_password`.
-//! - TLS.
+//! - `caching_sha2_password` full auth **without** TLS (needs the server's RSA
+//!   key exchange): use TLS, or rely on the server's auth cache (fast auth).
+//! - Client certificates (mutual TLS).
 
 use kernway_orm_core::error::OrmError;
+use kernway_tls::{AsyncTlsStream, CertCheck};
 use rt_net::AsyncTcpStream;
 use std::collections::{HashMap, VecDeque};
 use std::net::ToSocketAddrs;
@@ -31,6 +31,7 @@ use std::net::ToSocketAddrs;
 const CLIENT_LONG_PASSWORD: u32 = 0x0000_0001;
 const CLIENT_LONG_FLAG: u32 = 0x0000_0004;
 const CLIENT_CONNECT_WITH_DB: u32 = 0x0000_0008;
+const CLIENT_SSL: u32 = 0x0000_0800;
 const CLIENT_PROTOCOL_41: u32 = 0x0000_0200;
 const CLIENT_TRANSACTIONS: u32 = 0x0000_2000;
 const CLIENT_SECURE_CONNECTION: u32 = 0x0000_8000;
@@ -56,12 +57,64 @@ pub struct MysqlConfig {
     pub password: String,
     /// Default database to `USE` on connect, if any.
     pub database: Option<String>,
+    /// Whether and how to use TLS (URL: `?ssl-mode=`). Default [`SslMode::Preferred`].
+    pub ssl_mode: SslMode,
+    /// PEM file with the CA(s) to trust for [`SslMode::VerifyCa`] /
+    /// [`SslMode::VerifyIdentity`] (URL: `?ssl-ca=`). `None` = Mozilla's public roots.
+    pub ssl_ca: Option<std::path::PathBuf>,
+}
+
+/// TLS policy, with the same names and meaning as the official client's
+/// `--ssl-mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SslMode {
+    /// Never use TLS.
+    Disabled,
+    /// Use TLS if the server offers it, without checking its certificate; fall
+    /// back to plaintext otherwise. The default, as in the official client.
+    #[default]
+    Preferred,
+    /// Require TLS; do not check the certificate (encryption only).
+    Required,
+    /// Require TLS and a certificate that chains to a trusted CA (any name).
+    VerifyCa,
+    /// Require TLS, a trusted chain, and a certificate naming the host.
+    VerifyIdentity,
+}
+
+impl SslMode {
+    /// Parse `disabled` / `preferred` / `required` / `verify_ca` /
+    /// `verify_identity` (case-insensitive; `-` and `_` both accepted).
+    pub fn parse(s: &str) -> Result<Self, OrmError> {
+        match s.to_ascii_lowercase().replace('-', "_").as_str() {
+            "disabled" => Ok(Self::Disabled),
+            "preferred" => Ok(Self::Preferred),
+            "required" => Ok(Self::Required),
+            "verify_ca" => Ok(Self::VerifyCa),
+            "verify_identity" => Ok(Self::VerifyIdentity),
+            other => Err(conn_err(format!("unknown ssl-mode '{other}'"))),
+        }
+    }
+
+    /// TLS is mandatory: no plaintext fallback.
+    fn requires_tls(self) -> bool {
+        matches!(self, Self::Required | Self::VerifyCa | Self::VerifyIdentity)
+    }
+
+    fn cert_check(self) -> CertCheck {
+        match self {
+            Self::VerifyIdentity => CertCheck::Full,
+            Self::VerifyCa => CertCheck::CaOnly,
+            Self::Disabled | Self::Preferred | Self::Required => CertCheck::None,
+        }
+    }
 }
 
 impl MysqlConfig {
-    /// Parse `mysql://user:password@host:port/database`.
+    /// Parse `mysql://user:password@host:port/database[?ssl-mode=…&ssl-ca=…]`.
     ///
-    /// `port` defaults to 3306 and `database` is optional. Credentials and the
+    /// `port` defaults to 3306, `database` is optional, and `ssl-mode` defaults to
+    /// `preferred` (see [`SslMode`]); `ssl-ca` names a PEM file of trusted CAs. Credentials and the
     /// database are percent-decoded only for the few characters a password
     /// commonly needs; anything exotic should be passed via [`MysqlConfig`]
     /// directly.
@@ -80,7 +133,21 @@ impl MysqlConfig {
             None => (creds.to_string(), String::new()),
         };
 
-        // host_part = host[:port][/database]
+        // host_part = host[:port][/database][?options]
+        let (host_part, options) = match host_part.split_once('?') {
+            Some((h, o)) => (h, o),
+            None => (host_part, ""),
+        };
+        let mut ssl_mode = SslMode::default();
+        let mut ssl_ca = None;
+        for pair in options.split('&').filter(|p| !p.is_empty()) {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            match key.to_ascii_lowercase().replace('_', "-").as_str() {
+                "ssl-mode" | "sslmode" => ssl_mode = SslMode::parse(value)?,
+                "ssl-ca" => ssl_ca = Some(std::path::PathBuf::from(value)),
+                other => return Err(conn_err(format!("unknown MySQL URL option '{other}'"))),
+            }
+        }
         let (hostport, database) = match host_part.split_once('/') {
             Some((hp, db)) => (hp, if db.is_empty() { None } else { Some(db.to_string()) }),
             None => (host_part, None),
@@ -95,7 +162,7 @@ impl MysqlConfig {
         if host.is_empty() {
             return Err(conn_err("missing host in MySQL URL"));
         }
-        Ok(Self { host, port, user, password, database })
+        Ok(Self { host, port, user, password, database, ssl_mode, ssl_ca })
     }
 }
 
@@ -140,9 +207,35 @@ struct Stmt {
     num_params: u16,
 }
 
+/// The socket under a connection: plaintext, or TLS once upgraded.
+enum Stream {
+    Plain(AsyncTcpStream),
+    Tls(Box<AsyncTlsStream>),
+    /// Transient, only while the plaintext socket is handed to the TLS handshake.
+    Upgrading,
+}
+
+impl Stream {
+    async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Stream::Plain(s) => s.read(buf).await,
+            Stream::Tls(s) => s.read(buf).await,
+            Stream::Upgrading => Err(std::io::Error::other("connection lost during TLS upgrade")),
+        }
+    }
+
+    async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        match self {
+            Stream::Plain(s) => s.write_all(buf).await,
+            Stream::Tls(s) => s.write_all(buf).await,
+            Stream::Upgrading => Err(std::io::Error::other("connection lost during TLS upgrade")),
+        }
+    }
+}
+
 /// A live, authenticated MySQL connection over the per-core async reactor.
 pub struct Conn {
-    stream: AsyncTcpStream,
+    stream: Stream,
     seq: u8,
     /// Read buffer: bytes `[rpos, rlen)` are received but not yet consumed.
     rbuf: Vec<u8>,
@@ -170,7 +263,7 @@ impl Conn {
             .await
             .map_err(|e| conn_err(format!("connect {}:{} failed: {e}", cfg.host, cfg.port)))?;
         let mut conn = Self {
-            stream,
+            stream: Stream::Plain(stream),
             seq: 0,
             rbuf: vec![0; READ_CHUNK],
             rpos: 0,
@@ -273,61 +366,117 @@ impl Conn {
 
     async fn handshake(&mut self, cfg: &MysqlConfig) -> Result<(), OrmError> {
         let greeting = self.read_packet().await?;
-        let (salt, plugin) = parse_handshake(&greeting)?;
-        if plugin != "mysql_native_password" && !plugin.is_empty() {
-            // MySQL 8 default is caching_sha2_password. We handle an explicit
-            // switch to native below; a fast-auth caching_sha2 start we cannot.
-            if plugin == "caching_sha2_password" {
-                // Proceed — many servers accept a native-password response and
-                // reply with an AuthSwitchRequest we handle below. If not, the
-                // error message tells the operator what to change.
-            }
-        }
+        let hello = parse_handshake(&greeting)?;
 
-        let scramble = scramble_native(cfg.password.as_bytes(), &salt);
-        let response = build_handshake_response(cfg, &scramble);
-        self.write_packet(&response).await?;
-
-        // Response: OK, ERR, or an AuthSwitchRequest (0xFE).
-        let reply = self.read_packet().await?;
-        match reply.first().copied() {
-            Some(0x00) => Ok(()),
-            Some(0xFF) => Err(parse_err_packet(&reply)),
-            Some(0xFE) => self.handle_auth_switch(cfg, &reply).await,
-            Some(0x01) => Err(conn_err(
-                "server requires caching_sha2_password full auth (needs TLS/RSA); \
-                 set this account to mysql_native_password for now",
-            )),
-            other => Err(conn_err(format!("unexpected auth reply byte {other:?}"))),
-        }
-    }
-
-    async fn handle_auth_switch(&mut self, cfg: &MysqlConfig, packet: &[u8]) -> Result<(), OrmError> {
-        // AuthSwitchRequest: 0xFE, plugin name (NUL-terminated), auth data.
-        let mut p = 1usize;
-        let name_end = packet[p..]
-            .iter()
-            .position(|&b| b == 0)
-            .map(|i| p + i)
-            .unwrap_or(packet.len());
-        let plugin = String::from_utf8_lossy(&packet[p..name_end]).to_string();
-        p = (name_end + 1).min(packet.len());
-        let new_salt: Vec<u8> = packet[p..].iter().copied().take_while(|&b| b != 0).collect();
-
-        if plugin != "mysql_native_password" {
+        // TLS first, if wanted: an SSLRequest (the handshake response's fixed
+        // header with CLIENT_SSL), then the TLS handshake on the same socket. The
+        // real handshake response, with the credentials, then travels encrypted.
+        let server_tls = hello.capabilities & CLIENT_SSL != 0;
+        if cfg.ssl_mode.requires_tls() && !server_tls {
             return Err(conn_err(format!(
-                "server asked to switch to unsupported auth plugin '{plugin}'; \
-                 set this account to mysql_native_password"
+                "ssl-mode={:?} but the server does not support TLS",
+                cfg.ssl_mode
             )));
         }
-        let scramble = scramble_native(cfg.password.as_bytes(), &new_salt);
-        self.write_packet(&scramble).await?;
-        let reply = self.read_packet().await?;
-        match reply.first().copied() {
-            Some(0x00) => Ok(()),
-            Some(0xFF) => Err(parse_err_packet(&reply)),
-            other => Err(conn_err(format!("unexpected post-switch reply byte {other:?}"))),
+        let use_tls = cfg.ssl_mode != SslMode::Disabled && server_tls;
+        if use_tls {
+            self.write_packet(&handshake_header(cfg, CLIENT_SSL)).await?;
+            self.upgrade_to_tls(cfg).await?;
         }
+
+        // Answer with the plugin the server proposed; anything we do not speak
+        // gets a native-password answer, which the server may switch away from.
+        let plugin = match hello.plugin.as_str() {
+            "caching_sha2_password" => "caching_sha2_password",
+            _ => "mysql_native_password",
+        };
+        let auth = auth_response(plugin, cfg.password.as_bytes(), &hello.salt);
+        let extra = if use_tls { CLIENT_SSL } else { 0 };
+        self.write_packet(&build_handshake_response(cfg, &auth, plugin, extra))
+            .await?;
+        self.finish_auth(cfg, plugin, use_tls).await
+    }
+
+    /// Swap the plaintext socket for a TLS session over it, checking the server
+    /// certificate as `cfg.ssl_mode` says.
+    async fn upgrade_to_tls(&mut self, cfg: &MysqlConfig) -> Result<(), OrmError> {
+        debug_assert_eq!(self.rpos, self.rlen, "no bytes may be buffered across the upgrade");
+        let ca_pem = match &cfg.ssl_ca {
+            Some(path) => Some(std::fs::read(path).map_err(|e| {
+                conn_err(format!("read ssl-ca {}: {e}", path.display()))
+            })?),
+            None => None,
+        };
+        let tls_config = kernway_tls::client_config(ca_pem.as_deref(), cfg.ssl_mode.cert_check())
+            .map_err(|e| conn_err(format!("TLS config: {e}")))?;
+        let Stream::Plain(tcp) = std::mem::replace(&mut self.stream, Stream::Upgrading) else {
+            return Err(conn_err("TLS upgrade on a connection that is not plaintext"));
+        };
+        let tls = AsyncTlsStream::connect(tcp, tls_config, &cfg.host)
+            .await
+            .map_err(|e| conn_err(format!("TLS handshake with {}: {e}", cfg.host)))?;
+        self.stream = Stream::Tls(Box::new(tls));
+        Ok(())
+    }
+
+    /// Drive the authentication exchange to `OK`: auth switches (`0xFE`) and the
+    /// extra rounds of `caching_sha2_password` (`0x01`: fast-auth success, or a
+    /// request for the full password — sent only over TLS).
+    async fn finish_auth(
+        &mut self,
+        cfg: &MysqlConfig,
+        mut plugin: &'static str,
+        tls: bool,
+    ) -> Result<(), OrmError> {
+        // A well-behaved server needs at most a switch plus one extra round; the
+        // bound only stops a misbehaving one from looping us forever.
+        for _ in 0..8 {
+            let reply = self.read_packet().await?;
+            match reply.first().copied() {
+                Some(0x00) => return Ok(()),
+                Some(0xFF) => return Err(parse_err_packet(&reply)),
+                Some(0xFE) => {
+                    // AuthSwitchRequest: plugin name (NUL-terminated), then its data.
+                    let (name, data) = parse_auth_switch(&reply);
+                    plugin = match name.as_str() {
+                        "mysql_native_password" => "mysql_native_password",
+                        "caching_sha2_password" => "caching_sha2_password",
+                        other => {
+                            return Err(conn_err(format!(
+                                "server asked to switch to unsupported auth plugin '{other}'"
+                            )))
+                        }
+                    };
+                    let auth = auth_response(plugin, cfg.password.as_bytes(), &data);
+                    self.write_packet(&auth).await?;
+                }
+                Some(0x01) if plugin == "caching_sha2_password" => match reply.get(1).copied() {
+                    // Fast auth: the server's cache matched the scramble; OK follows.
+                    Some(0x03) => {}
+                    // Full auth: the server wants the password itself.
+                    Some(0x04) if tls => {
+                        let mut clear = cfg.password.as_bytes().to_vec();
+                        clear.push(0);
+                        self.write_packet(&clear).await?;
+                    }
+                    Some(0x04) => {
+                        return Err(conn_err(
+                            "caching_sha2_password needs a full authentication, which this \
+                             driver only does over TLS (a wrong password also ends up here, as \
+                             the server cannot fast-auth it): connect with ssl-mode=preferred \
+                             (or stricter) to a TLS-enabled server, or use mysql_native_password",
+                        ))
+                    }
+                    other => {
+                        return Err(conn_err(format!(
+                            "unexpected caching_sha2_password state {other:?}"
+                        )))
+                    }
+                },
+                other => return Err(conn_err(format!("unexpected auth reply byte {other:?}"))),
+            }
+        }
+        Err(conn_err("authentication did not complete"))
     }
 
     // --- Command phase ----------------------------------------------------
@@ -400,7 +549,7 @@ impl Conn {
     /// Statements are cached per connection by their SQL text, so a hot query is
     /// prepared once and then costs a single round trip (`COM_STMT_EXECUTE`)
     /// instead of prepare + execute + close. The cache holds at most
-    /// [`STMT_CACHE_CAP`] statements, closing the oldest on the server when full.
+    /// 256 statements (`STMT_CACHE_CAP`), closing the oldest on the server when full.
     /// If the server no longer recognises a cached statement (it was reset, or
     /// DDL forced a re-prepare), the entry is dropped and the statement is
     /// prepared and run once more.
@@ -590,8 +739,18 @@ impl Conn {
 
 // --- Handshake parsing & response -----------------------------------------
 
-/// Parse HandshakeV10 → (20-byte salt, auth plugin name).
-fn parse_handshake(p: &[u8]) -> Result<(Vec<u8>, String), OrmError> {
+/// What the server's HandshakeV10 tells us.
+struct Hello {
+    /// The 20-byte auth nonce.
+    salt: Vec<u8>,
+    /// The server's default auth plugin (empty if it named none).
+    plugin: String,
+    /// Server capability flags (lower and upper halves joined).
+    capabilities: u32,
+}
+
+/// Parse HandshakeV10.
+fn parse_handshake(p: &[u8]) -> Result<Hello, OrmError> {
     if p.first() != Some(&0x0a) {
         if p.first() == Some(&0xFF) {
             return Err(parse_err_packet(p));
@@ -600,66 +759,132 @@ fn parse_handshake(p: &[u8]) -> Result<(Vec<u8>, String), OrmError> {
     }
     let mut i = 1usize;
     // server version (NUL-terminated string)
-    let vend = p[i..].iter().position(|&b| b == 0).map(|k| i + k).ok_or_else(|| conn_err("bad server version"))?;
+    let vend = p[i..]
+        .iter()
+        .position(|&b| b == 0)
+        .map(|k| i + k)
+        .ok_or_else(|| conn_err("bad server version"))?;
     i = vend + 1;
     i += 4; // connection id
     let mut salt = Vec::with_capacity(20);
     salt.extend_from_slice(p.get(i..i + 8).ok_or_else(|| conn_err("short handshake (salt1)"))?);
     i += 8;
     i += 1; // filler
-    i += 2; // capability flags lower
-    if p.len() > i {
-        i += 1; // charset
-        i += 2; // status flags
-        i += 2; // capability flags upper
-        let _auth_len = *p.get(i).unwrap_or(&0);
-        i += 1; // length of auth-plugin-data
-        i += 10; // reserved
-        // salt part 2 — up to 12 bytes then a NUL.
-        let salt2: Vec<u8> = p.get(i..).unwrap_or(&[]).iter().copied().take_while(|&b| b != 0).take(12).collect();
-        i += salt2.len() + 1;
-        salt.extend_from_slice(&salt2);
-        // auth plugin name (NUL-terminated), if present.
-        let plugin = if i < p.len() {
-            let end = p[i..].iter().position(|&b| b == 0).map(|k| i + k).unwrap_or(p.len());
-            String::from_utf8_lossy(&p[i..end]).to_string()
-        } else {
-            String::new()
-        };
-        Ok((salt, plugin))
-    } else {
-        Ok((salt, String::new()))
+    let caps_lower = p
+        .get(i..i + 2)
+        .map(|b| u32::from(u16::from_le_bytes([b[0], b[1]])))
+        .ok_or_else(|| conn_err("short handshake (capabilities)"))?;
+    i += 2;
+    if p.len() <= i {
+        return Ok(Hello { salt, plugin: String::new(), capabilities: caps_lower });
     }
+    i += 1; // charset
+    i += 2; // status flags
+    let caps_upper = p
+        .get(i..i + 2)
+        .map(|b| u32::from(u16::from_le_bytes([b[0], b[1]])))
+        .unwrap_or(0);
+    i += 2;
+    i += 1; // length of auth-plugin-data
+    i += 10; // reserved
+    // salt part 2 — up to 12 bytes then a NUL.
+    let salt2: Vec<u8> = p
+        .get(i..)
+        .unwrap_or(&[])
+        .iter()
+        .copied()
+        .take_while(|&b| b != 0)
+        .take(12)
+        .collect();
+    i += salt2.len() + 1;
+    salt.extend_from_slice(&salt2);
+    // auth plugin name (NUL-terminated), if present.
+    let plugin = if i < p.len() {
+        let end = p[i..].iter().position(|&b| b == 0).map(|k| i + k).unwrap_or(p.len());
+        String::from_utf8_lossy(&p[i..end]).to_string()
+    } else {
+        String::new()
+    };
+    Ok(Hello { salt, plugin, capabilities: caps_lower | caps_upper << 16 })
 }
 
-fn build_handshake_response(cfg: &MysqlConfig, scramble: &[u8]) -> Vec<u8> {
+/// The handshake response's fixed 32-byte header: capabilities, max packet,
+/// charset, reserved. On its own (with `CLIENT_SSL`) it is the `SSLRequest`.
+fn handshake_header(cfg: &MysqlConfig, extra_caps: u32) -> Vec<u8> {
     let mut caps = CLIENT_LONG_PASSWORD
         | CLIENT_LONG_FLAG
         | CLIENT_PROTOCOL_41
         | CLIENT_TRANSACTIONS
         | CLIENT_SECURE_CONNECTION
-        | CLIENT_PLUGIN_AUTH;
+        | CLIENT_PLUGIN_AUTH
+        | extra_caps;
     if cfg.database.is_some() {
         caps |= CLIENT_CONNECT_WITH_DB;
     }
-
-    let mut out = Vec::with_capacity(64);
+    let mut out = Vec::with_capacity(96);
     out.extend_from_slice(&caps.to_le_bytes());
     out.extend_from_slice(&MAX_PACKET.to_le_bytes());
     out.push(UTF8MB4_GENERAL_CI);
     out.extend_from_slice(&[0u8; 23]); // reserved
+    out
+}
+
+fn build_handshake_response(
+    cfg: &MysqlConfig,
+    auth: &[u8],
+    plugin: &str,
+    extra_caps: u32,
+) -> Vec<u8> {
+    let mut out = handshake_header(cfg, extra_caps);
     out.extend_from_slice(cfg.user.as_bytes());
     out.push(0);
     // CLIENT_SECURE_CONNECTION: 1-byte length-prefixed auth response.
-    out.push(scramble.len() as u8);
-    out.extend_from_slice(scramble);
+    out.push(auth.len() as u8);
+    out.extend_from_slice(auth);
     if let Some(db) = &cfg.database {
         out.extend_from_slice(db.as_bytes());
         out.push(0);
     }
-    out.extend_from_slice(b"mysql_native_password");
+    out.extend_from_slice(plugin.as_bytes());
     out.push(0);
     out
+}
+
+/// AuthSwitchRequest (`0xFE`, plugin name NUL-terminated, auth data) → the
+/// plugin name and its auth data (the new nonce, trailing NUL dropped).
+fn parse_auth_switch(packet: &[u8]) -> (String, Vec<u8>) {
+    let body = packet.get(1..).unwrap_or(&[]);
+    let name_end = body.iter().position(|&b| b == 0).unwrap_or(body.len());
+    let name = String::from_utf8_lossy(&body[..name_end]).to_string();
+    let mut data = body.get(name_end + 1..).unwrap_or(&[]).to_vec();
+    if data.last() == Some(&0) {
+        data.pop();
+    }
+    (name, data)
+}
+
+/// The scrambled password for `plugin` against the server nonce `salt`.
+fn auth_response(plugin: &str, password: &[u8], salt: &[u8]) -> Vec<u8> {
+    match plugin {
+        "caching_sha2_password" => scramble_sha256(password, salt),
+        _ => scramble_native(password, salt),
+    }
+}
+
+/// `caching_sha2_password` fast-auth scramble:
+/// `SHA256(pw) XOR SHA256(SHA256(SHA256(pw)) + nonce)`.
+fn scramble_sha256(password: &[u8], nonce: &[u8]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    if password.is_empty() {
+        return Vec::new();
+    }
+    let hash1 = Sha256::digest(password);
+    let hash2 = Sha256::digest(hash1);
+    let mut h = Sha256::new();
+    h.update(hash2);
+    h.update(nonce);
+    let seed = h.finalize();
+    hash1.iter().zip(seed.iter()).map(|(a, b)| a ^ b).collect()
 }
 
 /// `SHA1(pw) XOR SHA1(salt + SHA1(SHA1(pw)))`.
@@ -1240,6 +1465,167 @@ mod tests {
             }
             let r = conn.exec_prepared("SELECT ?", &[BindValue::Str("ok".into())]).await.unwrap();
             assert_eq!(one_value(r).as_deref(), Some("ok"));
+        });
+    }
+
+    // --- TLS + auth plugins against a real server ---------------------------
+    //
+    // KERNWAY_MYSQL_URL       a mysql_native_password account (required)
+    // KERNWAY_MYSQL_CA        PEM of the server's CA (verify_ca / verify_identity)
+    // KERNWAY_MYSQL_SHA2_URL  a caching_sha2_password account
+    // KERNWAY_MYSQL_ROOT_URL  an account allowed to FLUSH PRIVILEGES (empties the
+    //                         sha2 auth cache, forcing a full authentication)
+
+    fn env_cfg(var: &str) -> Option<MysqlConfig> {
+        std::env::var(var).ok().map(|u| MysqlConfig::from_url(&u).unwrap())
+    }
+
+    fn block<F: std::future::Future<Output = ()>>(f: F) {
+        rt_core::Executor::new().unwrap().block_on(f).unwrap();
+    }
+
+    /// `Ssl_cipher` of the session as the server sees it ("" = plaintext).
+    async fn server_cipher(conn: &mut Conn) -> String {
+        match conn.query("SHOW SESSION STATUS LIKE 'Ssl_cipher'").await.unwrap() {
+            QueryResult::Rows { rows, .. } => rows[0][1].clone().unwrap_or_default(),
+            QueryResult::Ok { .. } => panic!("expected a status row"),
+        }
+    }
+
+    fn with_mode(mut cfg: MysqlConfig, mode: SslMode, ca: Option<&str>) -> MysqlConfig {
+        cfg.ssl_mode = mode;
+        cfg.ssl_ca = ca.map(std::path::PathBuf::from);
+        cfg
+    }
+
+    #[test]
+    fn url_options_set_the_ssl_mode_and_ca() {
+        let cfg = MysqlConfig::from_url("mysql://u:p@h:3307/db?ssl-mode=VERIFY_IDENTITY&ssl-ca=/x/ca.pem")
+            .unwrap();
+        assert_eq!(cfg.database.as_deref(), Some("db"));
+        assert_eq!(cfg.ssl_mode, SslMode::VerifyIdentity);
+        assert_eq!(cfg.ssl_ca.as_deref(), Some(std::path::Path::new("/x/ca.pem")));
+        assert_eq!(MysqlConfig::from_url("mysql://u@h").unwrap().ssl_mode, SslMode::Preferred);
+        assert_eq!(
+            MysqlConfig::from_url("mysql://u@h/db?sslmode=disabled").unwrap().ssl_mode,
+            SslMode::Disabled
+        );
+        assert!(MysqlConfig::from_url("mysql://u@h/db?ssl-mode=maybe").is_err());
+        assert!(MysqlConfig::from_url("mysql://u@h/db?bogus=1").is_err());
+    }
+
+    #[test]
+    fn sha256_scramble_matches_the_reference_construction() {
+        use sha2::{Digest, Sha256};
+        let (pw, nonce) = (b"secret".as_slice(), [7u8; 20]);
+        let got = scramble_sha256(pw, &nonce);
+        // XOR-ing the scramble with SHA256(SHA256(SHA256(pw)) + nonce) must give
+        // back SHA256(pw) — exactly what the server checks.
+        let mut h = Sha256::new();
+        h.update(Sha256::digest(Sha256::digest(pw)));
+        h.update(nonce);
+        let seed = h.finalize();
+        let back: Vec<u8> = got.iter().zip(seed.iter()).map(|(a, b)| a ^ b).collect();
+        assert_eq!(back, Sha256::digest(pw).to_vec());
+        assert!(scramble_sha256(b"", &nonce).is_empty(), "empty password → empty response");
+    }
+
+    #[test]
+    fn ssl_modes_against_a_live_server() {
+        let Some(base) = env_cfg("KERNWAY_MYSQL_URL") else {
+            eprintln!("skip ssl_modes: KERNWAY_MYSQL_URL not set");
+            return;
+        };
+        block(async move {
+            let mut plain = Conn::connect(&with_mode(base.clone(), SslMode::Disabled, None)).await.unwrap();
+            assert!(matches!(plain.stream, Stream::Plain(_)));
+            assert_eq!(server_cipher(&mut plain).await, "");
+
+            for mode in [SslMode::Preferred, SslMode::Required] {
+                let mut c = Conn::connect(&with_mode(base.clone(), mode, None)).await.unwrap();
+                assert!(matches!(c.stream, Stream::Tls(_)), "{mode:?} must use TLS");
+                assert_ne!(server_cipher(&mut c).await, "", "{mode:?}: server sees TLS");
+                // Prepared statements and the read buffer work over TLS too.
+                let r = c.exec_prepared("SELECT ?", &[BindValue::Str("tls".into())]).await.unwrap();
+                assert_eq!(one_value(r).as_deref(), Some("tls"));
+            }
+
+            // Mozilla's roots do not include the server's private CA.
+            let err = Conn::connect(&with_mode(base.clone(), SslMode::VerifyCa, None))
+                .await
+                .err()
+                .expect("a private CA must not verify against public roots");
+            assert!(err.to_string().contains("TLS handshake"), "{err}");
+
+            let Ok(ca) = std::env::var("KERNWAY_MYSQL_CA") else {
+                eprintln!("skip verify_ca/verify_identity: KERNWAY_MYSQL_CA not set");
+                return;
+            };
+            let mut c = Conn::connect(&with_mode(base.clone(), SslMode::VerifyCa, Some(&ca)))
+                .await
+                .unwrap();
+            assert_ne!(server_cipher(&mut c).await, "");
+
+            // MySQL's auto-generated server certificate names no host, so a
+            // strict identity check against an IP must refuse it.
+            let err = Conn::connect(&with_mode(base.clone(), SslMode::VerifyIdentity, Some(&ca)))
+                .await
+                .err()
+                .expect("verify_identity must reject a certificate not naming the host");
+            assert!(err.to_string().contains("TLS handshake"), "{err}");
+        });
+    }
+
+    #[test]
+    fn caching_sha2_password_full_and_fast_auth() {
+        let Some(sha2) = env_cfg("KERNWAY_MYSQL_SHA2_URL") else {
+            eprintln!("skip caching_sha2: KERNWAY_MYSQL_SHA2_URL not set");
+            return;
+        };
+        let root = env_cfg("KERNWAY_MYSQL_ROOT_URL");
+        block(async move {
+            // Empty the server's auth cache when we can, so the next login must
+            // be a full authentication.
+            if let Some(root) = &root {
+                let mut r = Conn::connect(root).await.unwrap();
+                r.query("FLUSH PRIVILEGES").await.unwrap();
+
+                // Full auth without TLS: refused with a clear message, and the
+                // password never goes out in plaintext.
+                let err = Conn::connect(&with_mode(sha2.clone(), SslMode::Disabled, None))
+                    .await
+                    .err()
+                    .expect("full auth must not run without TLS");
+                assert!(err.to_string().contains("only does over TLS"), "{err}");
+            }
+
+            // Over TLS: full authentication (password sent encrypted) succeeds…
+            let mut c = Conn::connect(&with_mode(sha2.clone(), SslMode::Required, None)).await.unwrap();
+            let r = c.query("SELECT CURRENT_USER()").await.unwrap();
+            assert!(one_value(r).unwrap().starts_with("kw_sha2@"));
+
+            // …and primes the cache, so a plaintext login now passes on the
+            // SHA-256 scramble alone (fast auth).
+            let mut c = Conn::connect(&with_mode(sha2.clone(), SslMode::Disabled, None)).await.unwrap();
+            assert_eq!(server_cipher(&mut c).await, "");
+            let r = c.exec_prepared("SELECT ? * 2", &[BindValue::Int(21)]).await.unwrap();
+            assert_eq!(one_value(r).as_deref(), Some("42"));
+
+            // A wrong password fails either way. Over TLS the server checks it and
+            // answers 1045; in plaintext the scramble cannot match the cache, so the
+            // server asks for a full auth — which is refused without sending it.
+            let mut bad = sha2.clone();
+            bad.password = "nope".into();
+            let err = Conn::connect(&with_mode(bad.clone(), SslMode::Required, None))
+                .await
+                .err()
+                .expect("wrong password must fail");
+            assert!(err.to_string().contains("1045"), "{err}");
+            let err = Conn::connect(&with_mode(bad, SslMode::Disabled, None))
+                .await
+                .err()
+                .expect("wrong password must fail");
+            assert!(err.to_string().contains("only does over TLS"), "{err}");
         });
     }
 }

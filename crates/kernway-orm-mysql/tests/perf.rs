@@ -9,7 +9,7 @@
 //! ```
 #![cfg(feature = "mysql")]
 
-use kernway_orm_core::{Driver, Repository};
+use kernway_orm_core::Driver;
 use kernway_orm_macro::entity;
 use kernway_orm_mysql::MySqlDriver;
 use serde::{Deserialize, Serialize};

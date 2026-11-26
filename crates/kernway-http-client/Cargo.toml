@@ -10,10 +10,10 @@ license.workspace    = true
 # `timeout` bounds connect/read so a hung server can't hang the request forever.
 rt-net  = { workspace = true }
 rt-core = { workspace = true }
-# TLS for https:// — rustls (ring provider) + Mozilla roots. rustls is a state
-# machine we drive over the async socket ourselves (no tokio-rustls).
+# TLS for https:// — the shared async rustls stream (ring provider + Mozilla roots,
+# no tokio-rustls). `rustls` itself for the `ClientConfig` type in the public API.
+kernway-tls  = { workspace = true }
 rustls       = { workspace = true }
-webpki-roots = { workspace = true }
 # Shared compression layer — decode gzip/deflate/br responses (the server side of the
 # same crate compresses).
 kernway-compress = { workspace = true }
