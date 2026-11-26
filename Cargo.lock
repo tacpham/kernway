@@ -1123,6 +1123,7 @@ version = "0.1.0"
 dependencies = [
  "kernway-orm-core",
  "kernway-orm-macro",
+ "kernway-orm-sql",
  "kernway-tls",
  "kernway-wire",
  "md-5",
@@ -1164,6 +1165,16 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio-postgres",
+]
+
+[[package]]
+name = "kernway-orm-sql"
+version = "0.1.0"
+dependencies = [
+ "kernway-orm-core",
+ "kernway-wire",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -22,6 +22,8 @@ kernway-tls = { workspace = true, optional = true }
 # Shared driver plumbing: buffered plaintext/TLS stream, per-core pool,
 # bounded prepared-statement cache.
 kernway-wire = { workspace = true, optional = true }
+# The shared SQL ORM layer: CRUD engine, query builder, repositories, transactions.
+kernway-orm-sql = { workspace = true, optional = true }
 rt-core = { path = "../rt-core", optional = true }
 rt-net  = { path = "../rt-net", optional = true }
 
@@ -29,7 +31,7 @@ rt-net  = { path = "../rt-net", optional = true }
 default = []
 # Enable to compile the actual MySQL driver. Without it the crate still exports
 # `MySqlDialect` for shared SQL generation.
-mysql = ["sha1", "sha2", "kernway-tls", "kernway-wire", "rt-core", "rt-net"]
+mysql = ["sha1", "sha2", "kernway-tls", "kernway-wire", "kernway-orm-sql", "rt-core", "rt-net"]
 
 [dev-dependencies]
 # Checksums for the large-value write tests.

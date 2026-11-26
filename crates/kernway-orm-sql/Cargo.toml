@@ -1,0 +1,16 @@
+[package]
+name        = "kernway-orm-sql"
+description = "The SQL half of the kernway ORM written once: CRUD engine, query builder, repositories and transactions over a small per-database backend trait"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+
+[dependencies]
+kernway-orm-core = { workspace = true }
+# The shared per-core connection pool.
+kernway-wire     = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,11 +1,10 @@
 //! `MySqlDriver` — the entry point, backed by the native async protocol and a
 //! per-core connection pool.
 
-use crate::engine;
 use crate::pool::{MySqlConnect, Pool};
-use crate::protocol::{BindValue, MysqlConfig, QueryResult};
-use crate::repository::MySqlRepository;
-use crate::transaction::{MySqlTx, SharedConn};
+use crate::protocol::{BindValue, Conn, MysqlConfig, QueryResult};
+use crate::{MySqlRepository, MySqlTx};
+use kernway_orm_sql::engine;
 use kernway_orm_core::{
     driver::{Driver, DriverCapabilities},
     entity::Entity,
@@ -15,7 +14,6 @@ use kernway_orm_core::{
     BoxFuture,
 };
 use serde::{de::DeserializeOwned, Serialize};
-use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Default per-core pool size — connections opened on demand, up to this many.
@@ -51,7 +49,7 @@ impl MySqlDriver {
         T: Entity,
     {
         let mut guard = self.pool.acquire().await?;
-        engine::ensure_table::<T>(&mut guard).await
+        engine::ensure_table::<T, Conn>(&mut guard).await
     }
 
     /// Run one raw SQL statement (text protocol / `COM_QUERY`) and discard any rows. For DDL and
@@ -152,31 +150,6 @@ impl TransactionalDriver for MySqlDriver {
         F: FnOnce(MySqlTx) -> BoxFuture<'a, Result<R, OrmError>> + 'a,
         R: 'a,
     {
-        let pool = Rc::clone(&self.pool);
-        Box::pin(async move {
-            let mut guard = pool.acquire().await?;
-            guard.query("START TRANSACTION").await?;
-
-            // Share the connection with the handle; reclaim it after the closure
-            // to commit or roll back.
-            let cell: SharedConn = Rc::new(RefCell::new(Some(guard)));
-            let tx = MySqlTx { conn: Rc::clone(&cell) };
-            let result = work(tx).await;
-
-            let mut guard = cell
-                .borrow_mut()
-                .take()
-                .ok_or_else(|| OrmError::Transaction("connection lost during transaction".into()))?;
-            match result {
-                Ok(value) => {
-                    guard.query("COMMIT").await?;
-                    Ok(value)
-                }
-                Err(err) => {
-                    let _ = guard.query("ROLLBACK").await;
-                    Err(err)
-                }
-            }
-        })
+        Box::pin(kernway_orm_sql::run_transaction(Rc::clone(&self.pool), work))
     }
 }

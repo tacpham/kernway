@@ -75,6 +75,18 @@ pub trait SqlDialect: Send + Sync + 'static {
         ""
     }
 
+    /// The row-window clause appended to a `SELECT` (empty when neither is
+    /// set). Default: `LIMIT n` / `OFFSET m` as MySQL, PostgreSQL and SQLite
+    /// write it; Oracle overrides with `OFFSET m ROWS FETCH NEXT n ROWS ONLY`.
+    fn limit_offset(&self, limit: Option<u64>, offset: u64) -> String {
+        match (limit, offset) {
+            (None, 0) => String::new(),
+            (Some(n), 0) => format!(" LIMIT {n}"),
+            (Some(n), m) => format!(" LIMIT {n} OFFSET {m}"),
+            (None, m) => format!(" OFFSET {m}"),
+        }
+    }
+
     /// Build a `CREATE TABLE IF NOT EXISTS` statement.
     ///
     /// Default implementation uses [`Self::quote_identifier`],
