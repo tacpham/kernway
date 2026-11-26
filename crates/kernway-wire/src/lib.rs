@@ -1,0 +1,23 @@
+//! Wire plumbing shared by the Kernway database drivers.
+//!
+//! Everything here is protocol-agnostic; how bytes are framed into messages,
+//! how a session authenticates, and how results are encoded stay in each driver
+//! (MySQL's 4-byte packet header, Postgres's type byte + length, …).
+//!
+//! - [`BufStream`]: a plaintext or TLS socket with a read buffer that hands out
+//!   message bodies **in place** (one syscall serves many small messages) and a
+//!   reused write buffer; upgrades to TLS mid-handshake.
+//! - [`Pool`]: a per-core (`!Send`, lock-free) connection pool that discards
+//!   connections marked broken ([`Pooled::poison`]).
+//! - [`StmtCache`]: a bounded map of prepared statements by SQL text that hands
+//!   back the evicted statement for the driver to close its own way.
+//!
+//! All of it is single-shard, like the rest of the thread-per-core stack.
+
+mod pool;
+mod stmt_cache;
+mod stream;
+
+pub use pool::{Connect, Pool, Pooled};
+pub use stmt_cache::StmtCache;
+pub use stream::{BufStream, READ_CHUNK, READ_RETAIN};

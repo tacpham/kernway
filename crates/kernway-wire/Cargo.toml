@@ -1,0 +1,17 @@
+[package]
+name        = "kernway-wire"
+description = "Shared wire plumbing for Kernway database drivers — buffered plaintext/TLS stream, per-core connection pool, bounded prepared-statement cache; protocol framing stays in each driver"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+
+[dependencies]
+# The per-core async socket the drivers speak over, and TLS on top of it.
+rt-net      = { workspace = true }
+kernway-tls = { workspace = true }
+
+[dev-dependencies]
+rt-core = { workspace = true }
+
+[lints]
+workspace = true

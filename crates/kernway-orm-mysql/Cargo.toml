@@ -19,6 +19,9 @@ sha1    = { version = "0.10", optional = true }
 sha2    = { version = "0.11", optional = true }
 # TLS (ssl-mode) — the shared async rustls stream, also used by the HTTP client.
 kernway-tls = { workspace = true, optional = true }
+# Shared driver plumbing: buffered plaintext/TLS stream, per-core pool,
+# bounded prepared-statement cache.
+kernway-wire = { workspace = true, optional = true }
 rt-core = { path = "../rt-core", optional = true }
 rt-net  = { path = "../rt-net", optional = true }
 
@@ -26,7 +29,7 @@ rt-net  = { path = "../rt-net", optional = true }
 default = []
 # Enable to compile the actual MySQL driver. Without it the crate still exports
 # `MySqlDialect` for shared SQL generation.
-mysql = ["sha1", "sha2", "kernway-tls", "rt-core", "rt-net"]
+mysql = ["sha1", "sha2", "kernway-tls", "kernway-wire", "rt-core", "rt-net"]
 
 [dev-dependencies]
 kernway-orm-macro = { workspace = true }

@@ -28,9 +28,9 @@
 use kernway_orm_core::error::OrmError;
 pub use kernway_orm_core::decode::Cell;
 use kernway_orm_core::decode::recycle;
-use kernway_tls::{AsyncTlsStream, CertCheck};
+use kernway_tls::CertCheck;
+use kernway_wire::{BufStream, StmtCache, READ_RETAIN};
 use rt_net::AsyncTcpStream;
-use std::collections::{HashMap, VecDeque};
 use std::net::ToSocketAddrs;
 
 // --- Capability flags (only the ones we assert) ---
@@ -244,12 +244,6 @@ fn cells_to_text(cells: &[Cell<'_>]) -> Result<Vec<Option<String>>, OrmError> {
     Ok(cells.iter().map(Cell::to_text).collect())
 }
 
-/// Bytes requested from the socket per read: one syscall drains many small
-/// packets (a result set is one packet per row) instead of two reads per packet.
-const READ_CHUNK: usize = 16 * 1024;
-/// A read buffer grown past this (a large packet) is shrunk back once drained,
-/// so one big row does not pin megabytes per idle pooled connection.
-const READ_RETAIN: usize = 256 * 1024;
 /// Prepared statements kept per connection. Past this the oldest is closed on
 /// the server, bounding server-side statement memory (`max_prepared_stmt_count`
 /// is global, ~16k by default) under dynamic SQL such as varying `IN` lists.
@@ -266,47 +260,15 @@ struct Stmt {
     num_params: u16,
 }
 
-/// The socket under a connection: plaintext, or TLS once upgraded.
-enum Stream {
-    Plain(AsyncTcpStream),
-    Tls(Box<AsyncTlsStream>),
-    /// Transient, only while the plaintext socket is handed to the TLS handshake.
-    Upgrading,
-}
-
-impl Stream {
-    async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            Stream::Plain(s) => s.read(buf).await,
-            Stream::Tls(s) => s.read(buf).await,
-            Stream::Upgrading => Err(std::io::Error::other("connection lost during TLS upgrade")),
-        }
-    }
-
-    async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
-        match self {
-            Stream::Plain(s) => s.write_all(buf).await,
-            Stream::Tls(s) => s.write_all(buf).await,
-            Stream::Upgrading => Err(std::io::Error::other("connection lost during TLS upgrade")),
-        }
-    }
-}
-
 /// A live, authenticated MySQL connection over the per-core async reactor.
 pub struct Conn {
-    stream: Stream,
+    /// The buffered plaintext / TLS socket (shared driver plumbing).
+    io: BufStream,
     seq: u8,
-    /// Read buffer: bytes `[rpos, rlen)` are received but not yet consumed.
-    rbuf: Vec<u8>,
-    rpos: usize,
-    rlen: usize,
-    /// Reused outgoing frame buffer (header + payload).
-    wbuf: Vec<u8>,
     /// Assembly area for a payload split over 16 MiB continuation packets.
     big: Vec<u8>,
-    /// Prepared statements by SQL text, plus their insertion order for eviction.
-    stmts: HashMap<String, Stmt>,
-    stmt_order: VecDeque<String>,
+    /// Prepared statements by SQL text (bounded; the oldest is closed).
+    stmts: StmtCache<Stmt>,
 }
 
 impl Conn {
@@ -324,47 +286,18 @@ impl Conn {
             .await
             .map_err(|e| conn_err(format!("connect {}:{} failed: {e}", cfg.host, cfg.port)))?;
         let mut conn = Self {
-            stream: Stream::Plain(stream),
+            io: BufStream::new(stream),
             seq: 0,
-            rbuf: vec![0; READ_CHUNK],
-            rpos: 0,
-            rlen: 0,
-            wbuf: Vec::with_capacity(READ_CHUNK),
             big: Vec::new(),
-            stmts: HashMap::new(),
-            stmt_order: VecDeque::new(),
+            stmts: StmtCache::new(STMT_CACHE_CAP),
         };
         conn.handshake(cfg).await?;
         Ok(conn)
     }
 
-    /// Make at least `n` unconsumed bytes available in the read buffer, reading
-    /// from the socket only when needed and up to [`READ_CHUNK`] (or the rest of
-    /// a large packet) at a time — so a burst of small packets costs one syscall.
+    /// Make at least `n` unconsumed bytes available in the read buffer.
     async fn fill(&mut self, n: usize) -> Result<(), OrmError> {
-        self.release_drained();
-        while self.rlen - self.rpos < n {
-            // Slide the unconsumed tail to the front before reading more.
-            if self.rpos > 0 {
-                self.rbuf.copy_within(self.rpos..self.rlen, 0);
-                self.rlen -= self.rpos;
-                self.rpos = 0;
-            }
-            let want = self.rlen + n.max(READ_CHUNK);
-            if self.rbuf.len() < want {
-                self.rbuf.resize(want, 0);
-            }
-            let got = self
-                .stream
-                .read(&mut self.rbuf[self.rlen..])
-                .await
-                .map_err(|e| conn_err(format!("read: {e}")))?;
-            if got == 0 {
-                return Err(conn_err("unexpected EOF from MySQL"));
-            }
-            self.rlen += got;
-        }
-        Ok(())
+        self.io.fill(n).await.map_err(|e| conn_err(format!("read: {e}")))
     }
 
     // --- Packet framing ---------------------------------------------------
@@ -372,14 +305,7 @@ impl Conn {
     /// Once every buffered byte is consumed, rewind the read buffer — and give
     /// back memory a large packet made it (or the assembly area) grow.
     fn release_drained(&mut self) {
-        if self.rpos == self.rlen {
-            self.rpos = 0;
-            self.rlen = 0;
-            if self.rbuf.len() > READ_RETAIN {
-                self.rbuf.truncate(READ_CHUNK);
-                self.rbuf.shrink_to(READ_CHUNK);
-            }
-        }
+        self.io.release_drained();
         if self.big.capacity() > READ_RETAIN {
             self.big = Vec::new();
         }
@@ -393,16 +319,12 @@ impl Conn {
         let mut len = self.take_header();
         if len < 0xFF_FFFF {
             self.fill(len).await?;
-            let start = self.rpos;
-            self.rpos += len;
-            return Ok(&self.rbuf[start..start + len]);
+            return Ok(self.io.take(len));
         }
         self.big.clear();
         loop {
             self.fill(len).await?;
-            self.big
-                .extend_from_slice(&self.rbuf[self.rpos..self.rpos + len]);
-            self.rpos += len;
+            self.big.extend_from_slice(self.io.take(len));
             if len < 0xFF_FFFF {
                 return Ok(&self.big);
             }
@@ -414,10 +336,9 @@ impl Conn {
     /// Consume a 4-byte packet header: returns the payload length and advances
     /// the sequence id.
     fn take_header(&mut self) -> usize {
-        let h = &self.rbuf[self.rpos..self.rpos + 4];
+        let h = self.io.take(4);
         let len = (h[0] as usize) | (h[1] as usize) << 8 | (h[2] as usize) << 16;
         self.seq = h[3].wrapping_add(1);
-        self.rpos += 4;
         len
     }
 
@@ -436,20 +357,15 @@ impl Conn {
             return Err(conn_err("outgoing packet too large (>16 MiB not split)"));
         }
         let len = payload.len();
-        self.wbuf.clear();
-        self.wbuf
-            .extend_from_slice(&[len as u8, (len >> 8) as u8, (len >> 16) as u8, self.seq]);
-        self.wbuf.extend_from_slice(payload);
+        let seq = self.seq;
+        let frame = self.io.write_buf();
+        frame.extend_from_slice(&[len as u8, (len >> 8) as u8, (len >> 16) as u8, seq]);
+        frame.extend_from_slice(payload);
         self.seq = self.seq.wrapping_add(1);
-        let result = self
-            .stream
-            .write_all(&self.wbuf)
+        self.io
+            .flush()
             .await
-            .map_err(|e| conn_err(format!("write packet: {e}")));
-        if self.wbuf.capacity() > READ_RETAIN {
-            self.wbuf = Vec::with_capacity(READ_CHUNK);
-        }
-        result
+            .map_err(|e| conn_err(format!("write packet: {e}")))
     }
 
     // --- Connection phase -------------------------------------------------
@@ -490,7 +406,6 @@ impl Conn {
     /// Swap the plaintext socket for a TLS session over it, checking the server
     /// certificate as `cfg.ssl_mode` says.
     async fn upgrade_to_tls(&mut self, cfg: &MysqlConfig) -> Result<(), OrmError> {
-        debug_assert_eq!(self.rpos, self.rlen, "no bytes may be buffered across the upgrade");
         let ca_pem = match &cfg.ssl_ca {
             Some(path) => Some(std::fs::read(path).map_err(|e| {
                 conn_err(format!("read ssl-ca {}: {e}", path.display()))
@@ -499,14 +414,10 @@ impl Conn {
         };
         let tls_config = kernway_tls::client_config(ca_pem.as_deref(), cfg.ssl_mode.cert_check())
             .map_err(|e| conn_err(format!("TLS config: {e}")))?;
-        let Stream::Plain(tcp) = std::mem::replace(&mut self.stream, Stream::Upgrading) else {
-            return Err(conn_err("TLS upgrade on a connection that is not plaintext"));
-        };
-        let tls = AsyncTlsStream::connect(tcp, tls_config, &cfg.host)
+        self.io
+            .upgrade_tls(tls_config, &cfg.host)
             .await
-            .map_err(|e| conn_err(format!("TLS handshake with {}: {e}", cfg.host)))?;
-        self.stream = Stream::Tls(Box::new(tls));
-        Ok(())
+            .map_err(|e| conn_err(format!("TLS handshake with {}: {e}", cfg.host)))
     }
 
     /// Drive the authentication exchange to `OK`: auth switches (`0xFE`) and the
@@ -795,7 +706,7 @@ impl Conn {
     where
         F: FnMut(&[Cell<'_>]) -> Result<R, OrmError>,
     {
-        let cached = self.stmts.get(sql).copied();
+        let cached = self.stmts.get(sql);
         let stmt = match cached {
             Some(stmt) => stmt,
             None => self.prepare_cached(sql).await?,
@@ -821,17 +732,12 @@ impl Conn {
     /// Prepare `sql` and remember it, evicting (and closing) the oldest cached
     /// statement first if the cache is full.
     async fn prepare_cached(&mut self, sql: &str) -> Result<Stmt, OrmError> {
-        if self.stmts.len() >= STMT_CACHE_CAP {
-            if let Some(oldest) = self.stmt_order.pop_front() {
-                if let Some(old) = self.stmts.remove(&oldest) {
-                    self.stmt_close(old.id).await?;
-                }
-            }
+        if let Some(old) = self.stmts.evict_for_insert() {
+            self.stmt_close(old.id).await?;
         }
         let (id, num_params) = self.stmt_prepare(sql).await?;
         let stmt = Stmt { id, num_params };
-        self.stmts.insert(sql.to_string(), stmt);
-        self.stmt_order.push_back(sql.to_string());
+        self.stmts.insert(sql, stmt);
         Ok(stmt)
     }
 
@@ -839,7 +745,6 @@ impl Conn {
     /// the id is already gone server-side).
     fn forget_stmt(&mut self, sql: &str) {
         self.stmts.remove(sql);
-        self.stmt_order.retain(|s| s != sql);
     }
 
     /// Number of prepared statements currently cached on this connection.
@@ -1689,10 +1594,9 @@ mod tests {
                 conn.exec_prepared(&sql, &[BindValue::Int(0)]).await.unwrap();
             }
             assert_eq!(conn.cached_statements(), STMT_CACHE_CAP);
-            assert_eq!(conn.stmt_order.len(), STMT_CACHE_CAP);
             // The oldest were evicted; the newest are still cached.
-            assert!(!conn.stmts.contains_key("SELECT ? + 0"));
-            assert!(conn.stmts.contains_key(&format!("SELECT ? + {}", STMT_CACHE_CAP + extra - 1)));
+            assert!(!conn.stmts.contains("SELECT ? + 0"));
+            assert!(conn.stmts.contains(&format!("SELECT ? + {}", STMT_CACHE_CAP + extra - 1)));
 
             // Evicted statements were really closed on the server: this session
             // sent exactly one COM_STMT_CLOSE per eviction (session status, no
@@ -1718,7 +1622,7 @@ mod tests {
             let big = 1024 * 1024 + 7;
             let r = conn.query(&format!("SELECT REPEAT('x', {big})")).await.unwrap();
             assert_eq!(one_value(r).map(|v| v.len()), Some(big));
-            assert!(conn.rbuf.len() <= READ_RETAIN, "buffer shrunk once drained");
+            assert!(conn.io.read_buffer_len() <= READ_RETAIN, "buffer shrunk once drained");
 
             // Many small rows in one response, then a normal query: the stream
             // stays in sync across buffer refills.
@@ -1810,12 +1714,12 @@ mod tests {
         };
         block(async move {
             let mut plain = Conn::connect(&with_mode(base.clone(), SslMode::Disabled, None)).await.unwrap();
-            assert!(matches!(plain.stream, Stream::Plain(_)));
+            assert!(!plain.io.is_tls());
             assert_eq!(server_cipher(&mut plain).await, "");
 
             for mode in [SslMode::Preferred, SslMode::Required] {
                 let mut c = Conn::connect(&with_mode(base.clone(), mode, None)).await.unwrap();
-                assert!(matches!(c.stream, Stream::Tls(_)), "{mode:?} must use TLS");
+                assert!(c.io.is_tls(), "{mode:?} must use TLS");
                 assert_ne!(server_cipher(&mut c).await, "", "{mode:?}: server sees TLS");
                 // Prepared statements and the read buffer work over TLS too.
                 let r = c.exec_prepared("SELECT ?", &[BindValue::Str("tls".into())]).await.unwrap();

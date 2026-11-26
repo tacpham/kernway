@@ -2,7 +2,7 @@
 //! per-core connection pool.
 
 use crate::engine;
-use crate::pool::Pool;
+use crate::pool::{MySqlConnect, Pool};
 use crate::protocol::{BindValue, MysqlConfig, QueryResult};
 use crate::repository::MySqlRepository;
 use crate::transaction::{MySqlTx, SharedConn};
@@ -39,7 +39,7 @@ impl MySqlDriver {
 
     /// Connect from an explicit config, with a chosen pool size.
     pub async fn connect_with(cfg: MysqlConfig, pool_size: usize) -> Result<Self, OrmError> {
-        let pool = Pool::new(cfg, pool_size);
+        let pool = Pool::new(MySqlConnect(cfg), pool_size);
         pool.warm().await?;
         Ok(Self { pool })
     }

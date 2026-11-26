@@ -35,6 +35,7 @@ members = [
     "crates/kernway-compress",
     "crates/kernway-http-client",
     "crates/kernway-tls",
+    "crates/kernway-wire",
     "crates/kernway-udp",
     "crates/kernway-dns",
     "crates/kernway-tcp",
@@ -156,6 +157,7 @@ kernway-persist      = { path = "crates/kernway-persist" }
 kernway-compress     = { path = "crates/kernway-compress" }
 kernway-http-client  = { path = "crates/kernway-http-client" }
 kernway-tls          = { path = "crates/kernway-tls" }
+kernway-wire         = { path = "crates/kernway-wire" }
 kernway-udp          = { path = "crates/kernway-udp" }
 kernway-dns          = { path = "crates/kernway-dns" }
 kernway-tcp          = { path = "crates/kernway-tcp" }

@@ -1094,6 +1094,7 @@ dependencies = [
  "kernway-orm-core",
  "kernway-orm-macro",
  "kernway-tls",
+ "kernway-wire",
  "rt-core",
  "rt-net",
  "serde",
@@ -1251,6 +1252,15 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "kernway-wire"
+version = "0.1.0"
+dependencies = [
+ "kernway-tls",
+ "rt-core",
+ "rt-net",
 ]
 
 [[package]]
