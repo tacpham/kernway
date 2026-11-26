@@ -211,6 +211,160 @@ impl AsyncTcpStream {
     pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
         self.inner.set_nodelay(nodelay)
     }
+
+    /// Split into a read half and a write half that can be used by **two tasks at
+    /// once** — one waiting to read while the other writes. That is what a
+    /// full-duplex protocol such as WebSocket needs: a reader task blocked on the
+    /// next frame must not stop a broadcast from being written.
+    ///
+    /// Both halves stay on this shard (they are `!Send`, like the stream). The
+    /// reactor parks read and write wakers separately per token, so the two
+    /// directions never steal each other's wake-ups. The socket is deregistered
+    /// and closed when the last half is dropped.
+    pub fn into_split(self) -> (TcpReadHalf, TcpWriteHalf) {
+        let shared = std::rc::Rc::new(self);
+        (
+            TcpReadHalf {
+                stream: std::rc::Rc::clone(&shared),
+            },
+            TcpWriteHalf { stream: shared },
+        )
+    }
+}
+
+/// The reading half of a split [`AsyncTcpStream`] — see [`AsyncTcpStream::into_split`].
+pub struct TcpReadHalf {
+    stream: std::rc::Rc<AsyncTcpStream>,
+}
+
+/// The writing half of a split [`AsyncTcpStream`] — see [`AsyncTcpStream::into_split`].
+pub struct TcpWriteHalf {
+    stream: std::rc::Rc<AsyncTcpStream>,
+}
+
+impl TcpReadHalf {
+    /// Read into `buf`; `Ok(0)` means the peer closed its side.
+    pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            // mio implements `Read` for `&TcpStream`: a shared borrow is enough.
+            match (&self.stream.inner).read(buf) {
+                Err(e) if would_block(&e) => {
+                    Readiness::new(self.stream.token, Direction::Read).await;
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                other => return other,
+            }
+        }
+    }
+
+    /// Address of the remote peer.
+    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+        self.stream.peer_addr()
+    }
+}
+
+impl TcpWriteHalf {
+    /// Write from `buf`, returning the number of bytes accepted (may be short).
+    pub async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        loop {
+            match (&self.stream.inner).write(buf) {
+                Err(e) if would_block(&e) => {
+                    Readiness::new(self.stream.token, Direction::Write).await;
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                other => return other,
+            }
+        }
+    }
+
+    /// Write the whole buffer, looping over short writes.
+    pub async fn write_all(&mut self, mut buf: &[u8]) -> io::Result<()> {
+        while !buf.is_empty() {
+            match self.write(buf).await? {
+                0 => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "connection accepted no more bytes",
+                    ))
+                }
+                n => buf = &buf[n..],
+            }
+        }
+        Ok(())
+    }
+
+    /// Write every buffer in order with vectored writes (`writev`): many small
+    /// frames — or one shared broadcast buffer per connection — leave in as few
+    /// syscalls as the kernel allows, with no copy into a joined buffer.
+    ///
+    /// At most [`MAX_IOV`] slices are passed per call (the POSIX `IOV_MAX`
+    /// floor); short writes advance across buffer boundaries.
+    pub async fn write_all_vectored(&mut self, bufs: &[&[u8]]) -> io::Result<()> {
+        let (mut idx, mut off) = (0usize, 0usize);
+        // Skip leading empty buffers.
+        while idx < bufs.len() && bufs[idx].is_empty() {
+            idx += 1;
+        }
+        let mut slices: Vec<io::IoSlice<'_>> = Vec::with_capacity(bufs.len().min(MAX_IOV));
+        while idx < bufs.len() {
+            slices.clear();
+            slices.push(io::IoSlice::new(&bufs[idx][off..]));
+            for b in bufs[idx + 1..].iter().take(MAX_IOV - 1) {
+                slices.push(io::IoSlice::new(b));
+            }
+            let mut n = match (&self.stream.inner).write_vectored(&slices) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "connection accepted no more bytes",
+                    ))
+                }
+                Ok(n) => n,
+                Err(e) if would_block(&e) => {
+                    Readiness::new(self.stream.token, Direction::Write).await;
+                    continue;
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+            // Advance (idx, off) by n bytes.
+            while n > 0 {
+                let left = bufs[idx].len() - off;
+                if n >= left {
+                    n -= left;
+                    idx += 1;
+                    off = 0;
+                } else {
+                    off += n;
+                    n = 0;
+                }
+            }
+            while idx < bufs.len() && bufs[idx].is_empty() {
+                idx += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Close one or both directions of the shared socket.
+    pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        self.stream.shutdown(how)
+    }
+}
+
+/// Most slices handed to one `writev` (POSIX guarantees `IOV_MAX` ≥ 1024 on Linux/macOS).
+pub const MAX_IOV: usize = 1024;
+
+impl std::fmt::Debug for TcpReadHalf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("TcpReadHalf").field(&self.stream).finish()
+    }
+}
+
+impl std::fmt::Debug for TcpWriteHalf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("TcpWriteHalf").field(&self.stream).finish()
+    }
 }
 
 impl Drop for AsyncTcpStream {
@@ -243,5 +397,114 @@ fn libc_einprogress() -> i32 {
     #[cfg(not(unix))]
     {
         -1 // never matches a real errno on this platform
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+    use rt_core::Executor;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    /// A reader task parked on `read` must not block a writer task on the same
+    /// socket: the server greets the client while its reader is already waiting.
+    #[test]
+    fn halves_read_and_write_concurrently() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::thread::spawn(move || {
+            let mut c = std::net::TcpStream::connect(addr).unwrap();
+            let mut greet = [0u8; 5];
+            c.read_exact(&mut greet).unwrap();
+            c.write_all(b"ping").unwrap();
+            greet
+        });
+        let (server, _) = listener.accept().unwrap();
+
+        let ex = Executor::new().unwrap();
+        let got = ex
+            .block_on(async move {
+                let (mut rd, mut wr) = AsyncTcpStream::from_std(server).unwrap().into_split();
+                let read: Rc<RefCell<Option<Vec<u8>>>> = Rc::default();
+                let slot = Rc::clone(&read);
+                // The reader starts first and parks: nothing has been sent yet.
+                rt_core::spawn(async move {
+                    let mut buf = [0u8; 4];
+                    let mut n = 0;
+                    while n < 4 {
+                        n += rd.read(&mut buf[n..]).await.unwrap();
+                    }
+                    *slot.borrow_mut() = Some(buf.to_vec());
+                });
+                rt_core::sleep(Duration::from_millis(20)).await;
+                wr.write_all(b"hello").await.unwrap();
+                for _ in 0..200 {
+                    if read.borrow().is_some() {
+                        break;
+                    }
+                    rt_core::sleep(Duration::from_millis(5)).await;
+                }
+                let out = read.borrow_mut().take();
+                out
+            })
+            .unwrap();
+        assert_eq!(client.join().unwrap(), *b"hello");
+        assert_eq!(got.as_deref(), Some(&b"ping"[..]));
+    }
+
+    /// Vectored writes deliver every byte in order, across many buffers (more
+    /// than one `writev` worth) and large ones that force short writes.
+    #[test]
+    fn vectored_write_delivers_everything_in_order() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut bufs: Vec<Vec<u8>> = (0..3000u32).map(|i| i.to_be_bytes().to_vec()).collect();
+        bufs.insert(10, Vec::new());
+        bufs.push(vec![0xAB; 4 << 20]); // big: the kernel buffer fills mid-write
+        let expected: Vec<u8> = bufs.concat();
+        let len = expected.len();
+        let client = std::thread::spawn(move || {
+            use std::io::Read as _;
+            let mut c = std::net::TcpStream::connect(addr).unwrap();
+            let mut got = Vec::with_capacity(len);
+            c.read_to_end(&mut got).unwrap();
+            got
+        });
+        let (server, _) = listener.accept().unwrap();
+        let ex = Executor::new().unwrap();
+        ex.block_on(async move {
+            let (_rd, mut wr) = AsyncTcpStream::from_std(server).unwrap().into_split();
+            let refs: Vec<&[u8]> = bufs.iter().map(Vec::as_slice).collect();
+            wr.write_all_vectored(&refs).await.unwrap();
+            wr.shutdown(Shutdown::Write).unwrap();
+        })
+        .unwrap();
+        assert!(client.join().unwrap() == expected);
+    }
+
+    /// Dropping both halves closes the socket: the peer reads EOF.
+    #[test]
+    fn dropping_both_halves_closes_the_socket() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::thread::spawn(move || {
+            let mut c = std::net::TcpStream::connect(addr).unwrap();
+            c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut rest = Vec::new();
+            c.read_to_end(&mut rest).unwrap();
+            rest
+        });
+        let (server, _) = listener.accept().unwrap();
+        let ex = Executor::new().unwrap();
+        ex.block_on(async move {
+            let (rd, mut wr) = AsyncTcpStream::from_std(server).unwrap().into_split();
+            wr.write_all(b"bye").await.unwrap();
+            drop(rd);
+            drop(wr);
+        })
+        .unwrap();
+        assert_eq!(client.join().unwrap(), b"bye");
     }
 }

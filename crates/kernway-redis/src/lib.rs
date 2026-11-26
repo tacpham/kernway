@@ -30,6 +30,7 @@ pub mod conn;
 pub mod error;
 pub mod pubsub;
 pub mod resp;
+pub mod stream;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -41,6 +42,7 @@ pub use conn::Connection;
 pub use error::RedisError;
 pub use pubsub::{RedisConfig, RedisPubSub};
 pub use resp::Value;
+pub use stream::{StreamEntries, StreamEntry};
 
 /// How many idle connections a pool keeps around between bursts.
 const DEFAULT_MAX_IDLE: usize = 16;

@@ -54,6 +54,12 @@ fn give(mut v: Vec<u8>) {
     });
 }
 
+/// Free buffers currently pooled on this shard.
+#[cfg(test)]
+pub(crate) fn free_count() -> usize {
+    POOL.with(|p| p.borrow().len())
+}
+
 /// A pooled byte buffer that returns itself to the shard's free-list on drop.
 ///
 /// Derefs to `Vec<u8>`, so it is a drop-in for the `Vec<u8>` the connection loop

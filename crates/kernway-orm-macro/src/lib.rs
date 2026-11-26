@@ -275,11 +275,19 @@ fn column_type_tokens(ty: &Type) -> proc_macro2::TokenStream {
 
 fn rust_type_name(ty: &Type) -> Option<String> {
     match ty {
-        Type::Path(type_path) => type_path
-            .path
-            .segments
-            .last()
-            .map(|segment| segment.ident.to_string()),
+        Type::Path(type_path) => {
+            let segment = type_path.path.segments.last()?;
+            // Unwrap `Option<T>` to infer the column type from the inner type `T`
+            // (so e.g. `Option<i64>` maps to BigInt, not Unknown → Text).
+            if segment.ident == "Option" {
+                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                        return rust_type_name(inner);
+                    }
+                }
+            }
+            Some(segment.ident.to_string())
+        }
         Type::Reference(reference) => rust_type_name(&reference.elem),
         _ => None,
     }

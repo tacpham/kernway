@@ -1,5 +1,6 @@
 //! Shard bootstrap — one listener, one executor, one thread per core.
 
+use std::cell::Cell;
 use std::future::Future;
 use std::io;
 use std::net::{SocketAddr, TcpListener};
@@ -81,6 +82,37 @@ impl ShardConfig {
     pub fn drain_timeout(mut self, timeout: Duration) -> Self {
         self.drain_timeout = timeout;
         self
+    }
+}
+
+thread_local! {
+    /// This thread's shard index, set once when a shard thread starts.
+    static SHARD_INDEX: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// The index of the shard running on this thread, or `None` off-shard (the
+/// main thread, a `spawn_blocking` worker, a test).
+///
+/// Indexes are `0..shard_thread_count(&config)`, the same numbering
+/// [`run_shards_with_init`]'s `init` receives — so it doubles as "which
+/// [`CoreMesh`](crate::CoreMesh) receiver is mine".
+pub fn shard_index() -> Option<usize> {
+    SHARD_INDEX.with(Cell::get)
+}
+
+/// How many shard threads [`run_shards`] and friends will start for `config`.
+///
+/// Usually `config.shards`, but where `SO_REUSEPORT` is unavailable
+/// ([`sys::supports_reuseport`] is false) there is only one listener and
+/// therefore one shard. Size anything indexed by shard — a
+/// [`CoreMesh`](crate::CoreMesh) in particular — with this, not with
+/// `config.shards`, or messages routed to a shard that never started are never
+/// received.
+pub fn shard_thread_count(config: &ShardConfig) -> usize {
+    if sys::supports_reuseport() {
+        config.shards
+    } else {
+        1
     }
 }
 
@@ -171,17 +203,81 @@ where
     F: Fn(AsyncTcpStream) -> Fut + Clone + Send + 'static,
     Fut: Future<Output = ()> + 'static,
 {
+    run_shards_with_init(config, shutdown, |_index| {}, handler)
+}
+
+/// Like [`run_shards_with_shutdown`], plus a per-shard `init` hook.
+///
+/// `init(index)` runs once on each shard thread, inside that shard's executor
+/// and before its first `accept`, so it can [`rt_core::spawn`] shard-local
+/// background tasks — the consumer of a [`CoreMesh`](crate::CoreMesh)
+/// receiver, a per-core cache sweeper. `index` matches [`shard_index`].
+///
+/// Tasks spawned here count toward the drain: a task that never finishes holds
+/// its shard open for the full [`ShardConfig::drain_timeout`]. Have it stop on
+/// `shutdown` too (e.g. wrap its receive in [`rt_core::until_shutdown`]).
+///
+/// ```no_run
+/// use std::sync::{Arc, Mutex};
+/// use rt_core::Shutdown;
+/// use rt_net::{run_shards_with_init, shard_thread_count, CoreMesh, ShardConfig};
+///
+/// let config = ShardConfig::new("0.0.0.0:8080".parse().unwrap());
+/// let (mesh, receivers) = CoreMesh::<String>::new(shard_thread_count(&config), 1024);
+/// // Each shard takes its own receiver out of the table at startup.
+/// let slots = Arc::new(Mutex::new(receivers.into_iter().map(Some).collect::<Vec<_>>()));
+/// let shutdown = Shutdown::new();
+///
+/// let init = {
+///     let shutdown = shutdown.clone();
+///     move |index: usize| {
+///         let mut rx = slots.lock().unwrap()[index].take().expect("one receiver per shard");
+///         let shutdown = shutdown.clone();
+///         rt_core::spawn(async move {
+///             while let Some(batch) = rt_core::until_shutdown(&shutdown, rx.recv_batch(64)).await {
+///                 if batch.is_empty() {
+///                     break; // every sender is gone
+///                 }
+///                 for msg in batch {
+///                     let _ = msg; // handle it on this shard
+///                 }
+///             }
+///         });
+///     }
+/// };
+///
+/// run_shards_with_init(config, shutdown, init, move |_stream| {
+///     let mesh = mesh.clone();
+///     async move {
+///         let room = mesh.core_for(42);
+///         let _ = mesh.send_to(room, "join".to_string());
+///     }
+/// })
+/// .unwrap();
+/// ```
+pub fn run_shards_with_init<I, F, Fut>(
+    config: ShardConfig,
+    shutdown: Shutdown,
+    init: I,
+    handler: F,
+) -> io::Result<()>
+where
+    I: Fn(usize) + Clone + Send + 'static,
+    F: Fn(AsyncTcpStream) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = ()> + 'static,
+{
     let listeners = bootstrap_shards(&config)?;
     let mut threads = Vec::with_capacity(listeners.len());
 
     for (index, listener) in listeners.into_iter().enumerate() {
         let handler = handler.clone();
+        let init = init.clone();
         let config = config.clone();
         let shutdown = shutdown.clone();
         threads.push(
             std::thread::Builder::new()
                 .name(format!("kernway-shard-{index}"))
-                .spawn(move || shard_main(index, listener, config, shutdown, handler))?,
+                .spawn(move || shard_main(index, listener, config, shutdown, init, handler))?,
         );
     }
 
@@ -196,17 +292,20 @@ where
 
 /// The body of one shard thread: pin, build an executor, accept until told to
 /// stop, then drain.
-fn shard_main<F, Fut>(
+fn shard_main<I, F, Fut>(
     index: usize,
     listener: TcpListener,
     config: ShardConfig,
     shutdown: Shutdown,
+    init: I,
     handler: F,
 ) -> io::Result<()>
 where
+    I: Fn(usize),
     F: Fn(AsyncTcpStream) -> Fut + 'static,
     Fut: Future<Output = ()> + 'static,
 {
+    SHARD_INDEX.with(|slot| slot.set(Some(index)));
     if config.pin_threads {
         // Advisory: unpinned shards are correct, just less cache-friendly, so a
         // platform that cannot pin must not fail to start.
@@ -220,6 +319,10 @@ where
     let executor = Executor::new()?;
     executor.block_on(async move {
         let mut listener = AsyncTcpListener::from_std(listener)?;
+        // After the listener is registered (a bind failure surfaces first) and
+        // before the first accept, so shard-local tasks exist by the time the
+        // first connection could need them.
+        init(index);
         while let Some(accepted) = rt_core::until_shutdown(&shutdown, listener.accept()).await {
             let (stream, _peer) = accepted?;
             if config.nodelay {
@@ -366,6 +469,79 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         panic!("server never came up on {addr}");
+    }
+
+    #[test]
+    fn init_runs_once_per_shard_with_its_index_and_can_consume_a_mesh() {
+        use crate::CoreMesh;
+        use std::sync::{mpsc, Arc, Mutex};
+
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        let config = ShardConfig::new(addr).shards(2).pin_threads(false);
+        let shards = shard_thread_count(&config);
+
+        let (mesh, receivers) = CoreMesh::<usize>::new(shards, 16);
+        let slots = Arc::new(Mutex::new(
+            receivers.into_iter().map(Some).collect::<Vec<_>>(),
+        ));
+        // (shard that received, message) for every delivered message.
+        let (seen_tx, seen_rx) = mpsc::channel::<(usize, usize)>();
+        let (started_tx, started_rx) = mpsc::channel::<(usize, Option<usize>)>();
+        let shutdown = Shutdown::new();
+
+        let init = {
+            let shutdown = shutdown.clone();
+            move |index: usize| {
+                let _ = started_tx.send((index, shard_index()));
+                let mut rx = slots.lock().unwrap()[index]
+                    .take()
+                    .expect("init must run once per shard");
+                let shutdown = shutdown.clone();
+                let seen = seen_tx.clone();
+                rt_core::spawn(async move {
+                    while let Some(Some(msg)) = rt_core::until_shutdown(&shutdown, rx.recv()).await
+                    {
+                        let _ = seen.send((index, msg));
+                    }
+                });
+            }
+        };
+        let server = {
+            let shutdown = shutdown.clone();
+            std::thread::spawn(move || {
+                run_shards_with_init(config, shutdown, init, |_stream| async {})
+            })
+        };
+
+        let mut started: Vec<_> = (0..shards)
+            .map(|_| started_rx.recv_timeout(Duration::from_secs(10)).unwrap())
+            .collect();
+        started.sort();
+        for (index, (got, from_thread_local)) in started.into_iter().enumerate() {
+            assert_eq!(got, index);
+            assert_eq!(
+                from_thread_local,
+                Some(index),
+                "shard_index() disagrees with init"
+            );
+        }
+        assert_eq!(shard_index(), None, "the test thread is not a shard");
+
+        // Sent from this (non-shard) thread; each must surface on its own shard.
+        for core in 0..shards {
+            mesh.send_to(core, 100 + core).unwrap();
+        }
+        let mut seen: Vec<_> = (0..shards)
+            .map(|_| seen_rx.recv_timeout(Duration::from_secs(10)).unwrap())
+            .collect();
+        seen.sort();
+        let expected: Vec<_> = (0..shards).map(|core| (core, 100 + core)).collect();
+        assert_eq!(seen, expected);
+
+        shutdown.trigger();
+        server.join().unwrap().unwrap();
     }
 
     #[test]

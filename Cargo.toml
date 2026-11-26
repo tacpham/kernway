@@ -38,6 +38,7 @@ members = [
     "crates/kernway-dns",
     "crates/kernway-tcp",
     "crates/kernway-oauth2",
+    "crates/kernway-metrics",
     "crates/kernway",
     "examples/echo-server",
     "examples/hello-di",
@@ -56,6 +57,7 @@ members = [
     "examples/hello-validate",
     "examples/hello-controller",
     "examples/meilisearch-search",
+    "benchmarks/ws-load",
 ]
 resolver = "2"
 
@@ -63,7 +65,7 @@ resolver = "2"
 version      = "0.1.0"
 edition      = "2021"
 authors      = ["Kernway Contributors"]
-license      = "MIT"
+license      = "PolyForm-Noncommercial-1.0.0"
 repository   = "https://github.com/kernway/kernway"
 homepage     = "https://kernway.dev"
 # MSRV — enforced by the `msrv` CI job. Bumping this is a deliberate,
@@ -156,6 +158,7 @@ kernway-udp          = { path = "crates/kernway-udp" }
 kernway-dns          = { path = "crates/kernway-dns" }
 kernway-tcp          = { path = "crates/kernway-tcp" }
 kernway-oauth2       = { path = "crates/kernway-oauth2" }
+kernway-metrics      = { path = "crates/kernway-metrics" }
 rt-core              = { path = "crates/rt-core" }
 rt-net               = { path = "crates/rt-net" }
 di-core              = { path = "crates/di-core" }

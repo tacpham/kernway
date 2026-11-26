@@ -24,6 +24,9 @@ pub enum Connection {
     Close,
     /// The connection stays open for another request.
     KeepAlive,
+    /// The connection switches protocols after this `101` head (RFC 9110 §7.8).
+    /// No `Content-Length` is sent: a 1xx response has no body (§8.6).
+    Upgrade,
 }
 
 impl Connection {
@@ -31,6 +34,7 @@ impl Connection {
         match self {
             Connection::Close => "close",
             Connection::KeepAlive => "keep-alive",
+            Connection::Upgrade => "upgrade",
         }
     }
 }
@@ -114,10 +118,14 @@ fn encode_head_into(
         out.extend_from_slice(value.as_bytes());
         out.extend_from_slice(b"\r\n");
     }
-    // Content-Length is required (RFC 9112 §6.2)
-    out.extend_from_slice(b"content-length: ");
-    out.extend_from_slice(itoa(content_length).as_bytes());
-    out.extend_from_slice(b"\r\nconnection: ");
+    // Content-Length is required (RFC 9112 §6.2) — except on a 1xx protocol
+    // switch, which must not carry one (RFC 9110 §8.6).
+    if connection != Connection::Upgrade {
+        out.extend_from_slice(b"content-length: ");
+        out.extend_from_slice(itoa(content_length).as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(b"connection: ");
     out.extend_from_slice(connection.header_value().as_bytes());
     out.extend_from_slice(b"\r\n\r\n");
 }
@@ -181,6 +189,7 @@ fn itoa(mut n: u64) -> Digits {
 
 fn status_text(code: u16) -> &'static str {
     match code {
+        101 => "Switching Protocols",
         200 => "OK",
         201 => "Created",
         204 => "No Content",
@@ -192,6 +201,7 @@ fn status_text(code: u16) -> &'static str {
         404 => "Not Found",
         405 => "Method Not Allowed",
         416 => "Range Not Satisfiable",
+        426 => "Upgrade Required",
         422 => "Unprocessable Entity",
         429 => "Too Many Requests",
         500 => "Internal Server Error",
@@ -274,6 +284,21 @@ mod connection_tests {
 
     fn encoded(response: &Response, connection: Connection) -> String {
         String::from_utf8(encode_response_with(response, connection)).unwrap()
+    }
+
+    #[test]
+    fn upgrade_head_has_no_content_length() {
+        let mut response = Response::new(StatusCode::SWITCHING_PROTOCOLS);
+        response.headers.insert("upgrade", "websocket");
+        let head = String::from_utf8(encode_head(&response, Connection::Upgrade, 0)).unwrap();
+        assert!(
+            head.starts_with("HTTP/1.1 101 Switching Protocols\r\n"),
+            "{head:?}"
+        );
+        assert!(head.contains("upgrade: websocket\r\n"));
+        assert!(head.contains("connection: upgrade\r\n"));
+        assert!(!head.contains("content-length"), "{head:?}");
+        assert!(head.ends_with("\r\n\r\n"));
     }
 
     #[test]

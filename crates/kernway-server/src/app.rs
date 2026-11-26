@@ -22,7 +22,7 @@ use kernway_config::{Config, FromConfig};
 use kernway_core::{
     error::StatusCode,
     request::Request,
-    response::{Body, Response},
+    response::{Body, Response, Upgraded, UpgradedRead, UpgradedWrite},
 };
 use kernway_http::{
     encode_head, encode_head_chunked, encode_response, parse_head, Connection, ParsedHead,
@@ -160,12 +160,16 @@ pub struct AppBuilder {
     config_beans: Vec<ConfigBean>,
     /// Custom response for a caught handler panic (`on_panic`); default 500 if unset.
     panic_handler: Option<PanicFn>,
+    /// Run once on every shard as it starts (`on_shard_start`).
+    shard_init: Option<ShardInit>,
 }
 
 /// A deferred typed-config bean registration, run once the config is resolved.
 type ConfigBean = Box<dyn FnOnce(&Config, &mut AppContext)>;
 /// A caller-supplied response builder for a caught handler panic.
 type PanicFn = Box<dyn Fn(&str) -> Response + Send + Sync>;
+/// A per-shard start hook (`on_shard_start`), given the shard index.
+type ShardInit = Arc<dyn Fn(usize) + Send + Sync>;
 
 impl AppBuilder {
     /// Start a builder with the defaults: `0.0.0.0:8080`, one shard per
@@ -187,6 +191,7 @@ impl AppBuilder {
             config: None,
             config_beans: Vec::new(),
             panic_handler: None,
+            shard_init: None,
         }
     }
 
@@ -210,6 +215,20 @@ impl AppBuilder {
         self.config_beans.push(Box::new(|config, context| {
             let _ = context.register_instance::<T>(Arc::new(T::from_config(config)));
         }));
+        self
+    }
+
+    /// Run `init(shard_index)` once on **every shard** as it starts, inside that
+    /// shard's executor and before its first connection — so it may
+    /// `rt_core::spawn` per-core services (a mailbox loop of an
+    /// `rt_net::CoreMesh`, a per-core cache, a timer wheel). Tasks it spawns
+    /// count toward the shutdown drain, so they should stop on
+    /// `rt_core::until_shutdown`.
+    pub fn on_shard_start<F>(mut self, init: F) -> Self
+    where
+        F: Fn(usize) + Send + Sync + 'static,
+    {
+        self.shard_init = Some(Arc::new(init));
         self
     }
 
@@ -436,6 +455,7 @@ impl AppBuilder {
             static_files,
             file_chunk: self.file_chunk,
             upload: Arc::new(self.upload),
+            shard_init: self.shard_init,
         }
     }
 }
@@ -545,9 +565,23 @@ pub struct KernwayApp {
     static_files: Option<Arc<StaticFiles>>,
     file_chunk: usize,
     upload: Arc<UploadConfig>,
+    shard_init: Option<ShardInit>,
 }
 
 impl KernwayApp {
+    /// How many shards (core threads) [`run`](Self::run) will start — known
+    /// before running, so per-core structures (an `rt_net::CoreMesh`) can be
+    /// sized up front.
+    #[must_use]
+    pub fn shard_count(&self) -> usize {
+        let addr = self.addr.parse().unwrap_or_else(|_| ([0, 0, 0, 0], 0).into());
+        let mut config = ShardConfig::new(addr);
+        if let Some(shards) = self.shards {
+            config = config.shards(shards);
+        }
+        rt_net::shard_thread_count(&config)
+    }
+
     /// Begin configuring an application.
     pub fn builder() -> AppBuilder {
         AppBuilder::new()
@@ -619,7 +653,13 @@ impl KernwayApp {
         let upload = Arc::clone(&self.upload);
         let shutdown = self.shutdown.clone();
 
-        let result = rt_net::run_shards_with_shutdown(config, self.shutdown, move |stream| {
+        let shard_init = self.shard_init.clone();
+        let init = move |index: usize| {
+            if let Some(init) = &shard_init {
+                init(index);
+            }
+        };
+        let result = rt_net::run_shards_with_init(config, self.shutdown, init, move |stream| {
             let router = Arc::clone(&router);
             let context = Arc::clone(&context);
             let middlewares = Arc::clone(&middlewares);
@@ -804,6 +844,39 @@ async fn serve_connection(
             Some(file_response) => file_response,
             None => handle(request, &router, &context, &middlewares).await,
         };
+        // A protocol switch (a WebSocket handshake): send the `101` head, then the
+        // connection leaves HTTP — both socket halves go to the upgrade task,
+        // which owns them until it returns. Bytes already read past this request
+        // are the first bytes of the new protocol, so they travel with it.
+        if matches!(response.body, Body::Upgrade { .. }) {
+            let Body::Upgrade { on_upgrade } = std::mem::replace(&mut response.body, Body::Empty)
+            else {
+                unreachable!("checked just above")
+            };
+            let head = encode_head(&response, Connection::Upgrade, 0);
+            if stream.write_all(&head).await.is_err() {
+                return;
+            }
+            let buffered = buf.get(consumed..).map(<[u8]>::to_vec).unwrap_or_default();
+            // The upgraded connection may live for hours: give the HTTP read
+            // buffers back to the shard's pool now instead of pinning them
+            // (2 x READ_CHUNK) for its whole lifetime.
+            drop(buf);
+            drop(chunk);
+            let (reader, writer) = stream.into_split();
+            // Run the new protocol as its own task on this shard and let this
+            // HTTP task end: awaiting it here would keep the whole suspended
+            // `serve_connection` future (its locals and state machine, ~2 KiB)
+            // alive next to the WebSocket for the connection's lifetime.
+            rt_core::spawn(on_upgrade(Upgraded {
+                reader: Box::new(UpgradeReader(reader)),
+                writer: Box::new(UpgradeWriter(writer)),
+                buffered,
+                remote_addr: peer,
+            }));
+            return;
+        }
+
         let connection = if persist {
             Connection::KeepAlive
         } else {
@@ -823,6 +896,32 @@ async fn serve_connection(
         // Drop this request's bytes; anything left is a pipelined next request
         // and must survive into the following iteration.
         buf.drain(..consumed);
+    }
+}
+
+/// The read half of an upgraded connection, as `kernway-core` sees it.
+struct UpgradeReader(rt_net::stream::TcpReadHalf);
+
+impl UpgradedRead for UpgradeReader {
+    fn read<'a>(&'a mut self, buf: &'a mut [u8]) -> BoxFuture<'a, io::Result<usize>> {
+        Box::pin(self.0.read(buf))
+    }
+}
+
+/// The write half of an upgraded connection, as `kernway-core` sees it.
+struct UpgradeWriter(rt_net::stream::TcpWriteHalf);
+
+impl UpgradedWrite for UpgradeWriter {
+    fn write_all<'a>(&'a mut self, buf: &'a [u8]) -> BoxFuture<'a, io::Result<()>> {
+        Box::pin(self.0.write_all(buf))
+    }
+
+    fn write_all_vectored<'a>(&'a mut self, bufs: &'a [&'a [u8]]) -> BoxFuture<'a, io::Result<()>> {
+        Box::pin(self.0.write_all_vectored(bufs))
+    }
+
+    fn shutdown(&mut self) {
+        let _ = self.0.shutdown(std::net::Shutdown::Write);
     }
 }
 
@@ -977,7 +1076,9 @@ async fn write_response(
             stream.write_all(&head).await?;
             return stream_file(stream, path.clone(), *range, *len, file_chunk).await;
         }
-        Body::Empty | Body::Bytes(_) => {
+        // `Upgrade` never reaches here (the connection loop hands it over first);
+        // treated as an empty body rather than a panic.
+        Body::Empty | Body::Bytes(_) | Body::Upgrade { .. } => {
             // Head and body go out in one `writev` — the body is sent straight from
             // the response, never copied into a coalesced buffer (a big saving for
             // large in-memory bodies), yet still one syscall so keep-alive responses
@@ -2200,6 +2301,46 @@ mod keep_alive_tests {
             "/n",
             sync_handler(|_req, _ctx| Response::new(StatusCode::OK).body(b"ok".to_vec())),
         );
+        // Protocol switch: greet, then echo everything (bytes pipelined after the
+        // request first, then whatever the client sends) until it closes.
+        router.add(
+            "GET",
+            "/upgrade",
+            sync_handler(|_req, _ctx| {
+                let mut response = Response::new(StatusCode::SWITCHING_PROTOCOLS);
+                response.headers.insert("upgrade", "echo");
+                response.upgrade(|mut up: Upgraded| {
+                    Box::pin(async move {
+                        let _ = up.writer.write_all(b"hi:").await;
+                        if !up.buffered.is_empty() {
+                            let _ = up.writer.write_all(&up.buffered).await;
+                        }
+                        let mut buf = [0u8; 64];
+                        while let Ok(n) = up.reader.read(&mut buf).await {
+                            if n == 0 || up.writer.write_all(&buf[..n]).await.is_err() {
+                                break;
+                            }
+                        }
+                        up.writer.shutdown();
+                    })
+                })
+            }),
+        );
+        // Reports how many free read buffers the shard's pool holds once the
+        // upgrade task runs (see `upgrade_returns_the_http_read_buffers`).
+        router.add(
+            "GET",
+            "/upgrade-pool",
+            sync_handler(|_req, _ctx| {
+                Response::new(StatusCode::SWITCHING_PROTOCOLS).upgrade(|mut up: Upgraded| {
+                    Box::pin(async move {
+                        let free = crate::bufpool::free_count();
+                        let _ = up.writer.write_all(format!("pool={free}").as_bytes()).await;
+                        up.writer.shutdown();
+                    })
+                })
+            }),
+        );
         router.add(
             "GET",
             "/chunked",
@@ -2209,6 +2350,61 @@ mod keep_alive_tests {
             }),
         );
         router
+    }
+
+    /// `101` then the raw socket: no content-length, `connection: upgrade`, bytes
+    /// sent right behind the request (pipelined) reach the upgrade task, and the
+    /// task can read and write freely afterwards.
+    #[test]
+    fn upgrade_hands_the_socket_to_the_upgrade_task() {
+        let got = with_server(KeepAliveConfig::default(), |mut sock| {
+            sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            sock.write_all(b"GET /upgrade HTTP/1.1\r\nHost: x\r\n\r\nEARLY").unwrap();
+            let mut got = Vec::new();
+            let mut buf = [0u8; 256];
+            // Head + "hi:" + "EARLY" (may arrive in pieces).
+            while !String::from_utf8_lossy(&got).contains("EARLY") {
+                let n = sock.read(&mut buf).unwrap();
+                assert!(n > 0, "closed early: {:?}", String::from_utf8_lossy(&got));
+                got.extend_from_slice(&buf[..n]);
+            }
+            sock.write_all(b"later").unwrap();
+            while !String::from_utf8_lossy(&got).ends_with("later") {
+                let n = sock.read(&mut buf).unwrap();
+                assert!(n > 0);
+                got.extend_from_slice(&buf[..n]);
+            }
+            sock.shutdown(std::net::Shutdown::Write).unwrap();
+            String::from_utf8(got).unwrap()
+        });
+        let (head, rest) = got.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 101 Switching Protocols"), "{head:?}");
+        assert!(head.contains("connection: upgrade"), "{head:?}");
+        assert!(head.contains("upgrade: echo"), "{head:?}");
+        assert!(!head.contains("content-length"), "{head:?}");
+        assert_eq!(rest, "hi:EARLYlater");
+    }
+
+    /// An upgraded connection (a WebSocket) can live for hours: the HTTP
+    /// request's two pooled read buffers (2 x `READ_CHUNK`) must go back to the
+    /// shard's pool at the hand-over, not stay pinned for the connection's
+    /// lifetime — measured by `benchmarks/ws-load`, that was ~16 KiB of every
+    /// idle WebSocket's ~21 KiB.
+    #[test]
+    fn upgrade_returns_the_http_read_buffers() {
+        let got = with_server(KeepAliveConfig::default(), |mut sock| {
+            sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            sock.write_all(b"GET /upgrade-pool HTTP/1.1\r\nHost: x\r\n\r\n")
+                .unwrap();
+            let mut got = Vec::new();
+            sock.read_to_end(&mut got).unwrap();
+            String::from_utf8(got).unwrap()
+        });
+        let (_, body) = got.split_once("\r\n\r\n").unwrap();
+        assert_eq!(
+            body, "pool=2",
+            "the upgrade task still holds the HTTP buffers"
+        );
     }
 
     /// A BodyStream that drains a fixed list of chunks, for the chunked test.
@@ -2295,6 +2491,8 @@ mod keep_alive_tests {
             .await;
         })
         .unwrap();
+        // An upgraded connection continues in a task of its own: drive it to the end.
+        ex.run().unwrap();
 
         handle.join().unwrap()
     }

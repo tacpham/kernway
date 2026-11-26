@@ -1006,6 +1006,18 @@ name = "kernway-log"
 version = "0.1.0"
 
 [[package]]
+name = "kernway-metrics"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "kernway-core",
+ "libc",
+ "rt-core",
+ "rt-net",
+ "thiserror",
+]
+
+[[package]]
 name = "kernway-multipart"
 version = "0.1.0"
 dependencies = [
@@ -1233,7 +1245,10 @@ dependencies = [
 name = "kernway-ws"
 version = "0.1.0"
 dependencies = [
- "kernway-http-client",
+ "criterion",
+ "kernway-core",
+ "kernway-http",
+ "rt-core",
  "rt-net",
 ]
 
@@ -2323,6 +2338,20 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "ws-load"
+version = "0.1.0"
+dependencies = [
+ "di-core",
+ "kernway-core",
+ "kernway-server",
+ "kernway-ws",
+ "libc",
+ "rt-core",
+ "rt-net",
+ "serde_json",
+]
 
 [[package]]
 name = "yaml-rust2"

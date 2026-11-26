@@ -51,6 +51,8 @@ pub mod backends;
 pub mod compression;
 /// CORS — cross-origin resource sharing middleware (Spring's `cors()`).
 pub mod cors;
+/// Cross-origin isolation (COOP/COEP/CORP) for `SharedArrayBuffer` / threaded wasm.
+pub mod cross_origin;
 /// Typed argument extraction for `#[controller]` methods.
 pub mod extract;
 /// Synchronous middleware chain and the built-in layers.
@@ -91,6 +93,7 @@ pub use app::serve_file;
 #[cfg(feature = "compression")]
 pub use compression::Compression;
 pub use cors::Cors;
+pub use cross_origin::{Corp, CrossOriginIsolation};
 pub use kernway_security::SecurityHeaders;
 pub use rate_limit::RateLimit;
 pub use security::{Access, HttpSecurity, SecurityLayer};

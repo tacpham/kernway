@@ -1,0 +1,28 @@
+[package]
+name        = "ws-load"
+description = "Load-test harness for kernway-ws: a KernwayApp echo/room server and a rt-core/rt-net client (idle, echo, fanout scenarios)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish     = false
+
+[dependencies]
+kernway-server = { workspace = true }
+kernway-core   = { workspace = true }
+kernway-ws     = { workspace = true }
+di-core        = { workspace = true }
+rt-core        = { workspace = true }
+rt-net         = { workspace = true }
+libc           = { workspace = true }
+serde_json     = { workspace = true }
+
+[[bin]]
+name = "ws-load-server"
+path = "src/bin/ws-load-server.rs"
+
+[[bin]]
+name = "ws-load"
+path = "src/bin/ws-load.rs"
+
+[lints]
+workspace = true

@@ -53,6 +53,15 @@ impl MySqlDriver {
         let mut guard = self.pool.acquire().await?;
         engine::ensure_table::<T>(&mut guard).await
     }
+
+    /// Run one raw SQL statement (text protocol / `COM_QUERY`) and discard any rows. For DDL and
+    /// bulk setup the CRUD repository API does not cover — e.g. `CREATE DATABASE`, running a
+    /// schema file, or provisioning a tenant. ONE statement per call (no multi-statement).
+    pub async fn execute(&self, sql: &str) -> Result<(), OrmError> {
+        let mut guard = self.pool.acquire().await?;
+        guard.query(sql).await?;
+        Ok(())
+    }
 }
 
 impl Driver for MySqlDriver {

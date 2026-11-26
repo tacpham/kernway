@@ -23,6 +23,8 @@ pub enum KernwayError {
 pub struct StatusCode(pub u16);
 
 impl StatusCode {
+    /// `101 Switching Protocols` — the connection leaves HTTP (a WebSocket upgrade).
+    pub const SWITCHING_PROTOCOLS: Self = Self(101);
     /// `200 OK` — the request succeeded.
     pub const OK: Self = Self(200);
     /// `201 Created` — a new resource was created; set `Location` alongside it.

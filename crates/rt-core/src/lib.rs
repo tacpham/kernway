@@ -10,8 +10,9 @@
 //! - there is no work-stealing deque, no cross-thread task queue, and no atomic
 //!   traffic on the polling hot path.
 //!
-//! Only *wakeups* cross threads (a `spawn_blocking` worker finishing, a timer),
-//! and those go through an `Arc`-backed [`Waker`](std::task::Waker) plus a
+//! Only *wakeups* and [`mailbox`](mod@mailbox) messages cross threads (a `spawn_blocking`
+//! worker finishing, a timer, a message for a task on another shard), and the
+//! wakeups go through an `Arc`-backed [`Waker`](std::task::Waker) plus a
 //! `mio::Waker` that unparks the sleeping reactor. See [`task`] for why the
 //! waker is not `Rc`-backed.
 //!
@@ -34,6 +35,7 @@
 
 pub mod blocking;
 pub mod executor;
+pub mod mailbox;
 pub mod reactor;
 pub mod shutdown;
 pub mod sys;
@@ -42,6 +44,7 @@ pub mod time;
 
 pub use blocking::{spawn_blocking, Blocking};
 pub use executor::{spawn, try_handle, try_with_reactor, with_reactor, Executor, Handle};
+pub use mailbox::{mailbox, MailboxReceiver, MailboxSender, TryRecvError, TrySendError};
 pub use reactor::{Direction, Reactor};
 pub use shutdown::{until_shutdown, Shutdown};
 pub use sys::{default_shard_count, on_interrupt, pin_current_thread_to_core};

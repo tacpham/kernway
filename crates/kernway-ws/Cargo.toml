@@ -1,10 +1,19 @@
 [package]
 name        = "kernway-ws"
-description = "Minimal RFC6455 WebSocket client on the Kernway runtime (rt-net + kernway-http-client TLS). Client-only, text frames + ping/pong."
+description = "RFC 6455 WebSocket server for Kernway: upgrade from kernway-server, per-shard heartbeat, vectored writes, shared broadcast frames, backpressured outbox."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
+rt-core             = { workspace = true }
+kernway-core        = { workspace = true }
+
+[dev-dependencies]
 rt-net              = { workspace = true }
-kernway-http-client = { workspace = true }
+kernway-http        = { workspace = true }
+criterion           = { workspace = true }
+
+[[bench]]
+name    = "frame"
+harness = false

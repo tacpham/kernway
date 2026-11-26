@@ -28,6 +28,9 @@ pub mod hash;
 pub mod session;
 pub mod token;
 
+#[cfg(feature = "aead")]
+pub mod secretbox;
+
 /// Request tracking — visitor id, client IP (proxy-aware), User-Agent, and a ban
 /// list (IP / subnet / User-Agent).
 pub mod tracking;

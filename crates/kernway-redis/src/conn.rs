@@ -13,6 +13,7 @@ use rt_net::AsyncTcpStream;
 
 use crate::error::RedisError;
 use crate::resp::{self, Value};
+use crate::stream::{self, StreamEntries, StreamEntry};
 
 /// A single, exclusively-owned connection to a Redis server.
 pub struct Connection {
@@ -301,11 +302,163 @@ impl Connection {
                     items.as_slice()
                 {
                     if kind.as_slice() == b"message" {
-                        return Ok((String::from_utf8_lossy(channel).into_owned(), payload.clone()));
+                        return Ok((
+                            String::from_utf8_lossy(channel).into_owned(),
+                            payload.clone(),
+                        ));
                     }
                 }
             }
             // Any other frame (subscribe/unsubscribe/pong) → keep waiting for a message.
+        }
+    }
+
+    // --- streams (a durable queue with consumer groups) ----------------------
+    //
+    // Unlike pub/sub, a stream entry read through a consumer group stays in the
+    // group's pending list until `XACK`ed, so a crashed consumer loses nothing: its
+    // entries are recovered by another consumer with `xautoclaim`. Reply parsing
+    // lives in [`crate::stream`].
+
+    /// `XADD key [MAXLEN ~ n] id field value …` → the new entry's ID. `id` is
+    /// usually `"*"` (server-assigned). `maxlen_approx` caps the stream at about
+    /// `n` entries (`MAXLEN ~`, which trims whole macro-nodes — cheap).
+    pub async fn xadd(
+        &mut self,
+        key: &str,
+        id: &str,
+        fields: &[(&str, &[u8])],
+        maxlen_approx: Option<u64>,
+    ) -> Result<String, RedisError> {
+        let args = stream::xadd_args(key, id, fields, maxlen_approx);
+        match self.command(&stream::as_slices(&args)).await? {
+            Value::Bulk(b) => String::from_utf8(b)
+                .map_err(|_| RedisError::Protocol("XADD: non-UTF-8 entry id".into())),
+            other => Err(RedisError::unexpected("XADD", &other)),
+        }
+    }
+
+    /// `XGROUP CREATE key group start_id [MKSTREAM]` → `true` if created, `false`
+    /// if the group already existed (`BUSYGROUP`), so it is safe to call on every
+    /// startup. `start_id` is `"$"` (only new entries) or `"0"` (whole history);
+    /// `mkstream` creates an empty stream if the key does not exist.
+    pub async fn xgroup_create(
+        &mut self,
+        key: &str,
+        group: &str,
+        start_id: &str,
+        mkstream: bool,
+    ) -> Result<bool, RedisError> {
+        let mut args: Vec<&[u8]> = vec![
+            b"XGROUP",
+            b"CREATE",
+            key.as_bytes(),
+            group.as_bytes(),
+            start_id.as_bytes(),
+        ];
+        if mkstream {
+            args.push(b"MKSTREAM");
+        }
+        match self.command(&args).await {
+            Ok(_) => Ok(true),
+            Err(e) if stream::is_busygroup(&e) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `XREADGROUP GROUP group consumer [COUNT n] [BLOCK ms] STREAMS key… id…` →
+    /// the entries delivered, per stream. Use id `">"` for never-delivered entries,
+    /// or `"0"` to re-read this consumer's own pending ones. A `BLOCK` that times
+    /// out returns an empty vec. Note `BLOCK` holds this connection for the wait.
+    pub async fn xreadgroup(
+        &mut self,
+        group: &str,
+        consumer: &str,
+        streams: &[(&str, &str)],
+        count: Option<usize>,
+        block_ms: Option<u64>,
+    ) -> Result<Vec<StreamEntries>, RedisError> {
+        let args = stream::xreadgroup_args(group, consumer, streams, count, block_ms);
+        let reply = self.command(&stream::as_slices(&args)).await?;
+        stream::parse_read_reply(&reply)
+    }
+
+    /// `XACK key group id…` → how many entries were acknowledged (removed from the
+    /// group's pending list).
+    pub async fn xack(&mut self, key: &str, group: &str, ids: &[&str]) -> Result<i64, RedisError> {
+        let mut args: Vec<&[u8]> = Vec::with_capacity(ids.len() + 3);
+        args.extend([b"XACK".as_slice(), key.as_bytes(), group.as_bytes()]);
+        args.extend(ids.iter().map(|id| id.as_bytes()));
+        match self.command(&args).await? {
+            Value::Int(n) => Ok(n),
+            other => Err(RedisError::unexpected("XACK", &other)),
+        }
+    }
+
+    /// `XLEN key` → the number of entries (0 for a missing key).
+    pub async fn xlen(&mut self, key: &str) -> Result<i64, RedisError> {
+        match self.command(&[b"XLEN", key.as_bytes()]).await? {
+            Value::Int(n) => Ok(n),
+            other => Err(RedisError::unexpected("XLEN", &other)),
+        }
+    }
+
+    /// `XPENDING key group` (summary form) → the total number of entries delivered
+    /// to the group but not yet acknowledged.
+    pub async fn xpending_count(&mut self, key: &str, group: &str) -> Result<i64, RedisError> {
+        let reply = self
+            .command(&[b"XPENDING", key.as_bytes(), group.as_bytes()])
+            .await?;
+        stream::parse_pending_count(&reply)
+    }
+
+    /// `XAUTOCLAIM key group consumer min_idle_ms start COUNT count` → transfer
+    /// entries pending for at least `min_idle_ms` (their consumer is presumed dead)
+    /// to `consumer`, returning `(next start, claimed entries)`. Call again with the
+    /// returned start until it is `"0-0"` to sweep the whole pending list.
+    pub async fn xautoclaim(
+        &mut self,
+        key: &str,
+        group: &str,
+        consumer: &str,
+        min_idle_ms: u64,
+        start: &str,
+        count: usize,
+    ) -> Result<(String, Vec<StreamEntry>), RedisError> {
+        let idle = min_idle_ms.to_string();
+        let count = count.to_string();
+        let reply = self
+            .command(&[
+                b"XAUTOCLAIM",
+                key.as_bytes(),
+                group.as_bytes(),
+                consumer.as_bytes(),
+                idle.as_bytes(),
+                start.as_bytes(),
+                b"COUNT",
+                count.as_bytes(),
+            ])
+            .await?;
+        stream::parse_autoclaim_reply(&reply)
+    }
+
+    /// `XTRIM key MAXLEN [~] n` → how many entries were evicted. `approx` (`~`)
+    /// lets Redis trim only whole macro-nodes, which is much cheaper.
+    pub async fn xtrim_maxlen(
+        &mut self,
+        key: &str,
+        n: u64,
+        approx: bool,
+    ) -> Result<i64, RedisError> {
+        let n = n.to_string();
+        let mut args: Vec<&[u8]> = vec![b"XTRIM", key.as_bytes(), b"MAXLEN"];
+        if approx {
+            args.push(b"~");
+        }
+        args.push(n.as_bytes());
+        match self.command(&args).await? {
+            Value::Int(n) => Ok(n),
+            other => Err(RedisError::unexpected("XTRIM", &other)),
         }
     }
 }

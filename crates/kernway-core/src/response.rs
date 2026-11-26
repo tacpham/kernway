@@ -18,6 +18,57 @@ pub trait BodyStream {
     fn next(&mut self) -> BoxFuture<'_, std::io::Result<Option<Vec<u8>>>>;
 }
 
+/// The read side of a connection taken over after `101 Switching Protocols`.
+///
+/// Implemented by the server's transport; kept as a trait so `kernway-core`
+/// needs no runtime dependency. **Not `Send`** — it lives on the connection's shard.
+pub trait UpgradedRead {
+    /// Read into `buf`; `Ok(0)` means the peer closed its side.
+    fn read<'a>(&'a mut self, buf: &'a mut [u8]) -> BoxFuture<'a, std::io::Result<usize>>;
+}
+
+/// The write side of a connection taken over after `101 Switching Protocols`.
+pub trait UpgradedWrite {
+    /// Write the whole buffer.
+    fn write_all<'a>(&'a mut self, buf: &'a [u8]) -> BoxFuture<'a, std::io::Result<()>>;
+    /// Write every buffer, in order, as if concatenated — ideally with vectored
+    /// writes (`writev`), so many queued frames, including shared broadcast
+    /// buffers, go out in one syscall without being copied together first.
+    ///
+    /// The default concatenates and calls [`write_all`](Self::write_all); a
+    /// transport overrides it with real vectored I/O.
+    fn write_all_vectored<'a>(
+        &'a mut self,
+        bufs: &'a [&'a [u8]],
+    ) -> BoxFuture<'a, std::io::Result<()>> {
+        Box::pin(async move {
+            let joined = bufs.concat();
+            self.write_all(&joined).await
+        })
+    }
+    /// Half-close the write direction (the peer sees EOF).
+    fn shutdown(&mut self);
+}
+
+/// A connection handed to an upgrade handler — see [`Response::upgrade`].
+///
+/// The two halves can be driven by two tasks at once (one reading, one
+/// writing), which is what a full-duplex protocol like WebSocket needs.
+pub struct Upgraded {
+    /// Reading half.
+    pub reader: Box<dyn UpgradedRead>,
+    /// Writing half.
+    pub writer: Box<dyn UpgradedWrite>,
+    /// Bytes the server already read past the upgrade request — the start of the
+    /// new protocol's stream. Consume these before reading from `reader`.
+    pub buffered: Vec<u8>,
+    /// The peer address, when known.
+    pub remote_addr: Option<std::net::SocketAddr>,
+}
+
+/// The task run on a connection after a `101` — owns the connection until it ends.
+pub type OnUpgrade = Box<dyn FnOnce(Upgraded) -> BoxFuture<'static, ()>>;
+
 /// A response body: bytes in memory, or a file the connection task streams.
 ///
 /// Per [KEP-0002]. The common case is `Bytes` — what every `IntoResponse`
@@ -60,6 +111,13 @@ pub enum Body {
         /// The async chunk source; each `next()` is one chunk, `None` ends it.
         source: Box<dyn BodyStream>,
     },
+    /// **Protocol switch** (RFC 9110 §15.2.2): after a `101 Switching Protocols`
+    /// head, the connection leaves HTTP and is handed to `on_upgrade` — how a
+    /// WebSocket handshake hands its socket over. No HTTP body is written.
+    Upgrade {
+        /// The task that takes the connection over.
+        on_upgrade: OnUpgrade,
+    },
 }
 
 impl std::fmt::Debug for Body {
@@ -75,6 +133,7 @@ impl std::fmt::Debug for Body {
                 .finish(),
             Body::Stream { len, .. } => write!(f, "Stream({len} bytes)"),
             Body::Chunked { .. } => f.write_str("Chunked(open-ended)"),
+            Body::Upgrade { .. } => f.write_str("Upgrade"),
         }
     }
 }
@@ -92,6 +151,8 @@ impl Body {
             Body::Stream { len, .. } => *len,
             // Open-ended: length is unknown; it is framed chunked, not by length.
             Body::Chunked { .. } => 0,
+            // A protocol switch has no HTTP body.
+            Body::Upgrade { .. } => 0,
         }
     }
 
@@ -151,7 +212,11 @@ impl Response {
     pub fn body_bytes(&self) -> &[u8] {
         match &self.body {
             Body::Bytes(b) => b,
-            Body::Empty | Body::File { .. } | Body::Stream { .. } | Body::Chunked { .. } => &[],
+            Body::Empty
+            | Body::File { .. }
+            | Body::Stream { .. }
+            | Body::Chunked { .. }
+            | Body::Upgrade { .. } => &[],
         }
     }
 
@@ -168,6 +233,20 @@ impl Response {
     /// ends or the client disconnects.
     pub fn chunked(mut self, source: Box<dyn BodyStream>) -> Self {
         self.body = Body::Chunked { source };
+        self
+    }
+
+    /// Switch protocols: the server answers with this response's head (status
+    /// should be `101 Switching Protocols`, headers set by the caller — e.g. the
+    /// WebSocket `Sec-WebSocket-Accept`), then hands the connection to
+    /// `on_upgrade`, which owns it until it returns. Used by `kernway-ws`.
+    pub fn upgrade<F>(mut self, on_upgrade: F) -> Self
+    where
+        F: FnOnce(Upgraded) -> BoxFuture<'static, ()> + 'static,
+    {
+        self.body = Body::Upgrade {
+            on_upgrade: Box::new(on_upgrade),
+        };
         self
     }
 

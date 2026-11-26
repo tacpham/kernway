@@ -1,0 +1,34 @@
+[package]
+name        = "kernway-metrics"
+description = "Kernway metrics — per-shard, contention-free counters, gauges and histograms with Prometheus text exposition"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+homepage.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+kernway-core = { workspace = true }   # Response / StatusCode for the /metrics handler
+rt-net       = { workspace = true }   # shard_index(): which slot this thread writes
+thiserror    = { workspace = true }
+
+# Process metrics (resident memory, open fds, CPU time) read on scrape.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+rt-core   = { workspace = true }   # Shutdown, for the real-shard test
+
+[[bench]]
+name    = "hot_path"
+harness = false
+
+[lints]
+workspace = true
+
+# docs.rs builds with every feature on, so feature-gated items still appear.
+[package.metadata.docs.rs]
+all-features = true

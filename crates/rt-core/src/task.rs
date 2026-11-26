@@ -66,13 +66,17 @@ impl Shared {
     /// Queue `id` to be polled, and unpark the reactor if it is sleeping.
     pub(crate) fn schedule(&self, id: TaskId) {
         if id == MAIN_TASK {
-            self.main_woken.store(true, Ordering::Release);
+            // SeqCst, paired with `set_parked` and `main_woken_pending`: this is
+            // a store-then-load handshake (Dekker), which acquire/release does
+            // not order. Either the parking thread sees the flag, or this
+            // thread sees `parked == true` and sends the unparker.
+            self.main_woken.store(true, Ordering::SeqCst);
         } else {
             self.lock_ready().push_back(id);
         }
         // Only the parked→awake transition sends the wakeup, so a burst of
         // wakes costs at most one syscall.
-        if self.parked.swap(false, Ordering::AcqRel) {
+        if self.parked.swap(false, Ordering::SeqCst) {
             let _ = self.unparker.wake();
         }
     }
@@ -88,12 +92,21 @@ impl Shared {
     }
 
     pub(crate) fn set_parked(&self, parked: bool) {
-        self.parked.store(parked, Ordering::Release);
+        // SeqCst: see `schedule` — the store must not be reordered after the
+        // parking thread's subsequent `main_woken_pending` load.
+        self.parked.store(parked, Ordering::SeqCst);
+    }
+
+    /// Has [`MAIN_TASK`] been woken since the flag was last consumed? Does not
+    /// consume it — the executor's park check uses this to avoid sleeping on a
+    /// wake that landed after `block_on` last looked.
+    pub(crate) fn main_woken_pending(&self) -> bool {
+        self.main_woken.load(Ordering::SeqCst)
     }
 
     /// Consume the "`block_on` future was woken" flag.
     pub(crate) fn take_main_woken(&self) -> bool {
-        self.main_woken.swap(false, Ordering::AcqRel)
+        self.main_woken.swap(false, Ordering::SeqCst)
     }
 
     /// A panic in a task must not poison the whole shard's queue: recover the

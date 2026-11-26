@@ -135,9 +135,15 @@ impl Inner {
     /// is what closes the lost-wakeup race: a wake landing after the check finds
     /// `parked == true` and sends the unparker, and `mio::Waker` also unblocks a
     /// `poll()` that has not started yet.
+    ///
+    /// The check covers the `block_on` future too. A wake of [`MAIN_TASK`] that
+    /// lands after `block_on` consumed the flag but before `set_parked` sees
+    /// `parked == false` and sends no unparker — so unless the flag is looked
+    /// at here, the shard sleeps on a future that is already ready. (Found by
+    /// the mailbox's cross-thread ping-pong test, which hung without this.)
     fn park(&self) -> io::Result<()> {
         self.shared.set_parked(true);
-        if self.shared.has_ready() {
+        if self.shared.has_ready() || self.shared.main_woken_pending() {
             self.shared.set_parked(false);
             return Ok(());
         }
@@ -326,6 +332,10 @@ impl Executor {
             if self.inner.shared.has_ready() {
                 self.inner.poll_io_periodic()?; // keep I/O alive under a busy run queue
             } else {
+                // No `block_on` future here, so a stale wake of one (a waker that
+                // outlived an earlier `block_on`) means nothing — clear it, or
+                // `park` would return immediately on every round.
+                self.inner.shared.take_main_woken();
                 self.inner.park()?;
             }
         }

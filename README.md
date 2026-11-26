@@ -12,7 +12,7 @@
 > See [milestones](docs/design/MILESTONES.md) for what is next.
 
 [![Rust](https://img.shields.io/badge/rust-1.78%2B-orange.svg)](https://www.rust-lang.org)
-[![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE)
 
 ---
 
@@ -401,4 +401,6 @@ Progress follows the [walking-skeleton milestones](docs/design/MILESTONES.md) �
 
 ## License
 
-GPL-3.0 — see [LICENSE](LICENSE)
+Source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE): free for personal and other noncommercial use (including schools, charities and government); **commercial use — building or running a product or service for a business — needs a commercial license** from the author.
+
+Versions published earlier under GPL-3.0 / MIT keep the license they were published with.
