@@ -17,6 +17,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 
+/// The least time opening a connection waits for a lock during setup.
+const SETUP_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Prepared statements kept per connection.
 const STATEMENT_CACHE: usize = 64;
 
@@ -47,9 +50,6 @@ struct StmtCache {
 pub(crate) type Job = Box<dyn for<'c> FnOnce(&mut Ctx<'c>) + Send>;
 
 static NEXT_THREAD: AtomicU64 = AtomicU64::new(0);
-
-/// The least time opening a connection waits for a lock during setup.
-const SETUP_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Start a connection thread, open the database on it and set it up. The
 /// returned sender submits jobs; dropping it ends the thread and closes the
@@ -103,13 +103,16 @@ fn open(cfg: &SqliteConfig) -> Result<Db, OrmError> {
         ),
     }
     .map_err(conn_err)?;
-    conn.busy_timeout(cfg.busy_timeout.as_millis()).map_err(conn_err)?;
+    // Setup may meet a lock another connection holds for a moment (WAL
+    // recovery on first open, a journal-mode change): wait for it at least
+    // a few seconds on this thread whatever the configured busy timeout,
+    // which applies from the first statement on.
+    conn.busy_timeout(cfg.busy_timeout.max(SETUP_BUSY_TIMEOUT).as_millis()).map_err(conn_err)?;
     for sql in cfg.setup_sql() {
         if let Some(want) = sql.strip_prefix("PRAGMA journal_mode = ") {
             set_journal_mode(&conn, want).map_err(|e| OrmError::Connection(format!("{sql}: {e}")))?;
             continue;
         }
-        // Pragmas may return a row (journal_mode); step through it.
         let run = || -> Result<(), raw::Error> {
             let mut stmt = conn.prepare(&sql, false)?;
             while stmt.step()? {}
@@ -120,6 +123,7 @@ fn open(cfg: &SqliteConfig) -> Result<Db, OrmError> {
     if let (Location::Memory(_), Some(image)) = (&cfg.location, &cfg.image) {
         load_image(&conn, image)?;
     }
+    conn.busy_timeout(cfg.busy_timeout.as_millis()).map_err(conn_err)?;
     install_hooks(&mut conn, cfg);
     for (path, entry) in &cfg.extensions {
         // SAFETY: `SqliteConfig::extension` is unsafe; its caller vouched for
@@ -140,27 +144,49 @@ fn open(cfg: &SqliteConfig) -> Result<Db, OrmError> {
 /// SQLite answers "locked" at once rather than waiting — several connections
 /// opening a fresh file together all try — so retry until the mode is in
 /// place (by us or by one of them) or the setup time is up.
-fn set_journal_mode(conn: &Connection, want: &str) -> Result<(), String> {
-    let current = || conn.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0)).map_err(|e| e.to_string());
+fn set_journal_mode(conn: &Db, want: &str) -> Result<(), raw::Error> {
+    let current = || -> Result<String, raw::Error> {
+        let mut stmt = conn.prepare("PRAGMA journal_mode", false)?;
+        Ok(match stmt.step()?.then(|| stmt.column(0)) {
+            Some(Raw::Text(m)) => String::from_utf8_lossy(&m).into_owned(),
+            _ => String::new(),
+        })
+    };
     let deadline = std::time::Instant::now() + SETUP_BUSY_TIMEOUT;
     loop {
         if current()?.eq_ignore_ascii_case(want) {
             return Ok(());
         }
-        let attempt = conn.query_row(&format!("PRAGMA journal_mode = {want}"), [], |r| r.get::<_, String>(0));
-        let busy = matches!(&attempt, Err(rusqlite::Error::SqliteFailure(e, _))
-            if matches!(e.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked));
-        match attempt {
-            Err(e) if !busy => return Err(e.to_string()),
-            Ok(now) if !now.eq_ignore_ascii_case(want) => return Err(format!("journal mode {want} not available here; it is {now}")),
-            _ => {}
+        let attempt = (|| {
+            let mut stmt = conn.prepare(&format!("PRAGMA journal_mode = {want}"), false)?;
+            while stmt.step()? {}
+            Ok::<(), raw::Error>(())
+        })();
+        let busy = matches!(&attempt, Err(e) if matches!(e.code & 0xff, ffi::SQLITE_BUSY | ffi::SQLITE_LOCKED));
+        if let Err(e) = attempt {
+            if !busy {
+                return Err(e);
+            }
         }
         if std::time::Instant::now() >= deadline {
+            // Still not switched: SQLite kept refusing (or keeps another mode
+            // for this kind of database) — say which mode it stayed in.
             let now = current()?;
-            return if now.eq_ignore_ascii_case(want) { Ok(()) } else { Err(format!("database is locked; journal mode stayed {now}")) };
+            if now.eq_ignore_ascii_case(want) {
+                return Ok(());
+            }
+            return Err(raw::Error { code: ffi::SQLITE_BUSY, message: format!("database is locked; journal mode stayed {now}") });
         }
         if busy {
             std::thread::sleep(std::time::Duration::from_millis(5));
+        } else {
+            // Accepted but not applied (a mode this database cannot use):
+            // nothing will change by retrying.
+            let now = current()?;
+            if now.eq_ignore_ascii_case(want) {
+                return Ok(());
+            }
+            return Err(raw::Error { code: ffi::SQLITE_ERROR, message: format!("journal mode {want} not available here; it is {now}") });
         }
     }
 }
