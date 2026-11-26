@@ -527,6 +527,26 @@ pub(crate) fn decode(ora_type: u8, csfrm: u8, b: Vec<u8>) -> Result<Value, Strin
     })
 }
 
+/// Parse `YYYY-MM-DD HH24:MI:SS[.fraction] ±HH:MM` (TO_CHAR output).
+pub(crate) fn parse_datetime_offset(s: &str) -> Option<(DateTime, i16)> {
+    let (dt, off) = s.trim().rsplit_once(' ')?;
+    let (date, time) = dt.split_once(' ')?;
+    let mut d = date.split('-').map(|p| p.parse::<i64>().ok());
+    let (year, month, day) = (d.next()??, d.next()??, d.next()??);
+    let (hms, frac) = time.split_once('.').unwrap_or((time, ""));
+    let mut t = hms.split(':').map(|p| p.parse::<u8>().ok());
+    let (hour, minute, second) = (t.next()??, t.next()??, t.next()??);
+    let digits: String = frac.chars().take(9).collect();
+    let nanos = if digits.is_empty() { 0 } else { format!("{digits:0<9}").parse().ok()? };
+    let sign: i16 = if off.starts_with('-') { -1 } else { 1 };
+    let (oh, om) = off.trim_start_matches(['+', '-']).split_once(':')?;
+    let offset = sign * (oh.parse::<i16>().ok()? * 60 + om.parse::<i16>().ok()?);
+    Some((
+        DateTime { year: i32::try_from(year).ok()?, month: u8::try_from(month).ok()?, day: u8::try_from(day).ok()?, hour, minute, second, nanos },
+        offset,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,22 +626,3 @@ mod tests {
     }
 }
 
-/// Parse `YYYY-MM-DD HH24:MI:SS[.fraction] ±HH:MM` (TO_CHAR output).
-pub(crate) fn parse_datetime_offset(s: &str) -> Option<(DateTime, i16)> {
-    let (dt, off) = s.trim().rsplit_once(' ')?;
-    let (date, time) = dt.split_once(' ')?;
-    let mut d = date.split('-').map(|p| p.parse::<i64>().ok());
-    let (year, month, day) = (d.next()??, d.next()??, d.next()??);
-    let (hms, frac) = time.split_once('.').unwrap_or((time, ""));
-    let mut t = hms.split(':').map(|p| p.parse::<u8>().ok());
-    let (hour, minute, second) = (t.next()??, t.next()??, t.next()??);
-    let digits: String = frac.chars().take(9).collect();
-    let nanos = if digits.is_empty() { 0 } else { format!("{digits:0<9}").parse().ok()? };
-    let sign: i16 = if off.starts_with('-') { -1 } else { 1 };
-    let (oh, om) = off.trim_start_matches(['+', '-']).split_once(':')?;
-    let offset = sign * (oh.parse::<i16>().ok()? * 60 + om.parse::<i16>().ok()?);
-    Some((
-        DateTime { year: i32::try_from(year).ok()?, month: u8::try_from(month).ok()?, day: u8::try_from(day).ok()?, hour, minute, second, nanos },
-        offset,
-    ))
-}
