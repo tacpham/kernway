@@ -142,8 +142,23 @@ enum Output {
     Measure(Agg),
 }
 
-/// A query over entity `T` and the entities joined to it. See the
-/// [module docs](self).
+/// A query over entity `T` and the entities joined to it — joins, `GROUP BY`
+/// with aggregates, `HAVING` — started with [`SqlDb::select`] or
+/// [`SqlTx::select`]:
+///
+/// ```ignore
+/// let top: Vec<CustomerSales> = db
+///     .select::<Order>()
+///     .join::<Customer>(col::<Order>("customer_id"), "id")
+///     .filter(Spec::eq("status", "paid"))
+///     .group_by(col::<Customer>("name"))
+///     .aggregate("orders", Agg::Count)
+///     .aggregate("revenue", Agg::Sum(col::<Order>("total")))
+///     .having("orders", Cmp::Gte, 3)
+///     .order_by("revenue", false)
+///     .fetch_as()
+///     .await?;
+/// ```
 pub struct Select<'a, T, S: ?Sized> {
     src: &'a S,
     joins: Vec<Join>,

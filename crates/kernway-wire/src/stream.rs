@@ -19,6 +19,9 @@ enum Socket {
     /// A local Unix-domain socket (never upgraded to TLS).
     #[cfg(unix)]
     Unix(rt_net::AsyncUnixStream),
+    /// A local Windows named pipe (never upgraded to TLS).
+    #[cfg(windows)]
+    Pipe(rt_net::AsyncNamedPipe),
     Tls(Box<AsyncTlsStream>),
     /// Transient, only while the plaintext socket is handed to the TLS handshake.
     Upgrading,
@@ -64,16 +67,28 @@ impl BufStream {
         }
     }
 
-    /// Whether this is a local Unix-domain socket.
-    #[inline]
-    pub fn is_unix(&self) -> bool {
-        #[cfg(unix)]
-        {
-            matches!(self.socket, Socket::Unix(_))
+    /// Wrap a connected Windows named pipe.
+    #[cfg(windows)]
+    pub fn new_pipe(pipe: rt_net::AsyncNamedPipe) -> Self {
+        Self {
+            socket: Socket::Pipe(pipe),
+            rbuf: vec![0; READ_CHUNK],
+            rpos: 0,
+            rlen: 0,
+            wbuf: Vec::with_capacity(READ_CHUNK),
         }
-        #[cfg(not(unix))]
-        {
-            false
+    }
+
+    /// Whether this is a local channel — a Unix-domain socket or a Windows
+    /// named pipe — rather than a network connection.
+    #[inline]
+    pub fn is_local(&self) -> bool {
+        match self.socket {
+            #[cfg(unix)]
+            Socket::Unix(_) => true,
+            #[cfg(windows)]
+            Socket::Pipe(_) => true,
+            _ => false,
         }
     }
 
@@ -107,6 +122,8 @@ impl BufStream {
                 Socket::Tls(s) => s.read(&mut self.rbuf[self.rlen..]).await?,
                 #[cfg(unix)]
                 Socket::Unix(s) => s.read(&mut self.rbuf[self.rlen..]).await?,
+                #[cfg(windows)]
+                Socket::Pipe(s) => s.read(&mut self.rbuf[self.rlen..]).await?,
                 Socket::Upgrading => return Err(lost()),
             };
             if got == 0 {
@@ -181,6 +198,8 @@ impl BufStream {
             Socket::Tls(s) => s.write_all(&self.wbuf).await,
             #[cfg(unix)]
             Socket::Unix(s) => s.write_all(&self.wbuf).await,
+            #[cfg(windows)]
+            Socket::Pipe(s) => s.write_all(&self.wbuf).await,
             Socket::Upgrading => Err(lost()),
         };
         if self.wbuf.capacity() > READ_RETAIN {

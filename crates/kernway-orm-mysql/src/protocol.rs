@@ -106,11 +106,13 @@ pub struct MysqlConfig {
     /// Off by default, as in the official client: over plaintext the key
     /// itself could be swapped by a man in the middle.
     pub get_server_public_key: bool,
-    /// Connect through this Unix-domain socket file instead of TCP (URL:
-    /// `?socket=/var/run/mysqld/mysqld.sock`). The socket is local, so it is
-    /// trusted like TLS: no TLS is negotiated over it (an `ssl-mode` that
-    /// requires TLS is refused) and `caching_sha2_password` full
-    /// authentication sends the password as the official client does.
+    /// Connect over the server's local channel instead of TCP (URL:
+    /// `?socket=`): on Unix the socket file (`/var/run/mysqld/mysqld.sock`),
+    /// on Windows the named pipe (`MySQL`, or `\\.\pipe\MySQL`; the server
+    /// needs `enable-named-pipe`). The channel is local, so it is trusted like
+    /// TLS: no TLS is negotiated over it (an `ssl-mode` that requires TLS is
+    /// refused) and `caching_sha2_password` full authentication sends the
+    /// password as the official client does.
     pub socket: Option<std::path::PathBuf>,
     /// Use the compressed protocol (zlib) when the server offers it (URL:
     /// `?compress=true`). Worth it for large results over slow links; it
@@ -391,18 +393,15 @@ const SERVER_STATUS_IN_TRANS: u16 = 0x0001;
 
 impl Conn {
     /// Connect, authenticate, and select the default database if one was given.
+    ///
+    /// Nothing here blocks the shard: a host name is resolved on the blocking
+    /// pool (an IP literal is just parsed), files (CA, client certificate,
+    /// server key) are read there too, and every socket is non-blocking.
     pub async fn connect(cfg: &MysqlConfig) -> Result<Self, OrmError> {
-        // DNS resolution is blocking, but happens once per connection; for an IP
-        // literal it is a parse. (A future refinement: resolve on the blocking
-        // pool for slow DNS.)
-        if let Some(path) = &cfg.socket {
-            return Self::connect_unix(cfg, path).await;
+        if let Some(local) = &cfg.socket {
+            return Self::connect_local(cfg, local).await;
         }
-        let addr = (cfg.host.as_str(), cfg.port)
-            .to_socket_addrs()
-            .map_err(|e| conn_err(format!("resolve {}:{} failed: {e}", cfg.host, cfg.port)))?
-            .next()
-            .ok_or_else(|| conn_err(format!("no address for {}:{}", cfg.host, cfg.port)))?;
+        let addr = resolve(&cfg.host, cfg.port).await?;
         let stream = AsyncTcpStream::connect(addr)
             .await
             .map_err(|e| conn_err(format!("connect {}:{} failed: {e}", cfg.host, cfg.port)))?;
@@ -411,26 +410,20 @@ impl Conn {
         Ok(conn)
     }
 
-    #[cfg(unix)]
-    async fn connect_unix(cfg: &MysqlConfig, path: &std::path::Path) -> Result<Self, OrmError> {
+    /// Connect over the server's local channel: a Unix-domain socket file on
+    /// Unix, a named pipe on Windows (`socket=` names either).
+    async fn connect_local(cfg: &MysqlConfig, local: &std::path::Path) -> Result<Self, OrmError> {
         if cfg.ssl_mode.requires_tls() {
             return Err(conn_err(format!(
-                "ssl-mode={:?} over a Unix socket: the socket is local and is not encrypted; \
-                 use ssl-mode=preferred or disabled with socket=",
+                "ssl-mode={:?} over a local socket / named pipe: the channel is local and \
+                 is not encrypted; use ssl-mode=preferred or disabled with socket=",
                 cfg.ssl_mode
             )));
         }
-        let sock = rt_net::AsyncUnixStream::connect(path)
-            .await
-            .map_err(|e| conn_err(format!("connect {} failed: {e}", path.display())))?;
-        let mut conn = Self::over(BufStream::new_unix(sock));
+        let io = open_local(local).await.map_err(|e| conn_err(format!("connect {} failed: {e}", local.display())))?;
+        let mut conn = Self::over(io);
         conn.handshake(cfg).await?;
         Ok(conn)
-    }
-
-    #[cfg(not(unix))]
-    async fn connect_unix(_: &MysqlConfig, _: &std::path::Path) -> Result<Self, OrmError> {
-        Err(OrmError::Unsupported("Unix-domain sockets on this platform".into()))
     }
 
     fn over(io: BufStream) -> Self {
@@ -452,9 +445,10 @@ impl Conn {
         self.z.is_some()
     }
 
-    /// Whether the connection runs over a Unix-domain socket.
-    pub fn is_unix_socket(&self) -> bool {
-        self.io.is_unix()
+    /// Whether the connection runs over the server's local channel (a
+    /// Unix-domain socket or a Windows named pipe) rather than TCP.
+    pub fn is_local(&self) -> bool {
+        self.io.is_local()
     }
 
     /// Whether the server reported an open transaction in its last reply.
@@ -491,18 +485,18 @@ impl Conn {
             let body = self.io.take(clen);
             if ulen == 0 {
                 z.inb.extend_from_slice(body);
+            } else if ulen <= OFFLOAD_BYTES {
+                inflate_into(body, ulen, &mut z.inb)?;
             } else {
-                let start = z.inb.len();
-                z.inb.reserve(ulen);
-                let mut dec = flate2::read::ZlibDecoder::new(body);
-                std::io::Read::read_to_end(&mut dec, &mut z.inb)
-                    .map_err(|e| conn_err(format!("decompress: {e}")))?;
-                if z.inb.len() - start != ulen {
-                    return Err(conn_err(format!(
-                        "compressed frame inflated to {} bytes, header said {ulen}",
-                        z.inb.len() - start
-                    )));
-                }
+                // A large frame inflates on the blocking pool, not the shard.
+                let body = body.to_vec();
+                let plain = rt_core::spawn_blocking(move || {
+                    let mut out = Vec::with_capacity(ulen);
+                    inflate_into(&body, ulen, &mut out).map(|()| out)
+                })
+                .await
+                .ok_or_else(|| conn_err("decompress: worker panicked"))??;
+                z.inb.extend_from_slice(&plain);
             }
         }
         Ok(())
@@ -602,7 +596,8 @@ impl Conn {
                     z.out.clear();
                     z.out.extend_from_slice(&header);
                     z.out.extend_from_slice(&rest[..len]);
-                    compress_frames(z, self.io.write_buf())?;
+                    self.io.write_buf();
+                    self.compress_queued().await?;
                 }
             }
             self.seq = self.seq.wrapping_add(1);
@@ -633,7 +628,7 @@ impl Conn {
                 cfg.ssl_mode
             )));
         }
-        let use_tls = cfg.ssl_mode != SslMode::Disabled && server_tls && !self.io.is_unix();
+        let use_tls = cfg.ssl_mode != SslMode::Disabled && server_tls && !self.io.is_local();
         let compress = cfg.compress && hello.capabilities & CLIENT_COMPRESS != 0;
         let compress_cap = if compress { CLIENT_COMPRESS } else { 0 };
         if use_tls {
@@ -655,7 +650,7 @@ impl Conn {
             .await?;
         // A local socket is as private as TLS (the official client treats
         // it the same way for the clear-text password exchange).
-        let secure = use_tls || self.io.is_unix();
+        let secure = use_tls || self.io.is_local();
         self.finish_auth(cfg, plugin, secure, hello.salt).await?;
         // Every packet after the authentication OK travels compressed.
         if compress {
@@ -668,16 +663,11 @@ impl Conn {
     /// certificate as `cfg.ssl_mode` says.
     async fn upgrade_to_tls(&mut self, cfg: &MysqlConfig) -> Result<(), OrmError> {
         let ca_pem = match &cfg.ssl_ca {
-            Some(path) => Some(std::fs::read(path).map_err(|e| {
-                conn_err(format!("read ssl-ca {}: {e}", path.display()))
-            })?),
+            Some(path) => Some(read_file(path, "ssl-ca").await?),
             None => None,
         };
-        let read = |p: &std::path::Path, what: &str| {
-            std::fs::read(p).map_err(|e| conn_err(format!("read {what} {}: {e}", p.display())))
-        };
         let identity = match (&cfg.ssl_cert, &cfg.ssl_key) {
-            (Some(c), Some(k)) => Some((read(c, "ssl-cert")?, read(k, "ssl-key")?)),
+            (Some(c), Some(k)) => Some((read_file(c, "ssl-cert").await?, read_file(k, "ssl-key").await?)),
             _ => None,
         };
         let tls_config = kernway_tls::client_config_with_identity(
@@ -738,9 +728,7 @@ impl Conn {
                     // the server's public key.
                     Some(0x04) => {
                         let pem = match (&cfg.server_public_key, cfg.get_server_public_key) {
-                            (Some(path), _) => std::fs::read(path).map_err(|e| {
-                                conn_err(format!("read server-public-key {}: {e}", path.display()))
-                            })?,
+                            (Some(path), _) => read_file(path, "server-public-key").await?,
                             (None, true) => {
                                 self.write_packet(&[0x02]).await?; // request public key
                                 let reply = self.read_packet().await?;
@@ -1242,12 +1230,28 @@ impl Conn {
     }
 }
 
-/// Wrap the plain packet bytes in `z.out` into compressed frames appended to
-/// `wire`: each frame carries at most 16 MiB - 1 plain bytes, deflated unless
-/// tiny.
-fn compress_frames(z: &mut Compressed, wire: &mut Vec<u8>) -> Result<(), OrmError> {
+/// Compression or decompression of more than this many bytes runs on the
+/// blocking pool, so a large value never stalls the shard's other connections.
+const OFFLOAD_BYTES: usize = 128 * 1024;
+
+/// Inflate one zlib frame of `ulen` plain bytes, appending to `out`.
+fn inflate_into(body: &[u8], ulen: usize, out: &mut Vec<u8>) -> Result<(), OrmError> {
+    let start = out.len();
+    out.reserve(ulen);
+    let mut dec = flate2::read::ZlibDecoder::new(body);
+    std::io::Read::read_to_end(&mut dec, out).map_err(|e| conn_err(format!("decompress: {e}")))?;
+    if out.len() - start != ulen {
+        return Err(conn_err(format!("compressed frame inflated to {} bytes, header said {ulen}", out.len() - start)));
+    }
+    Ok(())
+}
+
+/// Wrap `plain` packet bytes into compressed frames appended to `wire`, the
+/// first with sequence id `seq`; returns the next sequence id. Each frame
+/// carries at most 16 MiB - 1 plain bytes, deflated unless tiny.
+fn compress_frames(plain_all: &[u8], mut seq: u8, wire: &mut Vec<u8>) -> Result<u8, OrmError> {
     let mut deflated = Vec::new();
-    for plain in z.out.chunks(0xFF_FFFF) {
+    for plain in plain_all.chunks(0xFF_FFFF) {
         let (body, ulen): (&[u8], usize) = if plain.len() < MIN_COMPRESS_LENGTH {
             (plain, 0)
         } else {
@@ -1262,19 +1266,54 @@ fn compress_frames(z: &mut Compressed, wire: &mut Vec<u8>) -> Result<(), OrmErro
             }
         };
         let clen = body.len();
-        wire.extend_from_slice(&[
-            clen as u8,
-            (clen >> 8) as u8,
-            (clen >> 16) as u8,
-            z.seq,
-            ulen as u8,
-            (ulen >> 8) as u8,
-            (ulen >> 16) as u8,
-        ]);
+        wire.extend_from_slice(&[clen as u8, (clen >> 8) as u8, (clen >> 16) as u8, seq, ulen as u8, (ulen >> 8) as u8, (ulen >> 16) as u8]);
         wire.extend_from_slice(body);
-        z.seq = z.seq.wrapping_add(1);
+        seq = seq.wrapping_add(1);
     }
-    Ok(())
+    Ok(seq)
+}
+
+/// Read a configured file (CA, certificate, key) on the blocking pool.
+async fn read_file(path: &std::path::Path, what: &'static str) -> Result<Vec<u8>, OrmError> {
+    let p = path.to_path_buf();
+    rt_core::spawn_blocking(move || std::fs::read(&p).map_err(|e| conn_err(format!("read {what} {}: {e}", p.display()))))
+        .await
+        .ok_or_else(|| conn_err(format!("read {what}: worker panicked")))?
+}
+
+/// The address of `host:port`: an IP literal is parsed in place; a name is
+/// resolved on the blocking pool (the system resolver blocks).
+async fn resolve(host: &str, port: u16) -> Result<std::net::SocketAddr, OrmError> {
+    let literal = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+    if let Ok(ip) = literal.parse::<std::net::IpAddr>() {
+        return Ok(std::net::SocketAddr::new(ip, port));
+    }
+    let name = host.to_string();
+    rt_core::spawn_blocking(move || {
+        (name.as_str(), port)
+            .to_socket_addrs()
+            .map_err(|e| conn_err(format!("resolve {name}:{port} failed: {e}")))?
+            .next()
+            .ok_or_else(|| conn_err(format!("no address for {name}:{port}")))
+    })
+    .await
+    .ok_or_else(|| conn_err("resolve: worker panicked"))?
+}
+
+/// Open the server's local channel.
+#[cfg(unix)]
+async fn open_local(path: &std::path::Path) -> std::io::Result<BufStream> {
+    rt_net::AsyncUnixStream::connect(path).await.map(BufStream::new_unix)
+}
+
+#[cfg(windows)]
+async fn open_local(name: &std::path::Path) -> std::io::Result<BufStream> {
+    rt_net::AsyncNamedPipe::connect(&name.to_string_lossy()).await.map(BufStream::new_pipe)
+}
+
+#[cfg(not(any(unix, windows)))]
+async fn open_local(_: &std::path::Path) -> std::io::Result<BufStream> {
+    Err(std::io::Error::other("no local socket / named pipe on this platform"))
 }
 
 /// `COM_STMT_EXECUTE` flags: run to completion, or open a read-only cursor.
@@ -1514,7 +1553,7 @@ impl Conn {
             while end < rows.len() && end - start < PIPELINE_ROWS && bytes < PIPELINE_BYTES {
                 let payload = execute_payload(stmt.id, &rows[end], CURSOR_TYPE_NO_CURSOR);
                 bytes += payload.len();
-                self.queue_packet(&payload)?;
+                self.queue_packet(&payload).await?;
                 end += 1;
             }
             self.io.flush().await.map_err(|e| conn_err(format!("write packet: {e}")))?;
@@ -1553,9 +1592,32 @@ impl Conn {
         })
     }
 
+    /// Compress the plain bytes in `z.out` into frames appended to the write
+    /// buffer — on the blocking pool when they are large.
+    async fn compress_queued(&mut self) -> Result<(), OrmError> {
+        let Some(z) = self.z.as_deref_mut() else { return Ok(()) };
+        if z.out.len() <= OFFLOAD_BYTES {
+            z.seq = compress_frames(&z.out, z.seq, self.io.write_buf_append())?;
+            return Ok(());
+        }
+        let plain = std::mem::take(&mut z.out);
+        let seq = z.seq;
+        let (wire, seq, plain) = rt_core::spawn_blocking(move || {
+            let mut wire = Vec::with_capacity(plain.len() / 2);
+            compress_frames(&plain, seq, &mut wire).map(|seq| (wire, seq, plain))
+        })
+        .await
+        .ok_or_else(|| conn_err("compress: worker panicked"))??;
+        let z = self.z.as_deref_mut().expect("compression is on");
+        z.seq = seq;
+        z.out = plain;
+        self.io.write_buf_append().extend_from_slice(&wire);
+        Ok(())
+    }
+
     /// Append one command packet (sequence id 0) to the write buffer without
     /// sending it — for pipelined flights.
-    fn queue_packet(&mut self, payload: &[u8]) -> Result<(), OrmError> {
+    async fn queue_packet(&mut self, payload: &[u8]) -> Result<(), OrmError> {
         self.start_command();
         let mut rest = payload;
         loop {
@@ -1571,7 +1633,7 @@ impl Conn {
                     z.out.clear();
                     z.out.extend_from_slice(&header);
                     z.out.extend_from_slice(&rest[..len]);
-                    compress_frames(z, self.io.write_buf_append())?;
+                    self.compress_queued().await?;
                 }
             }
             self.seq = self.seq.wrapping_add(1);

@@ -5,9 +5,11 @@
 //!   counting relay sees far fewer bytes for a compressible result);
 //! - pipelined `execute_many` (the relay counts request/response turns);
 //! - server-side cursors (`COM_STMT_FETCH`) interleaved with other statements;
-//! - Unix-domain sockets (`unix_socket_*`): only where the server's socket
-//!   file is reachable — the acceptance run executes them inside the MySQL
-//!   container (`KERNWAY_MYSQL_SOCKET`).
+//! - the server's local channel (`local_socket_*`): a Unix socket file, or a
+//!   named pipe on Windows — only where it is reachable
+//!   (`KERNWAY_MYSQL_SOCKET`): the acceptance run executes them inside the
+//!   MySQL container, CI on each OS's own server;
+//! - host names resolved without blocking the shard.
 //!
 //! Skips unless `KERNWAY_MYSQL_URL` is set.
 #![cfg(feature = "mysql")]
@@ -280,39 +282,54 @@ fn server_side_cursor_fetches_on_demand_and_leaves_the_connection_usable() {
     });
 }
 
-// --- Unix-domain socket ---------------------------------------------------
+// --- Local channel: Unix socket / Windows named pipe -----------------------
 
-fn socket() -> Option<String> {
+/// The server's local channel: a socket file on Unix, a pipe name on Windows.
+fn local() -> Option<String> {
     std::env::var("KERNWAY_MYSQL_SOCKET").ok()
 }
 
-fn socket_url(user: &str, pw: &str, path: &str, extra: &str) -> String {
-    format!("mysql://{user}:{pw}@localhost/kernway_test?socket={path}{extra}")
+fn local_url(user: &str, pw: &str, channel: &str, extra: &str) -> String {
+    format!("mysql://{user}:{pw}@localhost/kernway_test?socket={channel}{extra}")
+}
+
+fn root_pw() -> String {
+    std::env::var("KERNWAY_MYSQL_ROOT_PASSWORD").unwrap_or_else(|_| "secret".into())
+}
+
+/// What the server itself calls this connection's transport.
+async fn connection_type(conn: &mut Conn) -> String {
+    session_status_first(
+        conn.query("SELECT CONNECTION_TYPE FROM performance_schema.threads WHERE PROCESSLIST_ID = CONNECTION_ID()")
+            .await
+            .unwrap(),
+    )
 }
 
 #[test]
-fn unix_socket_connects_through_the_server_socket_file() {
-    let Some(path) = socket() else { return eprintln!("skip: KERNWAY_MYSQL_SOCKET not set") };
+fn local_socket_connects_over_the_servers_local_channel() {
+    let Some(channel) = local() else { return eprintln!("skip: KERNWAY_MYSQL_SOCKET not set") };
     run(async move {
-        let cfg = MysqlConfig::from_url(&socket_url("kernway", "kernway_pw", &path, "")).unwrap();
-        let mut conn = Conn::connect(&cfg).await.unwrap();
-        assert!(conn.is_unix_socket());
-        // The server sees a socket client: host "localhost" (TCP clients show
-        // "ip:port"), and no TLS on it.
-        let host = conn
-            .query("SELECT host FROM information_schema.processlist WHERE id = CONNECTION_ID()")
-            .await
-            .unwrap();
-        assert_eq!(session_status_first(host), "localhost");
-        assert_eq!(session_status(conn.query("SHOW SESSION STATUS LIKE 'Ssl_cipher'").await.unwrap()), "");
+        let mut root = Conn::connect(&MysqlConfig::from_url(&local_url("root", &root_pw(), &channel, "")).unwrap()).await.unwrap();
+        assert!(root.is_local());
+        // The server reports the transport: a socket file, or a named pipe.
+        let want = if cfg!(windows) { "Named Pipe" } else { "Socket" };
+        assert_eq!(connection_type(&mut root).await, want);
+        assert_eq!(session_status(root.query("SHOW SESSION STATUS LIKE 'Ssl_cipher'").await.unwrap()), "");
 
         // The whole driver over it, compressed too.
-        let db = MySqlDriver::connect(&socket_url("kernway", "kernway_pw", &path, "&compress=true")).await.unwrap();
+        let db = MySqlDriver::connect(&local_url("kernway", "kernway_pw", &channel, "&compress=true")).await.unwrap();
         db.execute("DROP TABLE IF EXISTS kwc_s").await.unwrap();
         db.execute("CREATE TABLE kwc_s (n INT PRIMARY KEY, s TEXT)").await.unwrap();
-        let rows: Vec<Vec<Param>> = (0..700).map(|n| vec![n.into(), "socket ".repeat(20).into()]).collect();
+        let rows: Vec<Vec<Param>> = (0..700).map(|n| vec![n.into(), "local ".repeat(20).into()]).collect();
         assert_eq!(db.execute_many("INSERT INTO kwc_s VALUES (?, ?)", &rows).await.unwrap(), 700);
         assert_eq!(db.query_scalar("SELECT COUNT(*) FROM kwc_s", &[]).await.unwrap().as_i64(), Some(700));
+        let big = vec![7u8; 3 * 1024 * 1024];
+        db.execute("DROP TABLE IF EXISTS kwc_sb").await.unwrap();
+        db.execute("CREATE TABLE kwc_sb (id INT PRIMARY KEY, b LONGBLOB)").await.unwrap();
+        db.execute_with("INSERT INTO kwc_sb VALUES (1, ?)", params![big.clone()]).await.unwrap();
+        let back = db.query("SELECT b FROM kwc_sb", &[]).await.unwrap();
+        assert_eq!(back.rows[0][0], kernway_orm_mysql::Value::Bytes(big));
     });
 }
 
@@ -324,32 +341,63 @@ fn session_status_first(r: QueryResult) -> String {
 }
 
 #[test]
-fn unix_socket_carries_a_caching_sha2_full_authentication() {
-    let Some(path) = socket() else { return eprintln!("skip: KERNWAY_MYSQL_SOCKET not set") };
+fn local_socket_carries_a_caching_sha2_full_authentication() {
+    let Some(channel) = local() else { return eprintln!("skip: KERNWAY_MYSQL_SOCKET not set") };
     run(async move {
         // Empty the server's auth cache so the next login is a full one: over
-        // a socket the password goes in clear (the socket is local), as with
+        // the local channel the password goes in clear (it is local), as with
         // the official client — no TLS, no RSA key.
-        let root_pw = std::env::var("KERNWAY_MYSQL_ROOT_PASSWORD").unwrap_or_else(|_| "secret".into());
-        let root = MySqlDriver::connect(&socket_url("root", &root_pw, &path, "")).await.unwrap();
+        let root = MySqlDriver::connect(&local_url("root", &root_pw(), &channel, "")).await.unwrap();
         root.execute("FLUSH PRIVILEGES").await.unwrap();
-        let db = MySqlDriver::connect(&socket_url("kw_sha2", "sha2_pw", &path, "")).await.unwrap();
+        let db = MySqlDriver::connect(&local_url("kw_sha2", "sha2_pw", &channel, "")).await.unwrap();
         assert_eq!(db.query_scalar("SELECT CURRENT_USER()", &[]).await.unwrap().as_str(), Some("kw_sha2@%"));
         // A wrong password is still refused.
-        assert!(MySqlDriver::connect(&socket_url("kw_sha2", "wrong", &path, "")).await.is_err());
+        assert!(MySqlDriver::connect(&local_url("kw_sha2", "wrong", &channel, "")).await.is_err());
     });
 }
 
 #[test]
-fn unix_socket_refuses_an_ssl_mode_that_requires_tls() {
-    let Some(path) = socket() else { return eprintln!("skip: KERNWAY_MYSQL_SOCKET not set") };
+fn local_socket_refuses_an_ssl_mode_that_requires_tls() {
+    let Some(channel) = local() else { return eprintln!("skip: KERNWAY_MYSQL_SOCKET not set") };
     run(async move {
-        let err = MySqlDriver::connect(&socket_url("kernway", "kernway_pw", &path, "&ssl-mode=required"))
+        let err = MySqlDriver::connect(&local_url("kernway", "kernway_pw", &channel, "&ssl-mode=required"))
             .await
             .err()
             .expect("refused");
-        assert!(err.to_string().contains("Unix socket"), "{err}");
-        let missing = MySqlDriver::connect(&socket_url("kernway", "kernway_pw", "/nonexistent/mysqld.sock", "")).await;
-        assert!(missing.is_err());
+        assert!(err.to_string().contains("local"), "{err}");
+        let missing = if cfg!(windows) { "kernway-no-such-pipe" } else { "/nonexistent/mysqld.sock" };
+        assert!(MySqlDriver::connect(&local_url("kernway", "kernway_pw", missing, "")).await.is_err());
+    });
+}
+
+#[test]
+fn host_names_resolve_without_blocking_and_ip_literals_skip_dns() {
+    let Some(url) = url() else { return eprintln!("skip: KERNWAY_MYSQL_URL not set") };
+    let base = MysqlConfig::from_url(&url).unwrap();
+    run(async move {
+        // "localhost" goes through the resolver (on the blocking pool).
+        let mut by_name = base.clone();
+        by_name.host = "localhost".into();
+        if base.host == "127.0.0.1" || base.host == "localhost" {
+            let mut c = Conn::connect(&by_name).await.unwrap();
+            assert!(matches!(c.query("SELECT 1").await.unwrap(), QueryResult::Rows { .. }));
+        }
+        // A name that does not exist fails cleanly.
+        let mut bad = base.clone();
+        bad.host = "kernway-no-such-host.invalid".into();
+        assert!(Conn::connect(&bad).await.is_err());
+        // Meanwhile the shard keeps running other tasks: a timer task ticks
+        // while a connection resolves and authenticates.
+        let ticks = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let t = ticks.clone();
+        rt_core::spawn(async move {
+            for _ in 0..5 {
+                rt_core::sleep(std::time::Duration::from_millis(1)).await;
+                t.set(t.get() + 1);
+            }
+        });
+        let _ = Conn::connect(&by_name).await;
+        rt_core::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(ticks.get(), 5);
     });
 }

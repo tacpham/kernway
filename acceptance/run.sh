@@ -66,9 +66,9 @@ SQL
     export KERNWAY_MYSQL_CERTS="$WORK/certs"
     VERSION="MySQL $(docker exec "$C" mysql -uroot -p"$RPW" -N -e 'SELECT VERSION()' 2>/dev/null)"
     CRATE=kernway-orm-mysql; FEATURES=(--features mysql); TITLE=MySQL
-    # Unix-socket tests need the server's socket file: they run inside the
+    # Local-channel tests need the server's socket file: they run inside the
     # MySQL container (see in_container_tests), not on the host.
-    SKIP=(--skip unix_socket_)
+    SKIP=(--skip local_socket_)
     ;;
   oracle)
     C="${ORACLE_CONTAINER:-kernway-oracle}"
@@ -119,10 +119,27 @@ in_container_tests() { # test target, name filter, env...
   docker exec "$C" rm -f "/tmp/kernway-$target"
 }
 if [ "$DB" = mysql ]; then
-  in_container_tests connection unix_socket_ \
+  in_container_tests connection local_socket_ \
     KERNWAY_MYSQL_SOCKET=/var/run/mysqld/mysqld.sock KERNWAY_MYSQL_ROOT_PASSWORD="$RPW"
-  CMD="$CMD; unix_socket_* inside $C"
+  CMD="$CMD; local_socket_* inside $C"
 fi
+
+# Every-OS evidence: the `drivers` CI workflow runs the driver's tests against
+# a real server on Linux, macOS and Windows. Its jobs for exactly this commit
+# join the log as tests `ci::<job>`; no run for this commit = not run = FAIL.
+ci_evidence() {
+  local sha run
+  sha="$(cd "$ROOT" && git rev-parse HEAD)"
+  run="$(cd "$ROOT" && gh run list --workflow drivers.yml --commit "$sha" --status completed --limit 1 \
+      --json databaseId -q '.[0].databaseId' 2>/dev/null || true)"
+  if [ -z "$run" ]; then log "no completed 'drivers' CI run for $sha: cross-OS evidence missing"; return; fi
+  log "cross-OS evidence: CI run $run for $sha"
+  (cd "$ROOT" && gh run view "$run" --json jobs \
+      -q '.jobs[] | "test ci::" + (.name | gsub("[ ()-]+"; "_") | sub("_$"; "")) + " ... " + (if .conclusion == "success" then "ok" else "FAILED" end)') \
+    >> "$WORK/test.log" 2>/dev/null || true
+  CMD="$CMD; CI run $run (Linux / macOS / Windows)"
+}
+if [ "$DB" = mysql ]; then ci_evidence; fi
 
 python3 - "$WORK/meta.json" <<PY
 import json, subprocess, sys, datetime

@@ -18,6 +18,10 @@ kernway-log = { workspace = true }   # advisory shard warnings
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
+# Windows named pipes (`AsyncNamedPipe`) are mio's `os-ext` API.
+[target.'cfg(windows)'.dependencies]
+mio = { workspace = true, features = ["os-ext"] }
+
 [lints]
 workspace = true
 

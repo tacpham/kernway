@@ -19,17 +19,28 @@ pub struct AsyncUnixStream {
 }
 
 impl AsyncUnixStream {
-    /// Connect to the socket file at `path`. A local connect completes (or
-    /// fails) at once, so it is done before the socket is made non-blocking.
+    /// Connect to the socket file at `path`, without blocking the shard: the
+    /// socket is non-blocking from the start, and a connect the kernel cannot
+    /// finish at once (a full listen backlog) is awaited like TCP's.
     ///
     /// # Panics
     /// If called outside an executor — there is no reactor to register with.
     pub async fn connect(path: impl AsRef<Path>) -> io::Result<Self> {
-        let std = std::os::unix::net::UnixStream::connect(path)?;
-        std.set_nonblocking(true)?;
-        let mut inner = mio::net::UnixStream::from_std(std);
+        let mut inner = mio::net::UnixStream::connect(path)?;
         let token = rt_core::with_reactor(|r| r.register(&mut inner))?;
-        Ok(Self { inner, token })
+        let stream = Self { inner, token };
+        loop {
+            if let Some(err) = stream.inner.take_error()? {
+                return Err(err);
+            }
+            match stream.inner.peer_addr() {
+                Ok(_) => return Ok(stream),
+                Err(e) if e.kind() == io::ErrorKind::NotConnected => {
+                    Readiness::new(stream.token, Direction::Write).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Read into `buf`; `Ok(0)` means the peer closed its side.

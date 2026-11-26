@@ -36,6 +36,8 @@ pub mod stream;
 pub mod sys;
 #[cfg(unix)]
 pub mod unix;
+#[cfg(windows)]
+pub mod pipe;
 
 pub use listener::AsyncTcpListener;
 pub use mesh::CoreMesh;
@@ -46,4 +48,6 @@ pub use shard::{
 pub use stream::AsyncTcpStream;
 #[cfg(unix)]
 pub use unix::AsyncUnixStream;
+#[cfg(windows)]
+pub use pipe::AsyncNamedPipe;
 pub use sys::{balances_reuseport, supports_reuseport};
