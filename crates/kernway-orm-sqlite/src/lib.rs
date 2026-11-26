@@ -42,7 +42,9 @@ mod config;
 mod conn;
 mod dialect;
 mod driver;
+mod ffi;
 mod oneshot;
+mod raw;
 mod worker;
 
 pub use config::{Change, ChangeKind, FunctionBody, JournalMode, Location, OpenMode, ScalarFunction, SqliteConfig, Synchronous};
@@ -50,6 +52,11 @@ pub use changeset::{Applied, ChangeFormat, ChangeOp, Changeset, OnConflict};
 pub use conn::SqliteConn;
 pub use dialect::SqliteDialect;
 pub use driver::{SqliteConnect, SqliteDriver};
+
+/// The version of the SQLite engine compiled into the driver (`"3.54.1"`).
+pub fn sqlite_version() -> String {
+    raw::version()
+}
 
 /// A transaction on a SQLite database.
 pub type SqliteTx = kernway_orm_sql::SqlTx<SqliteConnect>;

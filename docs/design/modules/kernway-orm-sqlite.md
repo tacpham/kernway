@@ -13,13 +13,13 @@ SqliteDriver ──derefs──▶ SqlDb<SqliteConnect>      (shared: repositori
      │                         │
      │                    SqliteConn ── implements SqlConn
      │                         │   send job ─────────▶ connection thread
-     │                         │   await reply ◀────── (rusqlite::Connection, open cursors)
+     │                         │   await reply ◀────── (raw::Db, open cursors)  
      └── blob_* / serialize / backup_to / from_bytes  (SQLite-only, same path)
 ```
 
 - **Async without blocking the reactor.** SQLite is a library: every call does
   file I/O and may wait on another connection's lock. Each pooled connection
-  owns a dedicated thread holding its `rusqlite::Connection`; the async side
+  owns a dedicated thread holding its connection (`raw::Db`); the async side
   sends a job and awaits a one-shot reply. A dropped future interrupts the
   running statement (`sqlite3_interrupt`), so a timeout frees the connection
   at once.
@@ -37,8 +37,15 @@ SqliteDriver ──derefs──▶ SqlDb<SqliteConnect>      (shared: repositori
   entity columns. `u64` beyond `i64::MAX` is refused, not rounded.
 - **In-memory databases** use SQLite's `memdb` VFS, so every connection of one
   driver shares one database; an anchor connection keeps it alive.
-- **Same engine everywhere.** `rusqlite` with `bundled`: SQLite compiled from
-  source on Linux, macOS and Windows, FTS5 and the JSON functions included.
+- **Own binding, vendored engine.** No third-party SQLite crate: `src/ffi.rs`
+  declares the C API by hand, `src/raw.rs` wraps it safely (every `unsafe`
+  block lives there, each with its SAFETY reasoning — enforced by
+  `tests/unsafe_confined.rs`), and `build.rs` compiles the official
+  amalgamation vendored in `sqlite/` (3.54.1, SHA3-256 checked — see
+  `sqlite/README.md`) with FTS5, R-Tree, JSON, math functions, the session
+  extension and extension loading. The same engine on Linux, macOS and Windows.
+  An application that also links another copy of SQLite (e.g. another crate's
+  bundled build) gets duplicate symbols at link time — use one SQLite.
 
 ## Configuration
 
@@ -62,9 +69,8 @@ URL forms: `sqlite::memory:`, `sqlite:relative.db`, `sqlite://relative.db`,
   that connection next begins a transaction.
 - **Native extensions**: `unsafe SqliteConfig::extension(path, entry_point)`
   loads into every connection; SQL's own `load_extension()` stays refused.
-  Proven with `tests/ext`, a real extension the test builds (a separate
-  workspace, so rusqlite's `loadable_extension` feature never reaches the
-  driver).
+  Proven with `tests/ext`, a real extension in C against `sqlite3ext.h`
+  that the test builds as a shared library.
 - Incremental BLOB I/O, change / commit / rollback hooks, serialize /
   `from_bytes`, online backup, Rust scalar functions, FTS5, JSON.
 

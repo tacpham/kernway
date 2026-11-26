@@ -2,7 +2,7 @@
 name    = "kernway-orm-sqlite"
 version.workspace = true
 edition.workspace = true
-description = "SQLite for the kernway ORM — the shared SQL layer (CRUD, query builder, joins, transactions, cursors, raw SQL) on an embedded SQLite, every call on a per-connection worker thread so the reactor never blocks"
+description = "SQLite for the kernway ORM — its own binding to the C API of a vendored SQLite 3.54.1 — the shared SQL layer (CRUD, query builder, joins, transactions, cursors, raw SQL) on an embedded SQLite, every call on a per-connection worker thread so the reactor never blocks"
 license.workspace = true
 
 [dependencies]
@@ -11,13 +11,12 @@ kernway-orm-sql  = { workspace = true }
 kernway-wire     = { workspace = true }
 # The blocking pool, for CPU-only changeset work (invert / concat / decode).
 rt-core          = { workspace = true }
-# SQLite compiled from source (bundled): the same engine version on Linux,
-# macOS and Windows, no system library needed. FTS5 and JSON are built in.
-rusqlite         = { version = "0.31", features = ["bundled", "backup", "blob", "column_decltype", "functions", "hooks", "load_extension", "serialize", "session"] }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
-# The iterator trait rusqlite's changeset reader implements.
-fallible-streaming-iterator = "0.1"
+
+[build-dependencies]
+# Compiles the vendored SQLite amalgamation (sqlite/).
+cc = "1"
 
 [dev-dependencies]
 kernway-orm-macro = { workspace = true }

@@ -9,7 +9,7 @@ use kernway_orm_core::{decode::{cells_to_entity, Cell}, driver::DriverCapabiliti
 use kernway_orm_sql::{CallArg, CallResult, OutKind, Outcome, Param, Rows, ServerCursor, SqlConn, Value};
 use serde::de::DeserializeOwned;
 use std::path::Path;
-use rusqlite::InterruptHandle;
+use crate::raw::Interrupt;
 use std::sync::{mpsc, Arc};
 
 static DIALECT: SqliteDialect = SqliteDialect;
@@ -24,7 +24,7 @@ const MANY_SAVEPOINT: &str = "kernway_execute_many";
 pub struct SqliteConn {
     jobs: Option<mpsc::Sender<Job>>,
     /// Stops the statement running on the thread (`sqlite3_interrupt`).
-    interrupt: Arc<InterruptHandle>,
+    interrupt: Arc<Interrupt>,
     read_only: bool,
 }
 
@@ -32,7 +32,7 @@ pub struct SqliteConn {
 /// timed-out or cancelled query stops at once instead of running to the end
 /// and holding the connection.
 struct CancelOnDrop<'a> {
-    interrupt: &'a InterruptHandle,
+    interrupt: &'a Interrupt,
     finished: bool,
 }
 
@@ -49,7 +49,7 @@ impl SqliteConn {
     pub async fn open(cfg: &SqliteConfig) -> Result<Self, OrmError> {
         let read_only = cfg.mode == OpenMode::ReadOnly;
         let (jobs, interrupt) = worker::spawn(cfg.clone()).await?;
-        Ok(Self { jobs: Some(jobs), interrupt: Arc::new(interrupt), read_only })
+        Ok(Self { jobs: Some(jobs), interrupt, read_only })
     }
 
     /// Run `f` on the connection thread and await its result. A panic in
@@ -87,7 +87,7 @@ impl SqliteConn {
     /// backup: consistent, while other connections keep working).
     pub async fn backup_to(&mut self, path: &Path) -> Result<(), OrmError> {
         let path = path.to_path_buf();
-        self.run(move |ctx| ctx.conn.backup(rusqlite::DatabaseName::Main, &path, None).map_err(map_err)).await
+        self.run(move |ctx| ctx.conn.backup_to(&path).map_err(map_err)).await
     }
 
     /// Release every open cursor (at the end of a transaction).
@@ -100,7 +100,7 @@ impl SqliteConn {
     }
 
     async fn simple(&mut self, sql: &'static str) -> Result<(), OrmError> {
-        self.run(move |ctx| ctx.conn.execute_batch(sql).map_err(map_err)).await
+        self.run(move |ctx| ctx.exec(sql)).await
     }
 }
 
@@ -182,7 +182,7 @@ impl SqlConn for SqliteConn {
         // A statement without rows just runs.
         let shape = self
             .run(move |ctx| {
-                let cols = ctx.conn.prepare_cached(&sql).map_err(map_err)?.column_count();
+                let cols = ctx.column_count(&sql)?;
                 if cols == 0 {
                     let (n, id) = ctx.execute(&sql, &params)?;
                     return Ok(Err((n, id)));
@@ -225,7 +225,7 @@ impl SqlConn for SqliteConn {
         }
         let (sql, rows) = (sql.to_string(), rows.to_vec());
         self.run(move |ctx| {
-            ctx.conn.execute_batch(&format!("SAVEPOINT {MANY_SAVEPOINT}")).map_err(map_err)?;
+            ctx.exec(&format!("SAVEPOINT {MANY_SAVEPOINT}"))?;
             let mut total = 0;
             let mut failed = None;
             for row in &rows {
@@ -239,7 +239,7 @@ impl SqlConn for SqliteConn {
             }
             // A failed statement is undone by SQLite on its own; releasing
             // keeps the rows before it.
-            ctx.conn.execute_batch(&format!("RELEASE {MANY_SAVEPOINT}")).map_err(map_err)?;
+            ctx.exec(&format!("RELEASE {MANY_SAVEPOINT}"))?;
             failed.map_or(Ok(total), Err)
         })
         .await
@@ -282,7 +282,7 @@ impl SqlConn for SqliteConn {
 
     async fn execute_script(&mut self, script: &str) -> Result<(), OrmError> {
         let script = script.to_string();
-        self.run(move |ctx| ctx.conn.execute_batch(&script).map_err(map_err)).await
+        self.run(move |ctx| ctx.exec(&script)).await
     }
 
     async fn call(&mut self, _name: &str, _args: &[CallArg]) -> Result<CallResult, OrmError> {
@@ -317,7 +317,7 @@ impl SqlConn for SqliteConn {
         let sql = if self.read_only { "BEGIN" } else { "BEGIN IMMEDIATE" };
         self.run(move |ctx| {
             ctx.sessions_for_new_transaction();
-            ctx.conn.execute_batch(sql).map_err(map_err)
+            ctx.exec(sql)
         })
         .await
     }

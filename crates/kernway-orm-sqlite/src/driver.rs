@@ -87,7 +87,7 @@ impl SqliteDriver {
     /// (open them with [`from_bytes`](Self::from_bytes), or write them to a file).
     pub async fn serialize(&self) -> Result<Vec<u8>, OrmError> {
         let mut g = self.db.pool().acquire().await?;
-        g.run(|ctx| ctx.conn.serialize(rusqlite::DatabaseName::Main).map(|d| d.to_vec()).map_err(crate::worker::map_err)).await
+        g.run(|ctx| ctx.conn.serialize().map_err(crate::worker::map_err)).await
     }
 
     /// Size in bytes of the BLOB in `table.column` of row `rowid`.
@@ -103,10 +103,7 @@ impl SqliteDriver {
         let (t, c) = (table.to_string(), column.to_string());
         let mut g = self.db.pool().acquire().await?;
         g.run(move |ctx| {
-            let blob = ctx.blob(&t, &c, rowid, true)?;
-            let mut buf = vec![0u8; len];
-            blob.read_at_exact(&mut buf, offset).map_err(crate::worker::map_err)?;
-            Ok(buf)
+            ctx.blob(&t, &c, rowid, true)?.read(offset, len).map_err(crate::worker::map_err)
         })
         .await
     }
@@ -118,8 +115,7 @@ impl SqliteDriver {
         let (t, c, data) = (table.to_string(), column.to_string(), data.to_vec());
         let mut g = self.db.pool().acquire().await?;
         g.run(move |ctx| {
-            let mut blob = ctx.blob(&t, &c, rowid, false)?;
-            blob.write_at(&data, offset).map_err(crate::worker::map_err)
+            ctx.blob(&t, &c, rowid, false)?.write(offset, &data).map_err(crate::worker::map_err)
         })
         .await
     }

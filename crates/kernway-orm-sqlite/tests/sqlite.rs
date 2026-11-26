@@ -705,3 +705,20 @@ fn a_database_serializes_to_bytes_and_opens_from_them() {
         assert!(SqliteDriver::from_bytes(b"not a database".to_vec()).await.is_err());
     });
 }
+
+#[test]
+fn a_panic_in_rust_code_called_by_sqlite_is_an_sql_error_not_a_crash() {
+    run(async {
+        let cfg = SqliteConfig::memory()
+            .function("boom", 0, false, |_| panic!("bug in a user function"))
+            .on_change(|_| panic!("bug in a change hook"));
+        let db = SqliteDriver::with_config(cfg).await.unwrap();
+        let e = db.query("SELECT boom()", &[]).await.unwrap_err();
+        assert!(e.to_string().contains("panic"), "{e}");
+        // The hook panics on every change; the write still happens.
+        db.execute("CREATE TABLE t (n INTEGER)").await.unwrap();
+        db.execute("INSERT INTO t VALUES (1)").await.unwrap();
+        assert_eq!(scalar(&db, "SELECT COUNT(*) FROM t").await.as_i64(), Some(1));
+        assert_eq!(kernway_orm_sqlite::sqlite_version(), "3.54.1");
+    });
+}

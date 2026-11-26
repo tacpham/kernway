@@ -26,7 +26,7 @@ What is actually built vs what this document describes as planned:
 | `#[column(default)` / `#[column(auto)]` | ❌ not started | Planned |
 | `#[one_to_many]` / `#[many_to_one]` / `#[many_to_many]` | ❌ not started | Planned |
 | `#[repository]` derive | ❌ not started | Planned |
-| `kernway-orm-sqlite` driver | ✅ | rusqlite + `spawn_blocking` — see `kernway-orm-sqlite.md` |
+| `kernway-orm-sqlite` driver | ✅ | own binding to the vendored SQLite C API, one thread per connection — see `kernway-orm-sqlite.md` |
 | `kernway-orm-memory` driver | ✅ | HashMap wrapped in async futures — see `kernway-orm-memory.md` |
 | `kernway-orm-diesel` | ❌ not started | Charter exists; no code |
 | `kernway-orm-sqlx` | ❌ not started | Planned |
@@ -252,7 +252,7 @@ pub struct Page<T> {
 | Crate | Database | Async | Status |
 |---|---|---|---|
 | `kernway-orm-memory` | in-memory HashMap | sync (no I/O) | ✅ Built — see `kernway-orm-memory.md` |
-| `kernway-orm-sqlite` | SQLite (rusqlite) | sync + spawn_blocking | ✅ Built — see `kernway-orm-sqlite.md` |
+| `kernway-orm-sqlite` | SQLite (own C-API binding) | async: one thread per connection | ✅ Built — see `kernway-orm-sqlite.md` |
 | `kernway-orm-diesel` | PostgreSQL, MySQL, SQLite | spawn_blocking | ❌ Charter only — no code |
 | `kernway-orm-sqlx` | PostgreSQL, MySQL, SQLite | Native async | ❌ Planned — no code |
 | `kernway-orm-mongodb` | MongoDB | Native async | ❌ Planned — no code |

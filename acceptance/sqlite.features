@@ -14,8 +14,14 @@ Opening & configuration | Read-only mode: reads and transactions work, writes re
 Opening & configuration | WAL journal by default (readers never wait for the writer); other journal modes, extra PRAGMAs on every connection | a_file_database_persists_uses_wal_and_enforces_foreign_keys, journal_mode_and_pragmas_are_applied_to_every_connection
 Opening & configuration | Foreign keys enforced by default, can be turned off | a_file_database_persists_uses_wal_and_enforces_foreign_keys
 Opening & configuration | URL forms (sqlite::memory:, relative, absolute, Windows drive paths) and options (mode, journal_mode, busy_timeout, foreign_keys, synchronous, pool) | config::tests::urls
-Opening & configuration | Same engine on every OS (bundled SQLite ≥ 3.38, FTS5 compiled in) | the_bundled_engine_is_the_same_everywhere
+Opening & configuration | Same engine on every OS: the official SQLite 3.54.1 amalgamation vendored and compiled by the driver (FTS5, JSON, session, R-Tree, math functions) | the_bundled_engine_is_the_same_everywhere, raw::tests::the_compiled_engine_is_the_vendored_one
 Opening & configuration | Network, authentication, TLS | N/A: SQLite is an embedded library reading a local file — no server, no login, nothing on the wire
+
+Own binding | No third-party SQLite crate: the C API declared by hand, wrapped safely; every unsafe block in the binding with its SAFETY reasoning (source scan) | unsafe_code_lives_only_in_the_binding
+Own binding | Statements: prepare (one statement per call; a second one refused, comments allowed), bind and read every storage class, step / reset, a per-connection statement cache | raw::tests::prepare_step_bind_and_read_every_storage_class, raw::tests::errors_carry_extended_codes_and_messages, sqlite_conforms
+Own binding | Errors carry SQLite's extended codes and messages; a failed open says why | raw::tests::errors_carry_extended_codes_and_messages, raw::tests::open_failure_reports_why
+Own binding | A panic in Rust code SQLite calls (SQL functions, hooks) becomes an SQL error or is contained — never unwinds into C | a_panic_in_rust_code_called_by_sqlite_is_an_sql_error_not_a_crash
+Own binding | Serialize / deserialize through the C API | raw::tests::serialize_round_trips_through_deserialize, a_database_serializes_to_bytes_and_opens_from_them
 
 Concurrency & async | Fully async: every SQLite call on the connection's own thread; a long query leaves the reactor running (proved by a timer ticking during it) | a_long_query_does_not_stall_the_reactor
 Concurrency & async | Waiting for another connection's lock (busy timeout) queues without stalling the reactor; a short timeout fails with "database is locked"; WAL readers unaffected | waiting_for_a_lock_queues_without_stalling_and_times_out_cleanly
@@ -50,7 +56,7 @@ SQLite features | Stored procedures | N/A: SQLite has no procedural language —
 SQLite features | Incremental BLOB I/O: a 5 MiB BLOB filled 64 KiB at a time in place, a piece read across chunks; never grows; names are not SQL | incremental_blob_io_reads_and_writes_pieces_in_place
 SQLite features | Change hooks: every inserted / updated / deleted row through any pooled connection, commits and rollbacks | change_hooks_report_every_row_and_transaction_end
 SQLite features | Serialize a whole database to bytes (a valid database file) and open an in-memory copy from bytes (WAL images included) | a_database_serializes_to_bytes_and_opens_from_them
-SQLite features | Native extensions loaded into every connection (a real extension built by the test: .so / .dylib / .dll), named entry points, load failures fail the open; SQL's own load_extension() stays refused | a_native_extension_is_loaded_into_every_connection, a_named_entry_point_and_load_failures
+SQLite features | Native extensions loaded into every connection (a real C extension against sqlite3ext.h, built by the test: .so / .dylib / .dll), named entry points, load failures fail the open; SQL's own load_extension() stays refused | a_native_extension_is_loaded_into_every_connection, a_named_entry_point_and_load_failures
 SQLite features | Change capture (session extension): a transaction's changes as a changeset, replayed on another database, only tracked tables, nothing from before / after | a_transaction_recorded_on_one_database_replays_on_another
 SQLite features | Changesets inverted to undo; patchsets (smaller, not invertible); concatenated into their net effect | the_inverse_undoes_the_transaction, patchsets_are_smaller_and_changesets_concatenate
 SQLite features | Applying with conflicts: abort (nothing applied), skip, replace — conflicts counted | conflicts_abort_skip_or_replace

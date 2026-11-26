@@ -98,7 +98,7 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
   sqlite)
     # Embedded: the engine is compiled into the driver, the tests open real
     # database files in the temp directory. Nothing to start.
-    C=""; IMAGE="bundled with the driver (libsqlite3-sys, compiled from source)"; VERSION=""
+    C=""; IMAGE="vendored in the driver (crates/kernway-orm-sqlite/sqlite, official amalgamation), own C-API binding"; VERSION=""
     CRATE=kernway-orm-sqlite; FEATURES=(); TITLE=SQLite; SKIP=()
     # The workspace CI runs every crate's tests on Linux, macOS and Windows.
     WORKFLOW=workspace.yml

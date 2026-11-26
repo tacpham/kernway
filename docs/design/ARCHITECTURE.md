@@ -137,7 +137,7 @@ kernway-core ──┬── kernway-http ── kernway-server ──┐ (serve
 di-core ─────────────────────────────────────────────┘
 
 kernway-orm-core ──┬── kernway-orm-memory
-                   └── kernway-orm-sqlite   (+ rusqlite)
+                   └── kernway-orm-sqlite   (own C-API binding, vendored SQLite)
 
 kernway-cache-core ── kernway-cache-memory
 

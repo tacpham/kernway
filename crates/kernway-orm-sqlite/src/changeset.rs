@@ -11,9 +11,8 @@
 use crate::config::ChangeKind;
 use crate::worker::map_err;
 use kernway_orm_core::error::OrmError;
-use rusqlite::session::{ChangesetIter, ConflictAction, ConflictType};
-use rusqlite::hooks::Action;
-use std::io::Read;
+use crate::ffi;
+use std::os::raw::c_int;
 
 /// What a capture records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,8 +95,7 @@ impl Changeset {
         }
         let bytes = self.bytes.clone();
         offload(move || {
-            let mut out = Vec::new();
-            rusqlite::session::invert_strm(&mut bytes.as_slice(), &mut out).map_err(map_err)?;
+            let out = crate::raw::invert_changeset(&bytes).map_err(map_err)?;
             Ok(Changeset { bytes: out, format: ChangeFormat::Changeset })
         })
         .await
@@ -111,8 +109,7 @@ impl Changeset {
         }
         let (a, b, format) = (self.bytes.clone(), next.bytes.clone(), self.format);
         offload(move || {
-            let mut out = Vec::new();
-            rusqlite::session::concat_strm(&mut a.as_slice(), &mut b.as_slice(), &mut out).map_err(map_err)?;
+            let out = crate::raw::concat_changesets(&a, &b).map_err(map_err)?;
             Ok(Changeset { bytes: out, format })
         })
         .await
@@ -122,25 +119,22 @@ impl Changeset {
     pub async fn operations(&self) -> Result<Vec<ChangeOp>, OrmError> {
         let bytes = self.bytes.clone();
         offload(move || {
-            use fallible_streaming_iterator::FallibleStreamingIterator;
-            let mut ops = Vec::new();
             if bytes.is_empty() {
-                return Ok(ops);
+                return Ok(Vec::new());
             }
-            let mut input: &[u8] = &bytes;
-            let reader: &mut dyn Read = &mut input;
-            let mut iter = ChangesetIter::start_strm(&reader).map_err(map_err)?;
-            while let Some(item) = iter.next().map_err(map_err)? {
-                let op = item.op().map_err(map_err)?;
-                let kind = match op.code() {
-                    Action::SQLITE_INSERT => ChangeKind::Insert,
-                    Action::SQLITE_UPDATE => ChangeKind::Update,
-                    Action::SQLITE_DELETE => ChangeKind::Delete,
-                    _ => continue,
-                };
-                ops.push(ChangeOp { table: op.table_name().to_string(), kind, indirect: op.indirect() });
-            }
-            Ok(ops)
+            let ops = crate::raw::changeset_ops(&bytes).map_err(map_err)?;
+            Ok(ops
+                .into_iter()
+                .filter_map(|(table, op, indirect)| {
+                    let kind = match op {
+                        ffi::SQLITE_INSERT => ChangeKind::Insert,
+                        ffi::SQLITE_UPDATE => ChangeKind::Update,
+                        ffi::SQLITE_DELETE => ChangeKind::Delete,
+                        _ => return None,
+                    };
+                    Some(ChangeOp { table, kind, indirect })
+                })
+                .collect())
         })
         .await
     }
@@ -151,15 +145,16 @@ async fn offload<T: Send + 'static>(f: impl FnOnce() -> Result<T, OrmError> + Se
     rt_core::spawn_blocking(f).await.unwrap_or_else(|| Err(OrmError::Query("panic while processing a changeset".into())))
 }
 
-/// The action SQLite should take for one conflict under `policy`.
-pub(crate) fn resolve(policy: OnConflict, kind: &ConflictType) -> ConflictAction {
+/// The action SQLite should take for one conflict of kind `kind` under
+/// `policy`.
+pub(crate) fn resolve(policy: OnConflict, kind: c_int) -> c_int {
     match policy {
-        OnConflict::Abort => ConflictAction::SQLITE_CHANGESET_ABORT,
-        OnConflict::Skip => ConflictAction::SQLITE_CHANGESET_OMIT,
+        OnConflict::Abort => ffi::SQLITE_CHANGESET_ABORT,
+        OnConflict::Skip => ffi::SQLITE_CHANGESET_OMIT,
         // REPLACE is only valid for these two kinds.
         OnConflict::Replace => match kind {
-            ConflictType::SQLITE_CHANGESET_DATA | ConflictType::SQLITE_CHANGESET_CONFLICT => ConflictAction::SQLITE_CHANGESET_REPLACE,
-            _ => ConflictAction::SQLITE_CHANGESET_OMIT,
+            ffi::SQLITE_CHANGESET_DATA | ffi::SQLITE_CHANGESET_CONFLICT => ffi::SQLITE_CHANGESET_REPLACE,
+            _ => ffi::SQLITE_CHANGESET_OMIT,
         },
     }
 }

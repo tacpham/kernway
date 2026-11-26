@@ -1,10 +1,9 @@
-# A tiny SQLite extension, built by tests/extensions.rs to prove that
+# A tiny SQLite extension in C (src/ext.c, against the official
+# sqlite3ext.h), built by tests/extensions.rs to prove that
 # SqliteConfig::extension loads native extensions on Linux, macOS and Windows.
 #
-# Its own workspace on purpose: rusqlite's `loadable_extension` feature turns
-# every SQLite call into an indirect call through the host's API table, and
-# Cargo would unify that feature into the driver if this crate were built
-# together with it.
+# Its own workspace: an extension is a separate library, never part of the
+# driver's build.
 [package]
 name    = "kernway-test-ext"
 version = "0.0.0"
@@ -15,7 +14,7 @@ publish = false
 crate-type = ["cdylib"]
 path = "src/lib.rs"
 
-[dependencies]
-rusqlite = { version = "0.31", features = ["loadable_extension", "functions"] }
+[build-dependencies]
+cc = "1"
 
 [workspace]
