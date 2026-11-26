@@ -214,6 +214,9 @@ pub struct Conn {
     pub(crate) resolving_tz: bool,
     /// Object / collection / record types seen by this session.
     pub(crate) types: crate::object::TypeCache,
+    /// Temporary LOBs made for the call in flight (LOB attributes of IN
+    /// objects): freed when it completes.
+    pub(crate) call_temp_lobs: Vec<crate::lob::Lob>,
 }
 
 /// Map a parse error to the driver's error type.
@@ -272,6 +275,7 @@ impl Conn {
             tz_regions: None,
             resolving_tz: false,
             types: Default::default(),
+            call_temp_lobs: Vec::new(),
         };
         conn.negotiate().await?;
         conn.authenticate(cfg).await?;

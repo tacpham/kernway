@@ -58,7 +58,6 @@ mod tds {
     pub const TIMESTAMP_LTZ: u8 = 33;
     pub const BINARY_FLOAT: u8 = 37;
     pub const START_EMBED_ADT: u8 = 39;
-    pub const END_EMBED_ADT: u8 = 40;
     pub const SUBTYPE_MARKER: u8 = 43;
     pub const EMBED_ADT_INFO: u8 = 44;
     pub const BINARY_DOUBLE: u8 = 45;
@@ -94,10 +93,20 @@ pub(crate) struct TypeCache {
     by_name: HashMap<String, Rc<ObjType>>,
 }
 
+impl TypeCache {
+    /// A type already loaded.
+    pub(crate) fn get(&self, name: &str) -> Option<Rc<ObjType>> {
+        self.by_name.get(name).cloned()
+    }
+}
+
 /// A scalar type from its dictionary name (`VARCHAR2`, `NUMBER`, …).
 fn scalar_from_name(name: &str) -> Result<AttrType, OrmError> {
     use ora_type::*;
     let base = name.split('(').next().unwrap_or(name).trim();
+    // PL/SQL-only types are named like "PL/SQL PLS INTEGER", "PL/SQL BOOLEAN".
+    let plsql = base.strip_prefix("PL/SQL ").map(|b| b.replace(' ', "_"));
+    let base = plsql.as_deref().unwrap_or(base);
     let (t, csfrm) = match base {
         "VARCHAR2" | "VARCHAR" | "STRING" => (VARCHAR, 1),
         "NVARCHAR2" => (VARCHAR, 2),
@@ -563,6 +572,155 @@ impl PickleWriter {
     pub(crate) fn collection_header(&mut self, kind: u8, n: usize) {
         self.buf.push(if kind == coll::PLSQL_INDEX_TABLE { HAS_INDEXES } else { 0 });
         self.length(n);
+    }
+}
+
+impl Conn {
+    /// Pickle `v` as a value of type `name` for an IN / IN OUT bind: the
+    /// full bind image (type OID, lengths, flags, pickled data). Collections
+    /// take a [`Value::Collection`] (or, for an index-by table, a
+    /// [`Value::AssocArray`] / an object keyed by index); objects and records
+    /// a [`Value::Object`] (fields by name, case-insensitive; missing ones
+    /// NULL).
+    pub(crate) async fn pack_bind(&mut self, name: &str, v: &Value) -> Result<Vec<u8>, OrmError> {
+        let t = self.object_type(name).await?;
+        let mut w = PickleWriter::new(t.is_collection);
+        Box::pin(self.pack_body(&t, v, &mut w)).await?;
+        Ok(object_bind_bytes(&t, &w.finish()))
+    }
+
+    async fn pack_body(&mut self, t: &ObjType, v: &Value, w: &mut PickleWriter) -> Result<(), OrmError> {
+        let mismatch = || OrmError::TypeConversion(format!("a value of type {} expected, got {}", t.full_name, v.to_text().unwrap_or_default()));
+        if t.is_collection {
+            let elem = t.element.clone().ok_or_else(mismatch)?;
+            if t.coll_kind == coll::PLSQL_INDEX_TABLE {
+                let entries: Vec<(i32, Value)> = match v {
+                    Value::AssocArray { entries, .. } => entries.clone(),
+                    Value::Collection { elements, .. } => elements.iter().cloned().enumerate().map(|(i, e)| (i as i32 + 1, e)).collect(),
+                    Value::Object { fields, .. } => fields
+                        .iter()
+                        .map(|(k, e)| k.parse::<i32>().map(|k| (k, e.clone())).map_err(|_| mismatch()))
+                        .collect::<Result<_, _>>()?,
+                    _ => return Err(mismatch()),
+                };
+                let mut entries = entries;
+                entries.sort_by_key(|(k, _)| *k);
+                w.collection_header(t.coll_kind, entries.len());
+                for (k, e) in &entries {
+                    w.buf.extend(k.to_be_bytes());
+                    Box::pin(self.pack_value(&elem, true, e, w)).await?;
+                }
+                return Ok(());
+            }
+            let Value::Collection { elements, .. } = v else { return Err(mismatch()) };
+            if t.max_elements > 0 && elements.len() > t.max_elements as usize {
+                return Err(OrmError::TypeConversion(format!("{} holds at most {} elements, got {}", t.full_name, t.max_elements, elements.len())));
+            }
+            w.collection_header(t.coll_kind, elements.len());
+            for e in elements {
+                Box::pin(self.pack_value(&elem, true, e, w)).await?;
+            }
+            return Ok(());
+        }
+        let Value::Object { fields, .. } = v else { return Err(mismatch()) };
+        for f in fields {
+            if !t.attrs.iter().any(|(n, _)| n.eq_ignore_ascii_case(&f.0)) {
+                return Err(OrmError::TypeConversion(format!("{} has no attribute {}", t.full_name, f.0)));
+            }
+        }
+        for (name, ty) in &t.attrs {
+            let fv = fields.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map_or(&Value::Null, |(_, v)| v);
+            Box::pin(self.pack_value(ty, false, fv, w)).await?;
+        }
+        Ok(())
+    }
+
+    async fn pack_value(&mut self, ty: &AttrType, in_collection: bool, v: &Value, w: &mut PickleWriter) -> Result<(), OrmError> {
+        if matches!(v, Value::Null) {
+            match ty {
+                AttrType::Object(name) => {
+                    let t = self.object_type(name).await?;
+                    if t.is_collection || in_collection {
+                        w.null();
+                    } else {
+                        w.atomic_null();
+                    }
+                }
+                _ => w.null(),
+            }
+            return Ok(());
+        }
+        let conv = |e: String| OrmError::TypeConversion(e);
+        match ty {
+            AttrType::Xml => return Err(OrmError::Unsupported("XMLType inside an IN object".into())),
+            AttrType::Object(name) => {
+                let t = self.object_type(name).await?;
+                if t.is_collection || in_collection {
+                    let mut inner = PickleWriter::new(t.is_collection);
+                    Box::pin(self.pack_body(&t, v, &mut inner)).await?;
+                    w.bytes(&inner.finish());
+                } else {
+                    Box::pin(self.pack_body(&t, v, w)).await?;
+                }
+            }
+            AttrType::Scalar { ora_type: t, csfrm } => {
+                use ora_type::*;
+                let text = || v.to_text().unwrap_or_default();
+                match *t {
+                    VARCHAR | CHAR if *csfrm == 2 => {
+                        let b: Vec<u8> = text().encode_utf16().flat_map(u16::to_be_bytes).collect();
+                        w.bytes(&b);
+                    }
+                    VARCHAR | CHAR => w.bytes(text().as_bytes()),
+                    NUMBER => w.bytes(&value::encode_number(&text()).map_err(conv)?),
+                    BINARY_INTEGER => {
+                        let i: i32 = text().parse().map_err(|_| conv(format!("not an integer: {}", text())))?;
+                        w.bytes(&i.to_be_bytes());
+                    }
+                    BOOLEAN => {
+                        let b = match v {
+                            Value::Bool(b) => *b,
+                            other => other.as_i64().is_some_and(|i| i != 0),
+                        };
+                        w.bytes(&u32::from(b).to_be_bytes());
+                    }
+                    BINARY_DOUBLE | BINARY_FLOAT => {
+                        let f = match v {
+                            Value::Float(f) => *f,
+                            other => text().parse().map_err(|_| conv(format!("not a number: {other:?}")))?,
+                        };
+                        w.bytes(&value::encode_double(f));
+                    }
+                    RAW => match v {
+                        Value::Raw(b) => w.bytes(b),
+                        _ => return Err(conv("RAW attribute takes bytes".into())),
+                    },
+                    DATE | TIMESTAMP | TIMESTAMP_LTZ | TIMESTAMP_TZ => {
+                        let b = match v {
+                            Value::Date(d) => value::encode_date(d),
+                            Value::Timestamp(d) if *t == DATE => value::encode_date(d),
+                            Value::Timestamp(d) => value::encode_timestamp(d),
+                            Value::TimestampTz(d, off) => value::encode_timestamp_tz(d, *off),
+                            Value::Str(s) => {
+                                let d = value::parse_datetime(s).ok_or_else(|| conv(format!("not a date / time: {s}")))?;
+                                if *t == DATE { value::encode_date(&d) } else { value::encode_timestamp(&d) }
+                            }
+                            other => return Err(conv(format!("not a date / time: {other:?}"))),
+                        };
+                        w.bytes(&b);
+                    }
+                    CLOB | BLOB => {
+                        // A temporary LOB with the value, bound by its locator.
+                        let mut lob = self.lob_create_temp(*t == BLOB).await?;
+                        self.call_temp_lobs.push(lob.clone());
+                        self.lob_write(&mut lob, v).await?;
+                        w.bytes(&lob.locator);
+                    }
+                    other => return Err(OrmError::Unsupported(format!("attribute type {other} in an IN object"))),
+                }
+            }
+        }
+        Ok(())
     }
 }
 

@@ -206,6 +206,15 @@ pub enum Value {
         /// The pickled image.
         image: Vec<u8>,
     },
+    /// Internal: an object / collection IN value pickled for its bind
+    /// (type OID, lengths, flags, image).
+    #[doc(hidden)]
+    ObjectBind {
+        /// Full type name.
+        type_name: String,
+        /// The bind bytes.
+        bytes: Vec<u8>,
+    },
     /// Internal: a region-based value as it arrives (UTC time and Oracle's
     /// region id), before the driver resolves it into
     /// [`TimestampTzRegion`](Self::TimestampTzRegion).
@@ -271,7 +280,7 @@ impl Value {
                 "{type_name}({})",
                 entries.iter().map(|(k, v)| format!("{k} => {}", v.to_text().unwrap_or_else(|| "NULL".into()))).collect::<Vec<_>>().join(", ")
             )),
-            Value::ObjectImage { type_name, .. } => Some(format!("<{type_name} image>")),
+            Value::ObjectImage { type_name, .. } | Value::ObjectBind { type_name, .. } => Some(format!("<{type_name} image>")),
             Value::TimestampTzRegionId(d, id) => Some(format!("{d} UTC (region #{id})")),
         }
     }
@@ -569,6 +578,15 @@ pub(crate) fn decode(ora_type: u8, csfrm: u8, b: Vec<u8>) -> Result<Value, Strin
         }
         _ => Value::Str(String::from_utf8_lossy(&b).into_owned()),
     })
+}
+
+/// Parse `YYYY-MM-DD[ HH:MM:SS[.fraction]]`.
+pub(crate) fn parse_datetime(s: &str) -> Option<DateTime> {
+    let s = s.trim();
+    if s.len() == 10 {
+        return parse_datetime_offset(&format!("{s} 00:00:00 +00:00")).map(|(d, _)| d);
+    }
+    parse_datetime_offset(&format!("{s} +00:00")).map(|(d, _)| d)
 }
 
 /// Parse `YYYY-MM-DD HH24:MI:SS[.fraction] ±HH:MM` (TO_CHAR output).

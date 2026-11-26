@@ -28,7 +28,20 @@ fn bind(p: &Param) -> Bind {
         Param::Str(s) => Value::Str(s.clone()),
         Param::Bytes(b) if b.is_empty() => Value::Null,
         Param::Bytes(b) => Value::Raw(b.clone()),
+        // Typed later (from the procedure's declaration) and pickled.
+        Param::Array(items) => Value::Collection { type_name: String::new(), elements: items.iter().map(param_value).collect() },
+        Param::Object(fields) => Value::Object {
+            type_name: String::new(),
+            fields: fields.iter().map(|(k, v)| (k.clone(), param_value(v))).collect(),
+        },
     })
+}
+
+fn param_value(p: &Param) -> Value {
+    match bind(p) {
+        Bind::In(v) => v,
+        _ => Value::Null,
+    }
 }
 
 fn binds(params: &[Param]) -> Vec<Bind> {
@@ -53,7 +66,7 @@ fn cell<'a>(v: &'a Value, col: Option<&ColumnDef>) -> Cell<'a> {
         v @ (Value::IntervalYm { .. } | Value::IntervalDs { .. }) => Cell::Owned(fmt_interval(v, 2, 6)),
         Value::Raw(b) => Cell::Bytes(b),
         Value::Bool(b) => Cell::Bool(*b),
-        Value::Cursor(_) | Value::Lob(_) | Value::ObjectImage { .. } => Cell::Null,
+        Value::Cursor(_) | Value::Lob(_) | Value::ObjectImage { .. } | Value::ObjectBind { .. } => Cell::Null,
         // An object / collection mapped onto an entity field: its text form.
         v @ (Value::Object { .. } | Value::Collection { .. } | Value::AssocArray { .. }) => Cell::Owned(v.to_text().unwrap_or_default()),
     }
@@ -116,7 +129,7 @@ pub(crate) fn to_shared(v: Value, col: Option<&Column>) -> kernway_orm_sql::Valu
         Value::Raw(b) => V::Bytes(b),
         Value::Bool(b) => V::Bool(b),
         Value::Cursor(rs) => V::Rows(Box::new(result_set(rs))),
-        Value::Lob(_) | Value::TimestampTzRegionId(..) | Value::ObjectImage { .. } => V::Null,
+        Value::Lob(_) | Value::TimestampTzRegionId(..) | Value::ObjectImage { .. } | Value::ObjectBind { .. } => V::Null,
         Value::Object { fields, .. } => V::Object(fields.into_iter().map(|(n, v)| (n, to_shared(v, None))).collect()),
         Value::Collection { elements, .. } => V::Array(elements.into_iter().map(|v| to_shared(v, None)).collect()),
         Value::AssocArray { entries, .. } => V::Object(entries.into_iter().map(|(k, v)| (k.to_string(), to_shared(v, None))).collect()),
@@ -158,6 +171,7 @@ fn out_type(kind: OutKind) -> OutType {
         OutKind::IntervalDs => OutType::IntervalDs,
         OutKind::LongText => OutType::Clob,
         OutKind::LongBytes => OutType::Blob,
+        OutKind::Object => OutType::Object(String::new()),
     }
 }
 
@@ -170,6 +184,35 @@ fn is_identifier(p: &str) -> bool {
 }
 
 /// A call argument as its bind.
+/// Whether a bind is an object value or OUT whose type is not known yet.
+fn needs_declared_type(b: &Bind) -> bool {
+    let untyped = |v: &Value| match v {
+        Value::Object { type_name, .. } | Value::Collection { type_name, .. } | Value::AssocArray { type_name, .. } => type_name.is_empty(),
+        _ => false,
+    };
+    match b {
+        Bind::Out(OutType::Object(n)) | Bind::InOut(_, OutType::Object(n)) if n.is_empty() => true,
+        Bind::In(v) | Bind::InOut(v, _) => untyped(v),
+        _ => false,
+    }
+}
+
+fn set_declared_type(b: &mut Bind, ty: &str) {
+    let set = |v: &mut Value| {
+        if let Value::Object { type_name, .. } | Value::Collection { type_name, .. } | Value::AssocArray { type_name, .. } = v {
+            *type_name = ty.to_string();
+        }
+    };
+    match b {
+        Bind::Out(t) => *t = OutType::Object(ty.to_string()),
+        Bind::InOut(v, t) => {
+            set(v);
+            *t = OutType::Object(ty.to_string());
+        }
+        Bind::In(v) => set(v),
+    }
+}
+
 fn arg_bind(a: &CallArg) -> Bind {
     match a.inner() {
         CallArg::In(p) => bind(p),
@@ -236,6 +279,7 @@ fn inout_type(p: &Param) -> OutType {
         Param::Str(s) if s.len() > 32767 => OutType::Clob,
         Param::Bytes(_) => OutType::Raw(32767),
         Param::Str(_) | Param::Null => OutType::Str(8191),
+        Param::Array(_) | Param::Object(_) => OutType::Object(String::new()),
     }
 }
 
@@ -443,6 +487,52 @@ impl Conn {
 
     /// `BEGIN [:ret :=] name(args); END;` with `DBMS_OUTPUT` captured in the
     /// same round trip (more round trips only for output past ~32 KB).
+    /// The declared object / collection / record types of procedure `name`'s
+    /// arguments: (position — 0 for a function result, argument name, full
+    /// type name or `None` for a scalar), resolved like PL/SQL resolves the
+    /// name (synonyms, packages).
+    async fn argument_types(&mut self, name: &str) -> Result<Vec<(u32, Option<String>, Option<String>)>, OrmError> {
+        let r = self
+            .execute(
+                "DECLARE s VARCHAR2(128); p1 VARCHAR2(128); p2 VARCHAR2(128); l VARCHAR2(128); t NUMBER; o NUMBER;
+                 BEGIN DBMS_UTILITY.NAME_RESOLVE(:n, 1, s, p1, p2, l, t, o); :s := s; :p1 := p1; :p2 := p2; END;",
+                &[Bind::In(Value::Str(name.to_string())), Bind::Out(OutType::Str(128)), Bind::Out(OutType::Str(128)), Bind::Out(OutType::Str(128))],
+            )
+            .await?;
+        let text = |v: &Value| v.to_text();
+        let (owner, package, object) = (text(&r.out[1]), text(&r.out[2]), text(&r.out[3]));
+        let rows = self
+            .execute(
+                "SELECT position, argument_name, type_owner, type_name, type_subname, data_type
+                   FROM all_arguments
+                  WHERE owner = :1 AND object_name = :2 AND NVL(package_name, '~') = NVL(:3, '~') AND data_level = 0
+                    AND NVL(overload, '1') = (SELECT NVL(MIN(overload), '1') FROM all_arguments
+                                               WHERE owner = :4 AND object_name = :5 AND NVL(package_name, '~') = NVL(:6, '~'))
+                  ORDER BY sequence",
+                // SQL binds by occurrence: each placeholder appears twice.
+                &{
+                    let three = [owner, object, package].map(|v| Bind::In(v.map_or(Value::Null, Value::Str)));
+                    [three.clone(), three].concat()
+                },
+            )
+            .await?;
+        Ok(rows
+            .rows
+            .iter()
+            .map(|row| {
+                let pos = row[0].as_i64().unwrap_or(0) as u32;
+                let arg = text(&row[1]);
+                let ty = match (text(&row[2]), text(&row[3]), text(&row[4]), text(&row[5])) {
+                    (_, _, _, Some(dt)) if dt == "XMLTYPE" || dt == "OPAQUE/XMLTYPE" => Some("SYS.XMLTYPE".to_string()),
+                    (Some(o), Some(t), Some(sub), _) => Some(format!("{o}.{t}.{sub}")),
+                    (Some(o), Some(t), None, _) => Some(format!("{o}.{t}")),
+                    _ => None,
+                };
+                (pos, arg, ty)
+            })
+            .collect())
+    }
+
     async fn invoke(&mut self, name: &str, returns: Option<OutKind>, args: &[CallArg]) -> Result<CallResult, OrmError> {
         let name = procedure_name(name)?;
         // Placeholders are bound in order of appearance: the return value
@@ -458,7 +548,7 @@ impl Conn {
             }
         }
         let n = args.len() + usize::from(returns.is_some());
-        let target = if returns.is_some() { format!(":1 := {name}") } else { name };
+        let target = if returns.is_some() { format!(":1 := {name}") } else { name.clone() };
         let sql = format!(
             "{DRAIN_DECLARE} BEGIN DBMS_OUTPUT.ENABLE(NULL); {target}({}); {DRAIN_OUTPUT} :{} := kw_buf; :{} := kw_over; :{} := kw_done; END;",
             list.join(", "),
@@ -468,6 +558,29 @@ impl Conn {
         );
         let mut b: Vec<Bind> = returns.map(|k| Bind::Out(out_type(k))).into_iter().collect();
         b.extend(args.iter().map(arg_bind));
+        // Object / collection / record arguments take their types from the
+        // procedure's declaration.
+        if b.iter().any(needs_declared_type) {
+            let declared = self.argument_types(&name).await?;
+            let offset = usize::from(returns.is_some());
+            for (i, bind) in b.iter_mut().enumerate() {
+                if !needs_declared_type(bind) {
+                    continue;
+                }
+                let found = if i < offset {
+                    declared.iter().find(|d| d.0 == 0)
+                } else {
+                    match &args[i - offset] {
+                        CallArg::Named(param, _) => declared.iter().find(|d| d.1.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(param))),
+                        _ => declared.iter().find(|d| d.0 as usize == i - offset + 1),
+                    }
+                };
+                let ty = found.and_then(|d| d.2.clone()).ok_or_else(|| {
+                    OrmError::Query(format!("argument {} of {name} is not an object / collection / record type", i + 1 - offset))
+                })?;
+                set_declared_type(bind, &ty);
+            }
+        }
         b.extend([Bind::Out(OutType::Str(8191)), Bind::Out(OutType::Str(8191)), Bind::Out(OutType::Number)]);
         let r = match self.run(&sql, &b).await {
             Ok(r) => r,

@@ -26,8 +26,7 @@ Types | ROWID / UROWID (physical and logical) accepted back by the server | ever
 Types | CLOB / NCLOB / BLOB read and written, 0 B – 1 MB | clob_and_blob_read_and_write
 Types | Nested CURSOR(...) columns: each fetched to the end as a result set (120 rows x their own cursors) | nested_cursor_columns_come_back_as_result_sets
 Types | BFILE columns: the server file read through its locator (open / read / close), byte-exact vs the server's length; a missing file is the server's error | bfile_columns_are_read_from_the_server_file
-Types | Object types / XMLType columns decoded | GAP: refused with OrmError::Unsupported (planned: phase 3)
-Types | Object types / XMLType / BFILE / nested CURSOR columns decoded | GAP: refused with OrmError::Unsupported (planned: phase 3)
+Types | Object types (nested), VARRAY / nested tables (of scalars and objects, with NULLs), XMLType (inline and as a CLOB) in query results; LOB / date / BOOLEAN attributes; mapped onto nested structs | objects_collections_and_xmltype_columns_decode
 Types | TIMESTAMP WITH TIME ZONE in a named region: local time, offset at that instant (daylight saving) and IANA region name, computed by the server (region ids from V$TIMEZONE_NAMES); columns and PL/SQL results — beyond python-oracledb thin, which refuses them | timestamps_in_named_regions_come_back_as_the_server_computes_them
 
 ORM (shared layer) | Shared conformance suite (CRUD, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL, joins/aggregates, execute_many failure semantics, server cursors) | oracle_conforms
@@ -47,7 +46,7 @@ PL/SQL | Compilation errors reported with line / column / message (not left INVA
 PL/SQL | Scripts: SQL + PL/SQL units ended by '/', quotes / q'[…]' / comments respected | scripts_run_sql_and_plsql_units_and_stop_at_the_first_error, backend::tests::scripts_split_on_semicolons_and_slash_lines
 PL/SQL | Procedure names / parameter names validated (never SQL) | backend::tests::procedure_names_are_identifiers_only, procedure_calls_return_out_values_cursors_implicit_results_and_output
 PL/SQL | CLOB / BLOB of any size: OUT arguments and function results read through locators, IN values past 32 KB as temporary LOBs, IN OUT; UTF-16 CLOB data incl. surrogates; temporary LOBs freed (checked in v$temporary_lobs) | out_clob_and_blob_of_any_size_come_back_whole, in_values_past_32k_travel_as_temporary_lobs, in_out_clob_and_blob, lobs_through_call_and_call_function_of_any_size
-PL/SQL | RECORD, collections (VARRAY, nested table), associative arrays, object types as arguments | GAP: planned phase 3
+PL/SQL | Object, collection, RECORD and associative-array (index-by) arguments: IN (pickled, incl. LOB attributes as freed temporary LOBs), OUT, IN OUT and function results — types taken from the procedure declaration (NAME_RESOLVE + ALL_ARGUMENTS) | object_collection_and_record_arguments_through_call
 
 Other Oracle features | Advanced Queuing, Continuous Query Notification, SODA, two-phase commit | GAP: not implemented
 

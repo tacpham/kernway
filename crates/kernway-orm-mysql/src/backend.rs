@@ -20,6 +20,8 @@ fn bind(p: &Param) -> BindValue {
         Param::Bool(b) => BindValue::Int(i64::from(*b)),
         Param::Str(s) => BindValue::Str(s.clone()),
         Param::Bytes(b) => BindValue::Bytes(b.clone()),
+        // No object types: structured values travel as JSON.
+        p @ (Param::Array(_) | Param::Object(_)) => BindValue::Str(p.to_json().to_string()),
     }
 }
 

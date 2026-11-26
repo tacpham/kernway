@@ -165,3 +165,129 @@ fn objects_collections_and_xmltype_columns_decode() {
         assert_eq!(db.query_scalar("SELECT 9 FROM dual", &[]).await.unwrap(), Value::Int(9));
     });
 }
+
+#[test]
+fn object_collection_and_record_arguments_through_call() {
+    let Some(url) = url() else { return eprintln!("skip: KERNWAY_ORACLE_HOST not set") };
+    run(async move {
+        use kernway_orm_sql::{CallArg, OutKind, Param};
+        let db = OracleDriver::connect_with(kernway_orm_oracle::OracleConfig::from_url(&url).unwrap(), 1).await.unwrap();
+        db.execute_script(TYPES).await.unwrap();
+        db.execute_script(
+            "CREATE OR REPLACE PACKAGE kwo_api2 AS
+  TYPE rec IS RECORD (id PLS_INTEGER, name VARCHAR2(30), ok BOOLEAN, amt NUMBER(10,2), born DATE);
+  TYPE idx_tab IS TABLE OF VARCHAR2(20) INDEX BY PLS_INTEGER;
+  FUNCTION make_addr(p_street VARCHAR2) RETURN kwo_addr;
+  PROCEDURE echo_tags(p_in IN kwo_tags, p_n OUT NUMBER, p_back OUT kwo_tags);
+  FUNCTION sum_nums(p IN kwo_nums) RETURN NUMBER;
+  PROCEDURE grow_addrs(p IN OUT kwo_addrs);
+  FUNCTION echo_rec(p IN rec) RETURN rec;
+  FUNCTION join_idx(p IN idx_tab) RETURN VARCHAR2;
+  FUNCTION notes_len(p IN kwo_person) RETURN NUMBER;
+END;
+/
+CREATE OR REPLACE PACKAGE BODY kwo_api2 AS
+  FUNCTION make_addr(p_street VARCHAR2) RETURN kwo_addr IS BEGIN RETURN kwo_addr(p_street, 12345, DATE '2026-11-26'); END;
+  PROCEDURE echo_tags(p_in IN kwo_tags, p_n OUT NUMBER, p_back OUT kwo_tags) IS
+  BEGIN p_n := p_in.COUNT; p_back := p_in; p_back.EXTEND; p_back(p_back.COUNT) := 'added'; END;
+  FUNCTION sum_nums(p IN kwo_nums) RETURN NUMBER IS s NUMBER := 0;
+  BEGIN FOR i IN 1 .. p.COUNT LOOP s := s + NVL(p(i), 0); END LOOP; RETURN s; END;
+  PROCEDURE grow_addrs(p IN OUT kwo_addrs) IS
+  BEGIN p.EXTEND; p(p.COUNT) := kwo_addr('new ' || p.COUNT, p.COUNT, NULL); END;
+  FUNCTION echo_rec(p IN rec) RETURN rec IS r rec := p;
+  BEGIN r.id := p.id * 2; r.name := UPPER(p.name); r.ok := NOT p.ok; r.amt := p.amt + 0.25; r.born := p.born + 1; RETURN r; END;
+  FUNCTION join_idx(p IN idx_tab) RETURN VARCHAR2 IS k PLS_INTEGER := p.FIRST; s VARCHAR2(400);
+  BEGIN WHILE k IS NOT NULL LOOP s := s || k || '=' || p(k) || ';'; k := p.NEXT(k); END LOOP; RETURN s; END;
+  FUNCTION notes_len(p IN kwo_person) RETURN NUMBER IS
+  BEGIN RETURN DBMS_LOB.GETLENGTH(p.notes) + NVL(DBMS_LOB.GETLENGTH(p.photo), 0) * 1000000 + p.tags.COUNT * 1000000000; END;
+END;
+/",
+        )
+        .await
+        .unwrap();
+        let s = |x: &str| Param::Str(x.into());
+        let tv = |x: &str| Value::Text(x.into());
+
+        // OUT object (function result), type from the declaration.
+        let r = db.call_function("kwo_api2.make_addr", OutKind::Object, &["Hải Phòng".into()]).await.unwrap();
+        assert_eq!(
+            r.value,
+            Value::Object(vec![
+                ("STREET".into(), tv("Hải Phòng")),
+                ("ZIP".into(), Value::Int(12345)),
+                ("SINCE".into(), Value::DateTime("2026-11-26 00:00:00".into())),
+            ])
+        );
+
+        // IN VARRAY (with a NULL), OUT number and OUT VARRAY.
+        let tags = Param::Array(vec![s("x"), Param::Null, s("chữ")]);
+        let r = db.call("kwo_api2.echo_tags", &[tags.into(), OutKind::Number.into(), OutKind::Object.into()]).await.unwrap();
+        assert_eq!(r.out[0], Value::Int(3));
+        assert_eq!(r.out[1], Value::Array(vec![tv("x"), Value::Null, tv("chữ"), tv("added")]));
+        // A VARRAY(10) refuses 11 elements before anything is sent.
+        let too_many = Param::Array((0..11).map(|i| s(&i.to_string())).collect());
+        let e = db.call("kwo_api2.echo_tags", &[too_many.into(), OutKind::Number.into(), OutKind::Object.into()]).await.unwrap_err();
+        assert!(e.to_string().contains("at most 10"), "{e}");
+
+        // IN nested table of numbers (large), named argument.
+        let nums = Param::Array((1..=3000).map(|i| Param::Float(f64::from(i) / 4.0)).collect());
+        let r = db.call_function("kwo_api2.sum_nums", OutKind::Number, &[CallArg::named("p", nums)]).await.unwrap();
+        assert_eq!(r.value.as_f64(), Some((1..=3000).map(|i| f64::from(i) / 4.0).sum::<f64>()));
+
+        // IN OUT nested table of objects.
+        let addrs = Param::Array(vec![Param::Object(vec![("street".into(), s("a")), ("zip".into(), Param::Int(1))])]);
+        let r = db.call("kwo_api2.grow_addrs", &[CallArg::InOut(addrs)]).await.unwrap();
+        let Value::Array(out) = &r.out[0] else { panic!("{:?}", r.out[0]) };
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1], Value::Object(vec![("STREET".into(), tv("new 2")), ("ZIP".into(), Value::Int(2)), ("SINCE".into(), Value::Null)]));
+
+        // PL/SQL record in and out: PLS_INTEGER, BOOLEAN, NUMBER(10,2), DATE.
+        let rec = Param::Object(vec![
+            ("id".into(), Param::Int(-21)),
+            ("name".into(), s("lan")),
+            ("ok".into(), Param::Bool(true)),
+            ("amt".into(), Param::Float(10.5)),
+            ("born".into(), s("2000-02-28")),
+        ]);
+        let r = db.call_function("kwo_api2.echo_rec", OutKind::Object, &[rec.into()]).await.unwrap();
+        assert_eq!(
+            r.value,
+            Value::Object(vec![
+                ("ID".into(), Value::Int(-42)),
+                ("NAME".into(), tv("LAN")),
+                ("OK".into(), Value::Bool(false)),
+                ("AMT".into(), Value::Decimal("10.75".into())),
+                ("BORN".into(), Value::DateTime("2000-02-29 00:00:00".into())),
+            ])
+        );
+
+        // Associative array (index-by): keys kept, sorted by the server.
+        let idx = Param::Object(vec![("10".into(), s("ten")), ("-3".into(), s("minus three")), ("2".into(), s("two"))]);
+        let r = db.call_function("kwo_api2.join_idx", OutKind::Text, &[idx.into()]).await.unwrap();
+        assert_eq!(r.value, tv("-3=minus three;2=two;10=ten;"));
+
+        // An object with LOB attributes (> 32 KB) and a nested VARRAY.
+        let person = Param::Object(vec![
+            ("name".into(), s("big")),
+            ("notes".into(), s(&"n".repeat(50_000))),
+            ("photo".into(), Param::Bytes(vec![7; 70])),
+            ("tags".into(), Param::Array(vec![s("a"), s("b")])),
+        ]);
+        let r = db.call_function("kwo_api2.notes_len", OutKind::Number, &[person.into()]).await.unwrap();
+        assert_eq!(r.value, Value::Int(2_000_000_000 + 70_000_000 + 50_000));
+        // The temporary LOBs made for those attributes were freed.
+        let left = db
+            .query_scalar(
+                "SELECT NVL(SUM(cache_lobs + nocache_lobs + abstract_lobs), 0) FROM v$temporary_lobs WHERE sid = SYS_CONTEXT('USERENV', 'SID')",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(left, Value::Int(0), "no temporary LOB left behind");
+
+        // A field the type does not have is an error, not silently dropped.
+        let bad = Param::Object(vec![("nope".into(), Param::Int(1))]);
+        assert!(db.call_function("kwo_api2.echo_rec", OutKind::Object, &[bad.into()]).await.is_err());
+        assert_eq!(db.query_scalar("SELECT 3 FROM dual", &[]).await.unwrap(), Value::Int(3));
+    });
+}

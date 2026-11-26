@@ -23,6 +23,31 @@ pub enum Param {
     Str(String),
     /// Binary data.
     Bytes(Vec<u8>),
+    /// A collection (Oracle VARRAY / nested table / associative array
+    /// argument; elsewhere sent as a JSON array).
+    Array(Vec<Param>),
+    /// A structured value (Oracle object type / PL/SQL record argument, an
+    /// associative array keyed by index; elsewhere sent as a JSON object).
+    Object(Vec<(String, Param)>),
+}
+
+impl Param {
+    /// The value as JSON (how a backend without object types sends
+    /// [`Array`](Self::Array) / [`Object`](Self::Object)).
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::Value as J;
+        match self {
+            Param::Null => J::Null,
+            Param::Int(i) => J::from(*i),
+            Param::UInt(u) => J::from(*u),
+            Param::Float(f) => J::from(*f),
+            Param::Bool(b) => J::Bool(*b),
+            Param::Str(s) => J::String(s.clone()),
+            Param::Bytes(b) => J::Array(b.iter().map(|x| J::from(*x)).collect()),
+            Param::Array(items) => J::Array(items.iter().map(Param::to_json).collect()),
+            Param::Object(fields) => J::Object(fields.iter().map(|(k, v)| (k.clone(), v.to_json())).collect()),
+        }
+    }
 }
 
 fn map_serde(e: serde_json::Error) -> OrmError {

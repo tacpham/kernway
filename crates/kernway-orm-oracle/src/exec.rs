@@ -39,7 +39,7 @@ const VECTOR_MAX_LENGTH: u64 = 1024 * 1024;
 type RowSink<'a> = dyn FnMut(&[Column], Vec<Value>) -> Result<(), OrmError> + 'a;
 
 /// The declared type of an OUT (or IN OUT) bind.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum OutType {
     /// VARCHAR2 of at most this many bytes.
     Str(u32),
@@ -67,6 +67,20 @@ pub enum OutType {
     Clob,
     /// BLOB of any size: returned as [`Value::Raw`].
     Blob,
+    /// An object type, collection or PL/SQL record, by its full name
+    /// (`SCHEMA.[PACKAGE.]NAME`): returned as [`Value::Object`] /
+    /// [`Value::Collection`] / [`Value::AssocArray`].
+    Object(String),
+}
+
+impl OutType {
+    /// The object type an OUT bind of this type needs, if any.
+    pub(crate) fn object_type(&self) -> Option<&str> {
+        match self {
+            OutType::Object(n) => Some(n),
+            _ => None,
+        }
+    }
 }
 
 /// A bind variable, by position.
@@ -162,21 +176,22 @@ pub struct Executed {
     pub warning: Option<(u16, String)>,
 }
 
-fn out_meta(t: OutType) -> (u8, u8, u32) {
+fn out_meta(t: &OutType) -> (u8, u8, u32) {
     match t {
-        OutType::Str(n) => (ora_type::VARCHAR, 1, n.max(1) * 4),
+        OutType::Str(n) => (ora_type::VARCHAR, 1, (*n).max(1) * 4),
         OutType::Number => (ora_type::NUMBER, 0, 22),
         OutType::Float => (ora_type::BINARY_DOUBLE, 0, 8),
         OutType::Date => (ora_type::DATE, 0, 7),
         OutType::Timestamp => (ora_type::TIMESTAMP, 0, 11),
         OutType::Bool => (ora_type::BOOLEAN, 0, 4),
-        OutType::Raw(n) => (ora_type::RAW, 0, n.max(1)),
+        OutType::Raw(n) => (ora_type::RAW, 0, (*n).max(1)),
         OutType::Cursor => (ora_type::CURSOR, 0, 4),
         OutType::TimestampTz => (ora_type::TIMESTAMP_TZ, 0, 13),
         OutType::IntervalYm => (ora_type::INTERVAL_YM, 0, 5),
         OutType::IntervalDs => (ora_type::INTERVAL_DS, 0, 11),
         OutType::Clob => (ora_type::CLOB, 1, LOB_BIND_SIZE),
         OutType::Blob => (ora_type::BLOB, 0, LOB_BIND_SIZE),
+        OutType::Object(_) => (ora_type::OBJECT, 0, 0),
     }
 }
 
@@ -195,7 +210,9 @@ fn value_meta(v: &Value) -> (u8, u8, u32) {
         Value::Bool(_) => (ora_type::BOOLEAN, 0, 4),
         Value::Cursor(_) => (ora_type::CURSOR, 0, 4),
         Value::TimestampTzRegion(..) | Value::TimestampTzRegionId(..) => (ora_type::TIMESTAMP_TZ, 0, 13),
-        Value::Object { .. } | Value::Collection { .. } | Value::AssocArray { .. } | Value::ObjectImage { .. } => (ora_type::OBJECT, 0, 0),
+        Value::Object { .. } | Value::Collection { .. } | Value::AssocArray { .. } | Value::ObjectImage { .. } | Value::ObjectBind { .. } => {
+            (ora_type::OBJECT, 0, 0)
+        }
         Value::Lob(l) if l.blob => (ora_type::BLOB, 0, LOB_BIND_SIZE),
         Value::Lob(_) => (ora_type::CLOB, 1, LOB_BIND_SIZE),
     }
@@ -212,10 +229,22 @@ impl Bind {
     fn meta(&self) -> (u8, u8, u32) {
         match self {
             Bind::In(v) => value_meta(v),
-            Bind::Out(t) | Bind::InOut(_, t) => out_meta(*t),
+            Bind::Out(t) | Bind::InOut(_, t) => out_meta(t),
+        }
+    }
+
+    /// The object type of this bind (an object OUT type or an object value).
+    pub(crate) fn object_type(&self) -> Option<&str> {
+        match self {
+            Bind::Out(t) | Bind::InOut(_, t) if t.object_type().is_some() => t.object_type(),
+            Bind::In(Value::ObjectBind { type_name, .. }) | Bind::InOut(Value::ObjectBind { type_name, .. }, _) => Some(type_name),
+            _ => None,
         }
     }
 }
+
+/// Type OID and version of each object type bound, by full name.
+pub(crate) type ObjectBindTypes = HashMap<String, (Vec<u8>, u32)>;
 
 fn write_value(w: &mut Writer, ora_type_num: u8, v: Option<&Value>) -> Result<(), String> {
     let Some(v) = v.filter(|v| !matches!(v, Value::Null)) else {
@@ -223,6 +252,9 @@ fn write_value(w: &mut Writer, ora_type_num: u8, v: Option<&Value>) -> Result<()
             w.raw(&[0xFD, 0x01]);
         } else if ora_type_num == ora_type::CURSOR {
             w.raw(&[0x01, 0x00]);
+        } else if ora_type_num == ora_type::OBJECT {
+            // TOID, OID, snapshot, version, image length, flags (top level).
+            w.ub(0).ub(0).ub(0).ub(0).ub(0).ub(u64::from(crate::object::BIND_FLAGS));
         } else {
             w.u8(0);
         }
@@ -278,10 +310,11 @@ fn write_value(w: &mut Writer, ora_type_num: u8, v: Option<&Value>) -> Result<()
             w.bytes_wl(&value::encode_timestamp_tz(d, *off));
         }
         Value::TimestampTzRegionId(..) => return Err("an unresolved time-zone region cannot be bound".into()),
-        // Encoded (with its type) by the PL/SQL bind preparation.
-        Value::ObjectImage { image, .. } => {
-            w.raw(image);
+        // Pickled (with its type) by the bind preparation.
+        Value::ObjectBind { bytes, .. } => {
+            w.raw(bytes);
         }
+        Value::ObjectImage { .. } => return Err("a received object image cannot be bound".into()),
         Value::Object { .. } | Value::Collection { .. } | Value::AssocArray { .. } => {
             return Err("an object value must be bound through a typed argument".into())
         }
@@ -311,6 +344,7 @@ fn merged_meta(rows: &[&[Bind]], i: usize) -> Result<(u8, u8, u32), String> {
     Ok((t, csfrm, max))
 }
 
+#[allow(clippy::too_many_arguments)] // the EXECUTE message's own fields
 /// The EXECUTE request body (after the function header) for a new cursor,
 /// run once per row of `rows` (array DML when there are several).
 fn write_execute(
@@ -321,6 +355,7 @@ fn write_execute(
     kind: Kind,
     rows: &[&[Bind]],
     autocommit: bool,
+    objects: &ObjectBindTypes,
 ) -> Result<(), String> {
     let is_query = kind == Kind::Query;
     let binds: &[Bind] = rows.first().copied().unwrap_or(&[]);
@@ -379,10 +414,20 @@ fn write_execute(
     w.ub(u64::from(exec_flags)); // [9]
     w.ub(0).ub(0).ub(0); // [10..12]
     if num_params > 0 {
-        for &(t, csfrm, size) in &metas {
+        for (i, &(t, csfrm, size)) in metas.iter().enumerate() {
             w.u8(t).u8(BIND_USE_INDICATORS).u8(0).u8(0);
             let cont = if matches!(t, ora_type::CLOB | ora_type::BLOB) { LOB_PREFETCH_FLAG } else { 0 };
-            w.ub(u64::from(size)).ub(0).ub(cont).ub(0).ub(0);
+            w.ub(u64::from(size)).ub(0).ub(cont);
+            match binds[i].object_type() {
+                // An object bind names its type: OID and version.
+                Some(name) => {
+                    let (oid, version) = objects.get(name).ok_or_else(|| format!("object type {name} not loaded"))?;
+                    w.bytes_2l(oid).ub(u64::from(*version));
+                }
+                None => {
+                    w.ub(0).ub(0);
+                }
+            }
             w.ub(if csfrm != 0 { 873 } else { 0 }).u8(csfrm).ub(0);
             if fv >= 8 {
                 w.ub(0);
@@ -415,6 +460,29 @@ fn write_execute(
         }
     }
     Ok(())
+}
+
+fn is_object_value(v: &Value) -> bool {
+    matches!(v, Value::Object { .. } | Value::Collection { .. } | Value::AssocArray { .. })
+}
+
+fn is_unpacked_object(b: &Bind) -> bool {
+    matches!(b, Bind::In(v) | Bind::InOut(v, _) if is_object_value(v))
+}
+
+/// The type of an object IN value: its own, else the IN OUT bind's.
+fn object_value_type(v: &Value, b: &Bind) -> Option<String> {
+    let own = match v {
+        Value::Object { type_name, .. } | Value::Collection { type_name, .. } | Value::AssocArray { type_name, .. } => type_name.clone(),
+        _ => String::new(),
+    };
+    if !own.is_empty() {
+        return Some(own);
+    }
+    match b {
+        Bind::InOut(_, OutType::Object(n)) if !n.is_empty() => Some(n.clone()),
+        _ => None,
+    }
 }
 
 /// Whether a PL/SQL bind must travel as a temporary LOB: a CLOB / BLOB
@@ -649,6 +717,24 @@ fn parse_response(
                     // followed by its actual length.
                     for &i in positions {
                         let (ot, csfrm, _) = binds[i].meta();
+                        if ot == ora_type::OBJECT {
+                            // TOID, OID, snapshot, version, length, flags, image.
+                            for _ in 0..3 {
+                                skip_bytes_with_length(&mut r)?;
+                            }
+                            r.ub2()?;
+                            let n = r.ub4()?;
+                            r.ub2()?;
+                            let v = if n > 0 {
+                                let image = r.bytes()?.unwrap_or_default();
+                                Value::ObjectImage { type_name: binds[i].object_type().unwrap_or_default().to_string(), image }
+                            } else {
+                                Value::Null
+                            };
+                            r.sb()?; // actual length
+                            out.out_values.push(v);
+                            continue;
+                        }
                         if ot == ora_type::CURSOR {
                             r.u8()?; // fixed length
                             let cols = parse_describe(&mut r, fv)?;
@@ -1061,6 +1147,46 @@ impl Conn {
         sink: &mut RowSink<'_>,
     ) -> Result<Executed, OrmError> {
         let plsql = stmt::classify(sql) == Kind::PlSql;
+        // Object / collection IN values are pickled with their types.
+        let packed: Option<Vec<Vec<Bind>>> = if rows.iter().flat_map(|r| r.iter()).any(is_unpacked_object) {
+            let mut all = Vec::with_capacity(rows.len());
+            for row in rows {
+                let mut out = Vec::with_capacity(row.len());
+                for b in row.iter() {
+                    out.push(match b {
+                        Bind::In(v) | Bind::InOut(v, _) if is_object_value(v) => {
+                            let name = object_value_type(v, b).ok_or_else(|| {
+                                OrmError::Query("an object / collection value needs its type (bind it through call() or name the type)".into())
+                            })?;
+                            let bytes = self.pack_bind(&name, v).await?;
+                            let ob = Value::ObjectBind { type_name: name.clone(), bytes };
+                            match b {
+                                Bind::InOut(..) => Bind::InOut(ob, OutType::Object(name)),
+                                _ => Bind::In(ob),
+                            }
+                        }
+                        other => other.clone(),
+                    });
+                }
+                all.push(out);
+            }
+            Some(all)
+        } else {
+            None
+        };
+        let packed_refs: Vec<&[Bind]>;
+        let rows: &[&[Bind]] = match &packed {
+            Some(all) => {
+                packed_refs = all.iter().map(Vec::as_slice).collect();
+                &packed_refs
+            }
+            None => rows,
+        };
+        // Object binds need their types' OID and version.
+        let names: Vec<String> = rows.iter().flat_map(|r| r.iter()).filter_map(|b| b.object_type().map(String::from)).collect();
+        for name in names {
+            self.object_type(&name).await?;
+        }
         let mut temps: Vec<crate::lob::Lob> = Vec::new();
         let lobbed: Option<Vec<Bind>> = match rows {
             [one] if plsql && one.iter().any(needs_temp_lob) => {
@@ -1098,6 +1224,17 @@ impl Conn {
             Ok(mut ex) => {
                 let mut read = Ok(());
                 for v in &mut ex.out {
+                    if let Value::ObjectImage { type_name, image } = v {
+                        let (name, image) = (std::mem::take(type_name), std::mem::take(image));
+                        match self.unpack_object(&name, &image).await {
+                            Ok(decoded) => *v = decoded,
+                            Err(e) => {
+                                read = Err(e);
+                                break;
+                            }
+                        }
+                        continue;
+                    }
                     if matches!(v, Value::TimestampTzRegionId(..)) {
                         if let Err(e) = self.resolve_region(v).await {
                             read = Err(e);
@@ -1123,6 +1260,7 @@ impl Conn {
             }
             Err(e) => Err(e),
         };
+        temps.append(&mut self.call_temp_lobs);
         for lob in temps {
             if matches!(self.lob_free_temp(&lob).await, Err(OrmError::Connection(_))) {
                 break;
@@ -1171,7 +1309,15 @@ impl Conn {
         }
         let mut w = Writer::new();
         self.begin_call(&mut w, func::EXECUTE);
-        write_execute(&mut w, self.field_version, self.max_string_size, sql, kind, rows, autocommit)
+        let mut objects = ObjectBindTypes::new();
+        for b in binds {
+            if let Some(name) = b.object_type() {
+                if let Some(t) = self.types.get(name) {
+                    objects.insert(name.to_string(), (t.oid.clone(), t.version));
+                }
+            }
+        }
+        write_execute(&mut w, self.field_version, self.max_string_size, sql, kind, rows, autocommit, &objects)
             .map_err(OrmError::TypeConversion)?;
         self.send_data(&w.buf).await?;
 
@@ -1517,7 +1663,7 @@ mod tests {
     #[test]
     fn execute_of_a_query_matches_the_golden_bytes() {
         let mut w = header(6);
-        write_execute(&mut w, 24, 32767, "SELECT 1 FROM DUAL", Kind::Query, &[&[]], false).unwrap();
+        write_execute(&mut w, 24, 32767, "SELECT 1 FROM DUAL", Kind::Query, &[&[]], false, &Default::default()).unwrap();
         assert_eq!(
             hex(&w.buf),
             "03 5E 06 00 02 80 61 00 01 01 12 01 01 0D 00 00 00 01 02 04 7F FF FF FF 00 00 00 00 00 00 \
@@ -1530,7 +1676,7 @@ mod tests {
     fn execute_of_plsql_with_out_bind_matches_the_golden_bytes() {
         let mut w = header(7);
         let binds = [Bind::Out(OutType::Number), Bind::In(Value::from(5))];
-        write_execute(&mut w, 24, 32767, "BEGIN :R := F(:A); END;", Kind::PlSql, &[&binds], false).unwrap();
+        write_execute(&mut w, 24, 32767, "BEGIN :R := F(:A); END;", Kind::PlSql, &[&binds], false, &Default::default()).unwrap();
         assert_eq!(
             hex(&w.buf),
             "03 5E 07 00 02 04 29 00 01 01 17 01 01 0D 00 00 00 01 01 04 7F FF FF FF 01 01 02 00 00 00 \

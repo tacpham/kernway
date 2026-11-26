@@ -268,6 +268,10 @@ pub enum OutKind {
     IntervalYm,
     /// Interval in days to seconds.
     IntervalDs,
+    /// An object type, collection or PL/SQL record (Oracle): its type is
+    /// taken from the procedure's declaration; read back as
+    /// [`Value::Object`] / [`Value::Array`].
+    Object,
     /// Character data of any size (a CLOB): no length limit, read back as
     /// [`Value::Text`].
     LongText,
@@ -396,6 +400,11 @@ impl From<Vec<u8>> for Param {
 impl From<&[u8]> for Param {
     fn from(v: &[u8]) -> Self {
         Param::Bytes(v.to_vec())
+    }
+}
+impl From<Vec<Param>> for Param {
+    fn from(v: Vec<Param>) -> Self {
+        Param::Array(v)
     }
 }
 impl<T: Into<Param>> From<Option<T>> for Param {
