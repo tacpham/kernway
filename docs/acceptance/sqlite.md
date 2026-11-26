@@ -5,20 +5,20 @@
 
 | | |
 |---|---|
-| generated | 2026-11-26 23:40 UTC |
-| server | SQLite 3.45.0 |
-| image | bundled with the driver (libsqlite3-sys, compiled from source) |
+| generated | 2026-11-26 23:53 UTC |
+| server | SQLite 3.54.1 |
+| image | vendored in the driver (crates/kernway-orm-sqlite/sqlite, official amalgamation), own C-API binding |
 | container | none (embedded) |
-| driver commit | 26efcd7 on feat/sqlite-full |
+| driver commit | 12d47d0 on feat/sqlite-ffi |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
-| command | `cargo test -p kernway-orm-sqlite  --lib --tests -- --test-threads=1 --nocapture ; CI run 45911917012 (Linux / macOS / Windows)` |
+| command | `cargo test -p kernway-orm-sqlite  --lib --tests -- --test-threads=1 --nocapture ; CI run 45913191570 (Linux / macOS / Windows)` |
 
-## Verdict: implemented features **PASSED** · completeness **42/42** — complete
+## Verdict: implemented features **PASSED** · completeness **47/47** — complete
 
 - *Implemented features* passes only if every test ran and passed (no skips) in this run.
 - *Completeness* counts 🚧 gaps (listed below) against the full feature catalog.
-- Features verified: **42 / 42** (0 not implemented yet, 0 failing; 4 not applicable to SQLite).
-- Tests run: 37 — 37 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
+- Features verified: **47 / 47** (0 not implemented yet, 0 failing; 4 not applicable to SQLite).
+- Tests run: 44 — 44 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
 - A feature is ✅ only when every test listed as its evidence ran and passed in this run.
 
 ## Opening & configuration
@@ -31,8 +31,18 @@
 | WAL journal by default (readers never wait for the writer); other journal modes, extra PRAGMAs on every connection | ✅ PASS | `a_file_database_persists_uses_wal_and_enforces_foreign_keys`<br>`journal_mode_and_pragmas_are_applied_to_every_connection` |
 | Foreign keys enforced by default, can be turned off | ✅ PASS | `a_file_database_persists_uses_wal_and_enforces_foreign_keys` |
 | URL forms (sqlite::memory:, relative, absolute, Windows drive paths) and options (mode, journal_mode, busy_timeout, foreign_keys, synchronous, pool) | ✅ PASS | `config::tests::urls` |
-| Same engine on every OS (bundled SQLite ≥ 3.38, FTS5 compiled in) | ✅ PASS | `the_bundled_engine_is_the_same_everywhere` |
+| Same engine on every OS: the official SQLite 3.54.1 amalgamation vendored and compiled by the driver (FTS5, JSON, session, R-Tree, math functions) | ✅ PASS | `the_bundled_engine_is_the_same_everywhere`<br>`raw::tests::the_compiled_engine_is_the_vendored_one` |
 | Network, authentication, TLS | ➖ N/A | SQLite is an embedded library reading a local file — no server, no login, nothing on the wire |
+
+## Own binding
+
+| Feature | Status | Evidence / note |
+|---|---|---|
+| No third-party SQLite crate: the C API declared by hand, wrapped safely; every unsafe block in the binding with its SAFETY reasoning (source scan) | ✅ PASS | `unsafe_code_lives_only_in_the_binding` |
+| Statements: prepare (one statement per call; a second one refused, comments allowed), bind and read every storage class, step / reset, a per-connection statement cache | ✅ PASS | `raw::tests::prepare_step_bind_and_read_every_storage_class`<br>`raw::tests::errors_carry_extended_codes_and_messages`<br>`sqlite_conforms` |
+| Errors carry SQLite's extended codes and messages; a failed open says why | ✅ PASS | `raw::tests::errors_carry_extended_codes_and_messages`<br>`raw::tests::open_failure_reports_why` |
+| A panic in Rust code SQLite calls (SQL functions, hooks) becomes an SQL error or is contained — never unwinds into C | ✅ PASS | `a_panic_in_rust_code_called_by_sqlite_is_an_sql_error_not_a_crash` |
+| Serialize / deserialize through the C API | ✅ PASS | `raw::tests::serialize_round_trips_through_deserialize`<br>`a_database_serializes_to_bytes_and_opens_from_them` |
 
 ## Concurrency & async
 
@@ -87,7 +97,7 @@
 | Incremental BLOB I/O: a 5 MiB BLOB filled 64 KiB at a time in place, a piece read across chunks; never grows; names are not SQL | ✅ PASS | `incremental_blob_io_reads_and_writes_pieces_in_place` |
 | Change hooks: every inserted / updated / deleted row through any pooled connection, commits and rollbacks | ✅ PASS | `change_hooks_report_every_row_and_transaction_end` |
 | Serialize a whole database to bytes (a valid database file) and open an in-memory copy from bytes (WAL images included) | ✅ PASS | `a_database_serializes_to_bytes_and_opens_from_them` |
-| Native extensions loaded into every connection (a real extension built by the test: .so / .dylib / .dll), named entry points, load failures fail the open; SQL's own load_extension() stays refused | ✅ PASS | `a_native_extension_is_loaded_into_every_connection`<br>`a_named_entry_point_and_load_failures` |
+| Native extensions loaded into every connection (a real C extension against sqlite3ext.h, built by the test: .so / .dylib / .dll), named entry points, load failures fail the open; SQL's own load_extension() stays refused | ✅ PASS | `a_native_extension_is_loaded_into_every_connection`<br>`a_named_entry_point_and_load_failures` |
 | Change capture (session extension): a transaction's changes as a changeset, replayed on another database, only tracked tables, nothing from before / after | ✅ PASS | `a_transaction_recorded_on_one_database_replays_on_another` |
 | Changesets inverted to undo; patchsets (smaller, not invertible); concatenated into their net effect | ✅ PASS | `the_inverse_undoes_the_transaction`<br>`patchsets_are_smaller_and_changesets_concatenate` |
 | Applying with conflicts: abort (nothing applied), skip, replace — conflicts counted | ✅ PASS | `conflicts_abort_skip_or_replace` |
@@ -109,6 +119,11 @@
 | `config::tests::setup_skips_writes_when_read_only` | PASS | yes |
 | `config::tests::two_memory_databases_are_distinct` | PASS | yes |
 | `config::tests::urls` | PASS | yes |
+| `raw::tests::errors_carry_extended_codes_and_messages` | PASS | yes |
+| `raw::tests::open_failure_reports_why` | PASS | yes |
+| `raw::tests::prepare_step_bind_and_read_every_storage_class` | PASS | yes |
+| `raw::tests::serialize_round_trips_through_deserialize` | PASS | yes |
+| `raw::tests::the_compiled_engine_is_the_vendored_one` | PASS | yes |
 | `a_failed_or_abandoned_transaction_records_nothing_later` | PASS | yes |
 | `a_transaction_recorded_on_one_database_replays_on_another` | PASS | yes |
 | `conflicts_abort_skip_or_replace` | PASS | yes |
@@ -121,6 +136,7 @@
 | `a_database_serializes_to_bytes_and_opens_from_them` | PASS | yes |
 | `a_file_database_persists_uses_wal_and_enforces_foreign_keys` | PASS | yes |
 | `a_long_query_does_not_stall_the_reactor` | PASS | yes |
+| `a_panic_in_rust_code_called_by_sqlite_is_an_sql_error_not_a_crash` | PASS | yes |
 | `an_in_memory_database_is_shared_by_the_pool_and_private_to_its_driver` | PASS | yes |
 | `change_hooks_report_every_row_and_transaction_end` | PASS | yes |
 | `cursors_and_streams_never_hold_the_whole_result` | PASS | yes |
@@ -139,8 +155,9 @@
 | `unique_violations_name_the_column` | PASS | yes |
 | `values_are_typed_by_the_declared_column_type` | PASS | yes |
 | `waiting_for_a_lock_queues_without_stalling_and_times_out_cleanly` | PASS | yes |
-| `ci::service_backed_tests_Redis,_Meilisearch,_network` | PASS | no |
+| `unsafe_code_lives_only_in_the_binding` | PASS | yes |
+| `ci::test_macos_latest` | PASS | yes |
 | `ci::test_windows_latest` | PASS | yes |
 | `ci::test_ubuntu_latest` | PASS | yes |
-| `ci::test_macos_latest` | PASS | yes |
+| `ci::service_backed_tests_Redis,_Meilisearch,_network` | PASS | no |
 
