@@ -728,3 +728,44 @@ fn repeated_statements_reuse_their_parsed_cursor() {
         assert_eq!(db.query_scalar("SELECT COUNT(*) FROM kwo_sc", &[]).await.unwrap(), Value::Int(50));
     });
 }
+
+#[test]
+fn proxy_authentication_connects_on_behalf_of_another_user() {
+    let Some(url) = url() else { return eprintln!("skip: KERNWAY_ORACLE_HOST not set") };
+    run(async move {
+        let pw = std::env::var("KERNWAY_ORACLE_SYSTEM_PASSWORD").unwrap_or_else(|_| "oracle_pw".into());
+        let sys = OracleDriver::connect_with(
+            kernway_orm_oracle::OracleConfig::from_url(&url.replacen("kernway:kernway_pw", &format!("system:{pw}"), 1)).unwrap(),
+            1,
+        )
+        .await
+        .unwrap();
+        sys.execute_script(
+            "BEGIN
+               FOR u IN (SELECT 1 FROM dba_users WHERE username = 'KW_TARGET') LOOP EXECUTE IMMEDIATE 'DROP USER kw_target CASCADE'; END LOOP;
+             END;
+             /
+             CREATE USER kw_target IDENTIFIED BY \"Target#pw1\"
+             /
+             GRANT CREATE SESSION TO kw_target
+             /
+             ALTER USER kw_target GRANT CONNECT THROUGH kernway
+             /",
+        )
+        .await
+        .unwrap();
+        // kernway's own password, acting as kw_target.
+        let proxied = url.replacen("kernway:kernway_pw", "kernway[kw_target]:kernway_pw", 1);
+        let db = OracleDriver::connect_with(kernway_orm_oracle::OracleConfig::from_url(&proxied).unwrap(), 1).await.unwrap();
+        let r = db.query("SELECT USER, SYS_CONTEXT('USERENV', 'PROXY_USER') FROM dual", &[]).await.unwrap();
+        assert_eq!(r.rows[0], vec![Value::Text("KW_TARGET".into()), Value::Text("KERNWAY".into())]);
+        // The same through the option form.
+        let opt = format!("{url}?proxy-user=kw_target");
+        let db = OracleDriver::connect_with(kernway_orm_oracle::OracleConfig::from_url(&opt).unwrap(), 1).await.unwrap();
+        assert_eq!(db.query_scalar("SELECT USER FROM dual", &[]).await.unwrap(), Value::Text("KW_TARGET".into()));
+        // Without the grant the server refuses it.
+        sys.execute("ALTER USER kw_target REVOKE CONNECT THROUGH kernway").await.unwrap();
+        let e = OracleDriver::connect_with(kernway_orm_oracle::OracleConfig::from_url(&proxied).unwrap(), 1).await.err().expect("refused");
+        assert!(e.to_string().contains("ORA-"), "{e}");
+    });
+}

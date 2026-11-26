@@ -92,6 +92,19 @@ pub struct OracleConfig {
     pub ssl_mode: SslMode,
     /// PEM file with the CA(s) to trust (URL: `?ssl-ca=`); `None` = Mozilla's roots.
     pub ssl_ca: Option<std::path::PathBuf>,
+    /// Proxy authentication: connect as [`user`](Self::user) (with its
+    /// password) on behalf of this user (URL: `oracle://user[target]:pw@…` or
+    /// `?proxy-user=target`). The target must allow it:
+    /// `ALTER USER target GRANT CONNECT THROUGH user`.
+    pub proxy_user: Option<String>,
+    /// PEM client certificate for TCPS servers that require one
+    /// (`SSL_CLIENT_AUTHENTICATION = TRUE`; URL: `?ssl-cert=`). Needs
+    /// [`ssl_key`](Self::ssl_key).
+    pub ssl_cert: Option<std::path::PathBuf>,
+    /// PEM private key of [`ssl_cert`](Self::ssl_cert) (URL: `?ssl-key=`).
+    /// A PEM wallet holding both (`ewallet.pem`) is given once as
+    /// `?wallet=<file>`.
+    pub ssl_key: Option<std::path::PathBuf>,
 }
 
 /// TCPS policy, named like MySQL's `--ssl-mode` for consistency.
@@ -128,6 +141,12 @@ impl OracleConfig {
             .ok_or_else(|| conn_err("Oracle URL must start with oracle://"))?;
         let (creds, hostpart) = rest.rsplit_once('@').ok_or_else(|| conn_err("Oracle URL needs user@host"))?;
         let (user, password) = creds.split_once(':').unwrap_or((creds, ""));
+        // `user[target]`: proxy authentication.
+        let (user, mut proxy_user) = match user.split_once('[') {
+            Some((u, rest)) => (u, Some(rest.trim_end_matches(']').to_string())),
+            None => (user, None),
+        };
+        let (mut ssl_cert, mut ssl_key) = (None, None);
         let (hostpart, options) = hostpart.split_once('?').unwrap_or((hostpart, ""));
         let mut ssl_mode = SslMode::default();
         let mut ssl_ca = None;
@@ -136,6 +155,13 @@ impl OracleConfig {
             match k.to_ascii_lowercase().replace('_', "-").as_str() {
                 "ssl-mode" | "sslmode" => ssl_mode = SslMode::parse(v)?,
                 "ssl-ca" => ssl_ca = Some(std::path::PathBuf::from(v)),
+                "ssl-cert" => ssl_cert = Some(std::path::PathBuf::from(v)),
+                "ssl-key" => ssl_key = Some(std::path::PathBuf::from(v)),
+                "wallet" => {
+                    ssl_cert = Some(std::path::PathBuf::from(v));
+                    ssl_key = Some(std::path::PathBuf::from(v));
+                }
+                "proxy-user" => proxy_user = Some(v.to_string()),
                 other => return Err(conn_err(format!("unknown Oracle URL option '{other}'"))),
             }
         }
@@ -154,6 +180,9 @@ impl OracleConfig {
             password: password.to_string(),
             ssl_mode,
             ssl_ca,
+            proxy_user: proxy_user.filter(|p| !p.is_empty()),
+            ssl_cert,
+            ssl_key,
         })
     }
 
@@ -255,7 +284,22 @@ impl Conn {
                 SslMode::VerifyCa => kernway_tls::CertCheck::CaOnly,
                 _ => kernway_tls::CertCheck::None,
             };
-            let tls = kernway_tls::client_config(ca.as_deref(), check).map_err(|e| conn_err(format!("TLS config: {e}")))?;
+            let identity = match (&cfg.ssl_cert, &cfg.ssl_key) {
+                (Some(c), Some(k)) => {
+                    let read = |p: std::path::PathBuf| async move {
+                        kernway_wire::offload::read_file(&p).await.map_err(|e| conn_err(format!("read {}: {e}", p.display())))
+                    };
+                    Some((read(c.clone()).await?, read(k.clone()).await?))
+                }
+                (None, None) => None,
+                _ => return Err(conn_err("ssl-cert and ssl-key must be given together (or wallet=)")),
+            };
+            let tls = kernway_tls::client_config_with_identity(
+                ca.as_deref(),
+                check,
+                identity.as_ref().map(|(c, k)| kernway_tls::ClientIdentity { cert_pem: c, key_pem: k }),
+            )
+            .map_err(|e| conn_err(format!("TLS config: {e}")))?;
             io.upgrade_tls(tls.clone(), &cfg.host)
                 .await
                 .map_err(|e| conn_err(format!("TLS handshake with {}: {e}", cfg.host)))?;
@@ -511,7 +555,11 @@ impl Conn {
         .ok_or_else(|| conn_err("auth: blocking-pool worker panicked"))?
         .map_err(conn_err)?;
 
-        let mut phase_two: Vec<(&str, String, u32)> = vec![("AUTH_SESSKEY", proof.sesskey.clone(), 1)];
+        let mut phase_two: Vec<(&str, String, u32)> = Vec::new();
+        if let Some(target) = &cfg.proxy_user {
+            phase_two.push(("PROXY_CLIENT_NAME", target.clone(), 0));
+        }
+        phase_two.push(("AUTH_SESSKEY", proof.sesskey.clone(), 1));
         if let Some(speedy) = &proof.speedy_key {
             phase_two.push(("AUTH_PBKDF2_SPEEDY_KEY", speedy.clone(), 0));
         }

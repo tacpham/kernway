@@ -3,7 +3,8 @@
 Connection & security | Login with user / password (O5LOGON, 11g and 12c verifiers) | logs_in_with_user_and_password, auth_crypto::tests::verifier_11g_matches_the_reference_vectors, auth_crypto::tests::verifier_12c_matches_the_reference_vectors, auth_crypto::tests::cbc_padding_always_adds_a_block_on_exact_multiples
 Connection & security | TCPS (TLS) with each certificate check, incl. listener TLS renegotiation | tcps_connections_with_each_certificate_check
 Connection & security | Native network encryption (SQLNET.ENCRYPTION) | GAP: use TCPS
-Connection & security | Wallet / Kerberos / proxy authentication | GAP: user/password only
+Connection & security | Proxy authentication (user[target] / ?proxy-user=): the server reports USER = target, PROXY_USER = the connecting user; refused without the grant | proxy_authentication_connects_on_behalf_of_another_user
+Connection & security | Kerberos authentication | GAP: not in thin mode (python-oracledb thin lacks it too)
 
 Protocol & encoding | NUMBER / DATE / TIMESTAMP / BINARY_DOUBLE encodings checked against the server's own bytes | server_checks::number_encoding_matches_the_servers_own_bytes, server_checks::dates_timestamps_and_floats_compare_equal_on_the_server
 Protocol & encoding | Queries with binds; fetches in rounds | select_with_binds_and_types, many_rows_are_fetched_in_rounds
