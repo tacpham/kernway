@@ -48,6 +48,7 @@ mod lob;
 mod object;
 mod stmt;
 mod tns;
+mod tpc;
 mod value;
 #[cfg(test)]
 mod server_checks;
@@ -57,4 +58,5 @@ pub use dialect::OracleDialect;
 pub use driver::{OracleDriver, OracleRepository, OracleScrollable, OracleTx};
 pub use pool::OracleConnect;
 pub use exec::{Bind, Column, Executed, OpenCursor, OutType, Scroll, ScrollCursor};
+pub use tpc::{TpcBegin, Xid};
 pub use value::{DateTime, ResultSet, Value};

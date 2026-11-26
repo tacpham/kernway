@@ -248,6 +248,8 @@ pub struct Conn {
     pub(crate) call_temp_lobs: Vec<crate::lob::Lob>,
     /// Parsed cursors kept open for re-execution, by SQL text.
     pub(crate) stmt_cache: kernway_wire::StmtCache<crate::exec::CachedStmt>,
+    /// Context of the two-phase-commit branch this session is attached to.
+    pub(crate) tpc_context: Option<Vec<u8>>,
 }
 
 /// Map a parse error to the driver's error type.
@@ -323,6 +325,7 @@ impl Conn {
             types: Default::default(),
             call_temp_lobs: Vec::new(),
             stmt_cache: kernway_wire::StmtCache::new(crate::exec::STMT_CACHE_SIZE),
+            tpc_context: None,
         };
         conn.negotiate().await?;
         conn.authenticate(cfg).await?;
