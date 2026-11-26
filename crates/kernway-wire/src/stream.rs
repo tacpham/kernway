@@ -16,6 +16,9 @@ pub const READ_RETAIN: usize = 256 * 1024;
 
 enum Socket {
     Plain(AsyncTcpStream),
+    /// A local Unix-domain socket (never upgraded to TLS).
+    #[cfg(unix)]
+    Unix(rt_net::AsyncUnixStream),
     Tls(Box<AsyncTlsStream>),
     /// Transient, only while the plaintext socket is handed to the TLS handshake.
     Upgrading,
@@ -49,6 +52,31 @@ impl BufStream {
         }
     }
 
+    /// Wrap a connected Unix-domain socket.
+    #[cfg(unix)]
+    pub fn new_unix(sock: rt_net::AsyncUnixStream) -> Self {
+        Self {
+            socket: Socket::Unix(sock),
+            rbuf: vec![0; READ_CHUNK],
+            rpos: 0,
+            rlen: 0,
+            wbuf: Vec::with_capacity(READ_CHUNK),
+        }
+    }
+
+    /// Whether this is a local Unix-domain socket.
+    #[inline]
+    pub fn is_unix(&self) -> bool {
+        #[cfg(unix)]
+        {
+            matches!(self.socket, Socket::Unix(_))
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
     /// Whether the session is encrypted.
     #[inline]
     pub fn is_tls(&self) -> bool {
@@ -77,6 +105,8 @@ impl BufStream {
             let got = match &mut self.socket {
                 Socket::Plain(s) => s.read(&mut self.rbuf[self.rlen..]).await?,
                 Socket::Tls(s) => s.read(&mut self.rbuf[self.rlen..]).await?,
+                #[cfg(unix)]
+                Socket::Unix(s) => s.read(&mut self.rbuf[self.rlen..]).await?,
                 Socket::Upgrading => return Err(lost()),
             };
             if got == 0 {
@@ -136,12 +166,21 @@ impl BufStream {
         &mut self.wbuf
     }
 
+    /// The write buffer **without** clearing it: frames appended here go out
+    /// together with the next [`flush`](Self::flush) (pipelined commands).
+    #[inline]
+    pub fn write_buf_append(&mut self) -> &mut Vec<u8> {
+        &mut self.wbuf
+    }
+
     /// Send the write buffer's contents. A buffer grown by a large frame is
     /// dropped afterwards rather than kept per connection.
     pub async fn flush(&mut self) -> io::Result<()> {
         let result = match &mut self.socket {
             Socket::Plain(s) => s.write_all(&self.wbuf).await,
             Socket::Tls(s) => s.write_all(&self.wbuf).await,
+            #[cfg(unix)]
+            Socket::Unix(s) => s.write_all(&self.wbuf).await,
             Socket::Upgrading => Err(lost()),
         };
         if self.wbuf.capacity() > READ_RETAIN {

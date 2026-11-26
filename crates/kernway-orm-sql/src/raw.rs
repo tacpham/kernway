@@ -135,6 +135,45 @@ impl Value {
     }
 }
 
+/// A server-side cursor opened by [`SqlConn::cursor_open`](crate::SqlConn::cursor_open):
+/// the result stays on the database server and is fetched in batches, and
+/// the connection is free for other statements between fetches (update rows
+/// while walking a large result in the same transaction).
+#[derive(Debug)]
+pub struct ServerCursor {
+    id: u64,
+    columns: Vec<String>,
+    done: bool,
+}
+
+impl ServerCursor {
+    /// A cursor known to its backend as `id` (backends create these).
+    pub fn new(id: u64, columns: Vec<String>) -> Self {
+        Self { id, columns, done: false }
+    }
+
+    /// The backend's id for this cursor.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Column names of the result, in select order.
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+
+    /// Whether the last row has been fetched (the backend has released the
+    /// cursor).
+    pub fn is_done(&self) -> bool {
+        self.done
+    }
+
+    /// Mark the cursor exhausted (backends call this after the last row).
+    pub fn finish(&mut self) {
+        self.done = true;
+    }
+}
+
 /// A result set: column names and rows of typed values.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Rows {
@@ -153,6 +192,21 @@ impl Rows {
     /// Row `row`'s value in column `name`.
     pub fn get(&self, row: usize, name: &str) -> Option<&Value> {
         self.rows.get(row)?.get(self.index_of(name)?)
+    }
+
+    /// Read every row into any `serde` type: a struct takes columns by name
+    /// (case-insensitively; a field without a column reads as NULL), a tuple
+    /// by position, a plain type from a single column. Each value converts to
+    /// its field's type — a `DECIMAL` sum into `i64`, `f64` or `String`, a
+    /// `0`/`1` into `bool` — so a projection reads alike on every database.
+    pub fn to_structs<R: DeserializeOwned>(&self) -> Result<Vec<R>, OrmError> {
+        self.rows
+            .iter()
+            .map(|row| {
+                R::deserialize(crate::value_de::RowDe { columns: &self.columns, row })
+                    .map_err(|e| OrmError::TypeConversion(e.to_string()))
+            })
+            .collect()
     }
 
     /// Map every row onto `T`, matching columns to `T`'s fields **by name**:

@@ -4,7 +4,7 @@
 //! `Err`.
 
 use crate::engine;
-use crate::raw::{CallArg, CallResult, Outcome, Rows, Value};
+use crate::raw::{CallArg, CallResult, Outcome, Rows, ServerCursor, Value};
 use crate::{Param, SqlConn, SqlConnect};
 use kernway_orm_core::{
     entity::Entity,
@@ -66,6 +66,31 @@ impl<C: SqlConnect> SqlTx<C> {
         F: FnMut(Vec<Value>) -> Result<(), OrmError>,
     {
         self.conn()?.query_each(sql, params, each).await
+    }
+
+    /// Open a server-side cursor inside the transaction: fetch its rows in
+    /// batches with [`fetch`](Self::fetch) and run other statements on the
+    /// transaction in between.
+    pub async fn open_cursor(&self, sql: &str, params: &[Param]) -> Result<ServerCursor, OrmError> {
+        self.conn()?.cursor_open(sql, params).await
+    }
+
+    /// The next batch of up to `max_rows` rows of `cursor`; `None` once every
+    /// row has been fetched.
+    pub async fn fetch(&self, cursor: &mut ServerCursor, max_rows: usize) -> Result<Option<Rows>, OrmError> {
+        if cursor.is_done() {
+            return Ok(None);
+        }
+        let rows = self.conn()?.cursor_fetch(cursor, max_rows).await?;
+        if rows.is_empty() && cursor.is_done() {
+            return Ok(None);
+        }
+        Ok(Some(Rows { columns: cursor.columns().to_vec(), rows }))
+    }
+
+    /// Release a cursor before its end.
+    pub async fn close_cursor(&self, cursor: ServerCursor) -> Result<(), OrmError> {
+        self.conn()?.cursor_close(cursor).await
     }
 
     /// Call a stored function inside the transaction.

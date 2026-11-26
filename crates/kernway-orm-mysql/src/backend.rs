@@ -3,10 +3,10 @@
 //! controls transactions. Everything else (CRUD SQL, the query builder,
 //! repositories, transactions) is shared with the other backends.
 
-use crate::protocol::{BindValue, Cell, ColMeta, Conn, Fetched, QueryResult};
+use crate::protocol::{BindValue, Cell, ColMeta, Conn, Fetched, Pipelined, QueryResult};
 use crate::MySqlDialect;
 use kernway_orm_core::{decode::cells_to_entity, entity::Entity, error::OrmError, SqlDialect};
-use kernway_orm_sql::{CallArg, CallResult, OutKind, Outcome, Param, Rows, SqlConn, Value};
+use kernway_orm_sql::{CallArg, CallResult, OutKind, Outcome, Param, Rows, ServerCursor, SqlConn, Value};
 use serde::de::DeserializeOwned;
 
 static DIALECT: MySqlDialect = MySqlDialect;
@@ -181,7 +181,60 @@ fn first_u64(cells: &[Cell<'_>]) -> Result<u64, OrmError> {
     Ok(cells.first().and_then(Cell::to_text).and_then(|t| t.parse().ok()).unwrap_or(0))
 }
 
+/// Savepoint guarding a pipelined `execute_many` inside a caller's transaction.
+const BATCH_SAVEPOINT: &str = "kernway_execute_many";
+
 impl Conn {
+    /// Close every cursor still open (at the end of a transaction).
+    async fn close_all_cursors(&mut self) -> Result<(), OrmError> {
+        let open: Vec<_> = self.cursors.drain().map(|(_, c)| c).collect();
+        for c in open {
+            self.stmt_cursor_close(c).await?;
+        }
+        Ok(())
+    }
+
+    /// Undo a pipelined batch: back to the savepoint (caller's transaction)
+    /// or roll back the batch's own transaction.
+    async fn undo_batch(&mut self, own_tx: bool) -> Result<(), OrmError> {
+        if own_tx {
+            self.query("ROLLBACK").await?;
+        } else {
+            self.query(&format!("ROLLBACK TO SAVEPOINT {BATCH_SAVEPOINT}")).await?;
+        }
+        Ok(())
+    }
+
+    /// Keep a pipelined batch: commit its own transaction or release the
+    /// savepoint.
+    async fn keep_batch(&mut self, own_tx: bool) -> Result<(), OrmError> {
+        if own_tx {
+            self.query("COMMIT").await?;
+        } else {
+            self.query(&format!("RELEASE SAVEPOINT {BATCH_SAVEPOINT}")).await?;
+        }
+        Ok(())
+    }
+
+    async fn start_batch(&mut self, own_tx: bool) -> Result<(), OrmError> {
+        if own_tx {
+            self.query("START TRANSACTION").await?;
+        } else {
+            self.query(&format!("SAVEPOINT {BATCH_SAVEPOINT}")).await?;
+        }
+        Ok(())
+    }
+
+    /// `execute_many` statement by statement (statements with a result set,
+    /// or after the server dropped the prepared statement).
+    async fn execute_each_row(&mut self, sql: &str, rows: &[Vec<Param>]) -> Result<u64, OrmError> {
+        let mut total = 0;
+        for row in rows {
+            total += SqlConn::execute(self, sql, row).await?;
+        }
+        Ok(total)
+    }
+
     /// Run `sql` (text protocol without parameters, prepared with them).
     async fn run(&mut self, sql: &str, params: &[Param]) -> Result<QueryResult, OrmError> {
         if params.is_empty() {
@@ -321,11 +374,131 @@ impl SqlConn for Conn {
     }
 
     async fn commit(&mut self) -> Result<(), OrmError> {
+        self.close_all_cursors().await?;
         self.query("COMMIT").await.map(|_| ())
     }
 
     async fn rollback(&mut self) -> Result<(), OrmError> {
+        self.close_all_cursors().await?;
         self.query("ROLLBACK").await.map(|_| ())
+    }
+
+    /// Pipelined: the executes of up to 500 rows are written in one go and
+    /// their replies read after, so a batch costs one round trip per 500
+    /// rows. The outcome is the same as running the rows one by one: if row
+    /// *k* fails, rows before it stay applied and the rest do not (the batch
+    /// runs under its own transaction or a savepoint; after a failure it is
+    /// rolled back and rows before *k* are run again).
+    async fn execute_many(&mut self, sql: &str, rows: &[Vec<Param>]) -> Result<u64, OrmError> {
+        match rows {
+            [] => return Ok(0),
+            [one] => return SqlConn::execute(self, sql, one).await,
+            _ => {}
+        }
+        if !self.prepare_for_batch(sql).await? {
+            return self.execute_each_row(sql, rows).await;
+        }
+        let bound: Vec<Vec<BindValue>> = rows.iter().map(|r| binds(r)).collect();
+        let own_tx = !self.in_transaction();
+        self.start_batch(own_tx).await?;
+        let first = match self.execute_pipelined(sql, &bound).await {
+            Ok(p) => p,
+            Err(e) => {
+                if !matches!(e, OrmError::Connection(_)) {
+                    self.undo_batch(own_tx).await?;
+                    if !own_tx {
+                        self.keep_batch(false).await?; // release the savepoint
+                    }
+                }
+                return Err(e);
+            }
+        };
+        match first {
+            Pipelined::Done(n) => {
+                self.keep_batch(own_tx).await?;
+                Ok(n)
+            }
+            Pipelined::Stale => {
+                self.undo_batch(own_tx).await?;
+                if !own_tx {
+                    self.keep_batch(false).await?;
+                }
+                self.execute_each_row(sql, rows).await
+            }
+            Pipelined::Failed { index, error, .. } => {
+                self.undo_batch(own_tx).await?;
+                if index > 0 {
+                    if own_tx {
+                        self.start_batch(true).await?;
+                    }
+                    match self.execute_pipelined(sql, &bound[..index]).await? {
+                        Pipelined::Done(_) => {}
+                        Pipelined::Failed { error, .. } => {
+                            self.undo_batch(own_tx).await?;
+                            if !own_tx {
+                                self.keep_batch(false).await?;
+                            }
+                            return Err(error);
+                        }
+                        Pipelined::Stale => {
+                            self.undo_batch(own_tx).await?;
+                            if !own_tx {
+                                self.keep_batch(false).await?;
+                            }
+                            self.execute_each_row(sql, &rows[..index]).await?;
+                            return Err(error);
+                        }
+                    }
+                }
+                self.keep_batch(own_tx).await?;
+                Err(error)
+            }
+        }
+    }
+
+    /// `COM_STMT_EXECUTE` with a read-only cursor: the server keeps the
+    /// result; each fetch is a `COM_STMT_FETCH`.
+    async fn cursor_open(&mut self, sql: &str, params: &[Param]) -> Result<ServerCursor, OrmError> {
+        let state = self
+            .stmt_cursor_open(sql, &binds(params))
+            .await?
+            .ok_or_else(|| OrmError::Query("cursor_open: the statement returns no rows".into()))?;
+        let id = self.next_cursor;
+        self.next_cursor += 1;
+        let columns = state.metas().iter().map(|m| m.name.clone()).collect();
+        self.cursors.insert(id, state);
+        Ok(ServerCursor::new(id, columns))
+    }
+
+    async fn cursor_fetch(&mut self, cursor: &mut ServerCursor, max_rows: usize) -> Result<Vec<Vec<Value>>, OrmError> {
+        if cursor.is_done() {
+            return Ok(Vec::new());
+        }
+        let mut state = self
+            .cursors
+            .remove(&cursor.id())
+            .ok_or_else(|| OrmError::Query("cursor is closed (its transaction ended)".into()))?;
+        let mut rows = Vec::new();
+        let n = u32::try_from(max_rows).unwrap_or(u32::MAX);
+        let r = self
+            .stmt_cursor_fetch(&mut state, n, |metas, cells| {
+                rows.push(row_values(metas, cells)?);
+                Ok(())
+            })
+            .await;
+        if state.is_done() {
+            cursor.finish();
+        } else {
+            self.cursors.insert(cursor.id(), state);
+        }
+        r.map(|()| rows)
+    }
+
+    async fn cursor_close(&mut self, cursor: ServerCursor) -> Result<(), OrmError> {
+        match self.cursors.remove(&cursor.id()) {
+            Some(state) => self.stmt_cursor_close(state).await,
+            None => Ok(()),
+        }
     }
 }
 

@@ -56,7 +56,9 @@ pub use pool::MySqlConnect;
 pub use protocol::{BindValue, Cell, Conn, Fetched, MysqlConfig, QueryResult};
 /// The shared SQL types used with this driver: parameters, typed values, results.
 #[cfg(feature = "mysql")]
-pub use kernway_orm_sql::{params, CallArg, CallResult, OutKind, Outcome, Param, Rows, SqlDb, Value};
+pub use kernway_orm_sql::{
+    col, params, Agg, CallArg, CallResult, Cmp, Col, DbCursor, OutKind, Outcome, Param, Rows, Select, ServerCursor, SqlDb, Value,
+};
 /// The MySQL query builder (the shared SQL query builder over MySQL connections).
 #[cfg(feature = "mysql")]
 pub type MySqlQueryBuilder<T> = kernway_orm_sql::SqlQueryBuilder<T, pool::MySqlConnect>;

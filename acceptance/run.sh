@@ -66,6 +66,9 @@ SQL
     export KERNWAY_MYSQL_CERTS="$WORK/certs"
     VERSION="MySQL $(docker exec "$C" mysql -uroot -p"$RPW" -N -e 'SELECT VERSION()' 2>/dev/null)"
     CRATE=kernway-orm-mysql; FEATURES=(--features mysql); TITLE=MySQL
+    # Unix-socket tests need the server's socket file: they run inside the
+    # MySQL container (see in_container_tests), not on the host.
+    SKIP=(--skip unix_socket_)
     ;;
   oracle)
     C="${ORACLE_CONTAINER:-kernway-oracle}"
@@ -82,16 +85,43 @@ SQL
     VERSION="$(docker exec "$C" bash -c "echo 'SET HEADING OFF
 SET LINESIZE 400
 SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1521/FREEPDB1" | tr -s ' \n' ' ' | sed 's/^ //; s/ $//')"
-    CRATE=kernway-orm-oracle; FEATURES=(); TITLE=Oracle
+    CRATE=kernway-orm-oracle; FEATURES=(); TITLE=Oracle; SKIP=()
     ;;
   *) echo "unknown database: $DB (mysql | oracle)" >&2; exit 2 ;;
 esac
 
-CMD="cargo test -p $CRATE ${FEATURES[*]+${FEATURES[*]}} --lib --tests -- --test-threads=1 --nocapture"
+CMD="cargo test -p $CRATE ${FEATURES[*]+${FEATURES[*]}} --lib --tests -- --test-threads=1 --nocapture ${SKIP[*]+${SKIP[*]}}"
 log "running: $CMD"
-( cd "$ROOT" && cargo test -p "$CRATE" ${FEATURES[@]+"${FEATURES[@]}"} --lib --tests -- --test-threads=1 --nocapture ) > "$WORK/test.log" 2>&1 || true
+( cd "$ROOT" && cargo test -p "$CRATE" ${FEATURES[@]+"${FEATURES[@]}"} --lib --tests -- --test-threads=1 --nocapture ${SKIP[@]+"${SKIP[@]}"} ) > "$WORK/test.log" 2>&1 || true
 if ! grep -q "^test result:" "$WORK/test.log"; then
   log "cargo test did not run any test binary:"; tail -20 "$WORK/test.log" >&2
+fi
+
+# Tests that must run next to the server (its Unix socket): build a static
+# Linux test binary in a Rust container (cached volumes), copy it into the
+# database container and run it there. Their results join the same log; if
+# the build fails they are reported as not run.
+in_container_tests() { # test target, name filter, env...
+  local target="$1" filter="$2"; shift 2
+  log "building $target for Linux (rust:1-alpine) to run inside $C"
+  local exe
+  exe="$(docker run --rm -v "$ROOT":/src:ro -v kernway-acc-cargo:/usr/local/cargo/registry \
+      -v kernway-acc-target:/target -e CARGO_TARGET_DIR=/target -w /src rust:1-alpine sh -c \
+      "apk add --no-cache musl-dev >/dev/null && cargo test --locked -p $CRATE ${FEATURES[*]+${FEATURES[*]}} --test $target --no-run --message-format short 2>&1" \
+      | sed -n 's/.*Executable .*(\(.*\)).*/\1/p' | tail -1)"
+  if [ -z "$exe" ]; then log "in-container build failed: $target tests not run"; return; fi
+  docker run --rm -v kernway-acc-target:/target rust:1-alpine cat "$exe" > "$WORK/$target-linux"
+  chmod +x "$WORK/$target-linux"
+  docker cp "$WORK/$target-linux" "$C:/tmp/kernway-$target"
+  local envs=(); for e in "$@"; do envs+=(-e "$e"); done
+  log "running $target $filter inside $C"
+  docker exec "${envs[@]}" "$C" "/tmp/kernway-$target" "$filter" --test-threads=1 --nocapture >> "$WORK/test.log" 2>&1 || true
+  docker exec "$C" rm -f "/tmp/kernway-$target"
+}
+if [ "$DB" = mysql ]; then
+  in_container_tests connection unix_socket_ \
+    KERNWAY_MYSQL_SOCKET=/var/run/mysqld/mysqld.sock KERNWAY_MYSQL_ROOT_PASSWORD="$RPW"
+  CMD="$CMD; unix_socket_* inside $C"
 fi
 
 python3 - "$WORK/meta.json" <<PY

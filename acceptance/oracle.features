@@ -28,11 +28,13 @@ Types | Object types / XMLType / BFILE / nested CURSOR columns refused cleanly (
 Types | Object types / XMLType / BFILE / nested CURSOR columns decoded | GAP: refused with OrmError::Unsupported (planned: phase 3)
 Types | TIMESTAMP WITH TIME ZONE in a named region | GAP: refused with a clear message; use TO_CHAR / SYS_EXTRACT_UTC
 
-ORM (shared layer) | Shared conformance suite (CRUD, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL) | oracle_conforms
-ORM (shared layer) | Query builder aggregates / GROUP BY / JOIN | GAP: use hand-written SQL (query_as) for now
+ORM (shared layer) | Shared conformance suite (CRUD, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL, joins/aggregates, execute_many failure semantics) | oracle_conforms
+ORM (shared layer) | Select builder: INNER / LEFT JOIN, WHERE on any joined entity, GROUP BY, COUNT/COUNT DISTINCT/SUM/AVG/MIN/MAX, HAVING, ORDER BY, OFFSET/FETCH, counting groups, entity pairs from a join | oracle_conforms
+ORM (shared layer) | Results into any struct / tuple by column name (no entity needed), per-field conversion | oracle_conforms
 
 Hand-written SQL | Streaming large results (150k rows); callback errors close the cursor | large_results_stream_and_a_callback_error_stops_cleanly
-Hand-written SQL | Array DML (execute_many, 20k rows in one round trip; all-or-nothing in a transaction) | array_dml_runs_many_rows_in_one_call
+Hand-written SQL | Array DML (execute_many, 20k rows in one round trip; same outcome as row by row on a failure part-way) | array_dml_runs_many_rows_in_one_call, oracle_conforms
+Hand-written SQL | Server-side cursor API (open / fetch batches / close, statements in between) | GAP: reports Unsupported (MySQL has it; planned with the Oracle phases)
 
 PL/SQL | Anonymous blocks, procedures and functions with IN / OUT / IN OUT binds | plsql_blocks_procedures_and_functions
 PL/SQL | call(): OUT / IN OUT, REF CURSOR OUT, implicit results (DBMS_SQL.RETURN_RESULT), DBMS_OUTPUT (~700 KB) | procedure_calls_return_out_values_cursors_implicit_results_and_output

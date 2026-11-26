@@ -29,14 +29,18 @@ mod param;
 mod query;
 mod raw;
 mod repository;
+mod select;
 mod transaction;
+mod value_de;
 
 pub use db::SqlDb;
-pub use raw::{CallArg, CallResult, OutKind, Outcome, Rows, Value};
+pub use db::DbCursor;
+pub use raw::{CallArg, CallResult, OutKind, Outcome, Rows, ServerCursor, Value};
 
 pub use param::{column_for_field, filter_param, id_to_params, is_auto_pk, is_new_auto_entity, json_to_param, pk_cols, Param};
 pub use query::SqlQueryBuilder;
 pub use repository::SqlRepository;
+pub use select::{col, Agg, Cmp, Col, RowSource, Select};
 pub use transaction::{run_transaction, SqlTx};
 
 use kernway_orm_core::{driver::DriverCapabilities, entity::Entity, error::OrmError, SqlDialect};
@@ -116,6 +120,29 @@ pub trait SqlConn {
             }
             Ok(total)
         }
+    }
+
+    /// Open a server-side cursor over a query: nothing is fetched yet.
+    fn cursor_open(&mut self, sql: &str, params: &[Param]) -> impl Future<Output = Result<ServerCursor, OrmError>> {
+        let _ = (sql, params);
+        async { Err(OrmError::Unsupported("server-side cursors".into())) }
+    }
+
+    /// Fetch up to `max_rows` rows of `cursor`; after the last one the
+    /// backend releases it and marks it [done](ServerCursor::is_done).
+    fn cursor_fetch(
+        &mut self,
+        cursor: &mut ServerCursor,
+        max_rows: usize,
+    ) -> impl Future<Output = Result<Vec<Vec<Value>>, OrmError>> {
+        let _ = (cursor, max_rows);
+        async { Err(OrmError::Unsupported("server-side cursors".into())) }
+    }
+
+    /// Release a cursor before its end.
+    fn cursor_close(&mut self, cursor: ServerCursor) -> impl Future<Output = Result<(), OrmError>> {
+        let _ = cursor;
+        async { Ok(()) }
     }
 
     /// Run any statement with bound parameters and collect its result set.

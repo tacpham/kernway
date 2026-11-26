@@ -1121,6 +1121,7 @@ dependencies = [
 name = "kernway-orm-mysql"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "kernway-orm-core",
  "kernway-orm-macro",
  "kernway-orm-sql",

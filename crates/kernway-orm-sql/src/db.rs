@@ -1,7 +1,7 @@
 //! [`SqlDb`]: the pooled database handle every SQL driver is built on.
 
 use crate::engine;
-use crate::raw::{CallArg, CallResult, OutKind, Outcome, Rows, Value};
+use crate::raw::{CallArg, CallResult, OutKind, Outcome, Rows, ServerCursor, Value};
 use crate::{run_transaction, Param, SqlConn, SqlConnect, SqlRepository, SqlTx};
 use kernway_orm_core::{
     driver::{Driver, DriverCapabilities},
@@ -106,6 +106,16 @@ impl<C: SqlConnect> SqlDb<C> {
         Ok(rows.rows.into_iter().next().and_then(|r| r.into_iter().next()).unwrap_or(Value::Null))
     }
 
+    /// Open a server-side cursor over a query on a connection of its own:
+    /// fetch the rows in batches with [`DbCursor::next_batch`]. Within a
+    /// transaction, use [`SqlTx::open_cursor`] to interleave other statements.
+    pub async fn cursor(&self, sql: &str, params: &[Param]) -> Result<DbCursor<C>, OrmError> {
+        let mut g = self.pool.acquire().await?;
+        let r = g.cursor_open(sql, params).await;
+        let cursor = settle(&mut g, r)?;
+        Ok(DbCursor { conn: Some(g), cursor: Some(cursor) })
+    }
+
     /// Run a statement and stream its rows to `each` without collecting them.
     pub async fn query_each<F>(&self, sql: &str, params: &[Param], each: F) -> Result<Outcome, OrmError>
     where
@@ -174,5 +184,59 @@ impl<C: SqlConnect> TransactionalDriver for SqlDb<C> {
         R: 'a,
     {
         Box::pin(run_transaction(Rc::clone(&self.pool), work))
+    }
+}
+
+/// A server-side cursor holding its pooled connection (see [`SqlDb::cursor`]).
+/// Dropped before its end, the connection is discarded rather than pooled
+/// (the server frees the cursor with it); [`close`](Self::close) releases it
+/// cleanly instead.
+pub struct DbCursor<C: SqlConnect> {
+    conn: Option<Pooled<C>>,
+    cursor: Option<ServerCursor>,
+}
+
+impl<C: SqlConnect> DbCursor<C> {
+    /// Column names of the result.
+    pub fn columns(&self) -> &[String] {
+        self.cursor.as_ref().map_or(&[], ServerCursor::columns)
+    }
+
+    /// The next batch of up to `max_rows` rows; `None` once every row has
+    /// been fetched (the connection then goes back to the pool).
+    pub async fn next_batch(&mut self, max_rows: usize) -> Result<Option<Rows>, OrmError> {
+        let (Some(g), Some(cursor)) = (self.conn.as_mut(), self.cursor.as_mut()) else {
+            return Ok(None);
+        };
+        let r = g.cursor_fetch(cursor, max_rows).await;
+        let rows = settle(g, r)?;
+        let columns = cursor.columns().to_vec();
+        if cursor.is_done() {
+            self.cursor = None;
+            self.conn = None; // back to the pool
+        }
+        if rows.is_empty() && self.cursor.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(Rows { columns, rows }))
+    }
+
+    /// Release the cursor and return the connection to the pool.
+    pub async fn close(mut self) -> Result<(), OrmError> {
+        if let (Some(mut g), Some(cursor)) = (self.conn.take(), self.cursor.take()) {
+            let r = g.cursor_close(cursor).await;
+            settle(&mut g, r)?;
+        }
+        Ok(())
+    }
+}
+
+impl<C: SqlConnect> Drop for DbCursor<C> {
+    fn drop(&mut self) {
+        if self.cursor.is_some() {
+            if let Some(g) = self.conn.as_mut() {
+                g.poison();
+            }
+        }
     }
 }

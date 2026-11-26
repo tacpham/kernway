@@ -13,10 +13,116 @@ use std::rc::Rc;
 
 /// A piece of a predicate.
 #[derive(Clone)]
-enum Frag {
+pub(crate) enum Frag {
     Raw(&'static str),
     Ident(&'static str),
     Param(Param),
+}
+
+/// Render a [`Spec`] over entity `U`'s fields into fragments, each column
+/// prefixed with `qual` (`""`, or a table alias such as `"t1."`). An unknown
+/// field records an error in `error` and renders as `1 = 0`.
+pub(crate) fn spec_frags<U: Entity>(spec: &Spec, qual: &'static str, out: &mut Vec<Frag>, error: &mut Option<OrmError>) {
+    let mut cmp = |f: &str, op: &'static str, v: &str, out: &mut Vec<Frag>| {
+        if qcol::<U>(f, qual, out, error) {
+            out.extend([Frag::Raw(op), Frag::Param(filter_param::<U>(f, v))]);
+        }
+    };
+    match spec {
+        Spec::Eq(f, v) => cmp(f, " = ", v, out),
+        Spec::Ne(f, v) => cmp(f, " <> ", v, out),
+        Spec::Gt(f, v) => cmp(f, " > ", v, out),
+        Spec::Lt(f, v) => cmp(f, " < ", v, out),
+        Spec::Gte(f, v) => cmp(f, " >= ", v, out),
+        Spec::Lte(f, v) => cmp(f, " <= ", v, out),
+        Spec::Like(f, v) => {
+            if qcol::<U>(f, qual, out, error) {
+                out.extend([Frag::Raw(" LIKE "), Frag::Param(Param::Str(v.clone()))]);
+            }
+        }
+        Spec::In(_, vs) if vs.is_empty() => out.push(Frag::Raw("1 = 0")),
+        Spec::In(f, vs) => {
+            if qcol::<U>(f, qual, out, error) {
+                out.push(Frag::Raw(" IN ("));
+                for (i, v) in vs.iter().enumerate() {
+                    if i > 0 {
+                        out.push(Frag::Raw(", "));
+                    }
+                    out.push(Frag::Param(filter_param::<U>(f, v)));
+                }
+                out.push(Frag::Raw(")"));
+            }
+        }
+        Spec::Between(f, lo, hi) => {
+            if qcol::<U>(f, qual, out, error) {
+                out.extend([
+                    Frag::Raw(" BETWEEN "),
+                    Frag::Param(filter_param::<U>(f, lo)),
+                    Frag::Raw(" AND "),
+                    Frag::Param(filter_param::<U>(f, hi)),
+                ]);
+            }
+        }
+        Spec::IsNull(f) => {
+            if qcol::<U>(f, qual, out, error) {
+                out.push(Frag::Raw(" IS NULL"));
+            }
+        }
+        Spec::IsNotNull(f) => {
+            if qcol::<U>(f, qual, out, error) {
+                out.push(Frag::Raw(" IS NOT NULL"));
+            }
+        }
+        Spec::And(a, b) | Spec::Or(a, b) => {
+            let op = if matches!(spec, Spec::And(..)) { " AND " } else { " OR " };
+            out.push(Frag::Raw("("));
+            spec_frags::<U>(a, qual, out, error);
+            out.push(Frag::Raw(op));
+            spec_frags::<U>(b, qual, out, error);
+            out.push(Frag::Raw(")"));
+        }
+        Spec::Not(inner) => {
+            out.push(Frag::Raw("NOT ("));
+            spec_frags::<U>(inner, qual, out, error);
+            out.push(Frag::Raw(")"));
+        }
+    }
+}
+
+/// Push `qual` + the quoted column of `U`'s field `f`; an unknown field
+/// records an error and pushes `1 = 0` instead (returns false).
+fn qcol<U: Entity>(f: &str, qual: &'static str, out: &mut Vec<Frag>, error: &mut Option<OrmError>) -> bool {
+    match column_for_field::<U>(f) {
+        Some(c) => {
+            if !qual.is_empty() {
+                out.push(Frag::Raw(qual));
+            }
+            out.push(Frag::Ident(c.name));
+            true
+        }
+        None => {
+            error.get_or_insert_with(|| OrmError::Query(format!("unknown field '{f}' for entity '{}'", U::table_name())));
+            out.push(Frag::Raw("1 = 0"));
+            false
+        }
+    }
+}
+
+/// Append predicate fragments to a statement.
+pub(crate) fn push_frags(q: &mut Sql, frags: &[Frag]) {
+    for f in frags {
+        match f {
+            Frag::Raw(s) => {
+                q.push(s);
+            }
+            Frag::Ident(n) => {
+                q.ident(n);
+            }
+            Frag::Param(p) => {
+                q.param(p.clone());
+            }
+        }
+    }
 }
 
 /// The query builder over a pool of `C` connections.
@@ -61,84 +167,13 @@ where
 
     /// Render a [`Spec`] into fragments; unknown fields record an error.
     fn spec_frags(&mut self, spec: &Spec, out: &mut Vec<Frag>) {
-        let cmp = |this: &mut Self, f: &str, op: &'static str, v: &str, out: &mut Vec<Frag>| match this.resolve(f) {
-            Some(col) => out.extend([Frag::Ident(col), Frag::Raw(op), Frag::Param(filter_param::<T>(f, v))]),
-            None => out.push(Frag::Raw("1 = 0")),
-        };
-        match spec {
-            Spec::Eq(f, v) => cmp(self, f, " = ", v, out),
-            Spec::Ne(f, v) => cmp(self, f, " <> ", v, out),
-            Spec::Gt(f, v) => cmp(self, f, " > ", v, out),
-            Spec::Lt(f, v) => cmp(self, f, " < ", v, out),
-            Spec::Gte(f, v) => cmp(self, f, " >= ", v, out),
-            Spec::Lte(f, v) => cmp(self, f, " <= ", v, out),
-            Spec::Like(f, v) => match self.resolve(f) {
-                Some(col) => out.extend([Frag::Ident(col), Frag::Raw(" LIKE "), Frag::Param(Param::Str(v.clone()))]),
-                None => out.push(Frag::Raw("1 = 0")),
-            },
-            Spec::In(f, vs) => match self.resolve(f) {
-                Some(col) if !vs.is_empty() => {
-                    out.extend([Frag::Ident(col), Frag::Raw(" IN (")]);
-                    for (i, v) in vs.iter().enumerate() {
-                        if i > 0 {
-                            out.push(Frag::Raw(", "));
-                        }
-                        out.push(Frag::Param(filter_param::<T>(f, v)));
-                    }
-                    out.push(Frag::Raw(")"));
-                }
-                _ => out.push(Frag::Raw("1 = 0")),
-            },
-            Spec::Between(f, lo, hi) => match self.resolve(f) {
-                Some(col) => out.extend([
-                    Frag::Ident(col),
-                    Frag::Raw(" BETWEEN "),
-                    Frag::Param(filter_param::<T>(f, lo)),
-                    Frag::Raw(" AND "),
-                    Frag::Param(filter_param::<T>(f, hi)),
-                ]),
-                None => out.push(Frag::Raw("1 = 0")),
-            },
-            Spec::IsNull(f) => match self.resolve(f) {
-                Some(col) => out.extend([Frag::Ident(col), Frag::Raw(" IS NULL")]),
-                None => out.push(Frag::Raw("1 = 0")),
-            },
-            Spec::IsNotNull(f) => match self.resolve(f) {
-                Some(col) => out.extend([Frag::Ident(col), Frag::Raw(" IS NOT NULL")]),
-                None => out.push(Frag::Raw("1 = 0")),
-            },
-            Spec::And(a, b) | Spec::Or(a, b) => {
-                let op = if matches!(spec, Spec::And(..)) { " AND " } else { " OR " };
-                out.push(Frag::Raw("("));
-                self.spec_frags(a, out);
-                out.push(Frag::Raw(op));
-                self.spec_frags(b, out);
-                out.push(Frag::Raw(")"));
-            }
-            Spec::Not(s) => {
-                out.push(Frag::Raw("NOT ("));
-                self.spec_frags(s, out);
-                out.push(Frag::Raw(")"));
-            }
-        }
+        spec_frags::<T>(spec, "", out, &mut self.error);
     }
 
     fn where_into(&self, q: &mut Sql) {
         for (i, pred) in self.predicates.iter().enumerate() {
             q.push(if i == 0 { " WHERE " } else { " AND " });
-            for f in pred {
-                match f {
-                    Frag::Raw(s) => {
-                        q.push(s);
-                    }
-                    Frag::Ident(n) => {
-                        q.ident(n);
-                    }
-                    Frag::Param(p) => {
-                        q.param(p.clone());
-                    }
-                }
-            }
+            push_frags(q, pred);
         }
     }
 

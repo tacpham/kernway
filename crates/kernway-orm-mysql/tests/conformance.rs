@@ -1,5 +1,6 @@
 //! The shared SQL conformance suite against a live MySQL
 //! (`KERNWAY_MYSQL_URL`, a scratch database).
+#![cfg(feature = "mysql")]
 
 use kernway_orm_core::{error::OrmError, SqlDialect};
 use kernway_orm_mysql::{MySqlDialect, MySqlDriver};

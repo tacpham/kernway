@@ -24,6 +24,8 @@ kernway-tls = { workspace = true, optional = true }
 kernway-wire = { workspace = true, optional = true }
 # The shared SQL ORM layer: CRUD engine, query builder, repositories, transactions.
 kernway-orm-sql = { workspace = true, optional = true }
+# zlib for the compressed protocol (`compress=true`); pure-Rust miniz_oxide backend.
+flate2 = { workspace = true, optional = true }
 rt-core = { path = "../rt-core", optional = true }
 rt-net  = { path = "../rt-net", optional = true }
 
@@ -31,7 +33,7 @@ rt-net  = { path = "../rt-net", optional = true }
 default = []
 # Enable to compile the actual MySQL driver. Without it the crate still exports
 # `MySqlDialect` for shared SQL generation.
-mysql = ["sha1", "sha2", "kernway-tls", "kernway-wire", "kernway-orm-sql", "rt-core", "rt-net"]
+mysql = ["flate2", "sha1", "sha2", "kernway-tls", "kernway-wire", "kernway-orm-sql", "rt-core", "rt-net"]
 
 [dev-dependencies]
 # The shared SQL conformance suite this backend must pass.

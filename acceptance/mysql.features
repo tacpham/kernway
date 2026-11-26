@@ -11,8 +11,9 @@ Connection & security | TLS ssl-mode disabled / preferred / required / verify_ca
 Connection & security | Mutual TLS (client certificate, REQUIRE X509) | mutual_tls_presents_the_client_certificate
 Connection & security | Connection URL parsing | protocol::tests::url_parsing
 Connection & security | Auth scrambles (native SHA-1, caching_sha2 SHA-256) match the reference construction | protocol::tests::native_scramble_shape, protocol::tests::sha256_scramble_matches_the_reference_construction
-Connection & security | Unix-domain socket connections | GAP: TCP only
-Connection & security | Compressed protocol (CLIENT_COMPRESS / zstd) | GAP: not implemented
+Connection & security | Unix-domain socket connections (run inside the MySQL container; server sees a socket client; caching_sha2 full auth over the socket; TLS-requiring ssl-mode refused) | unix_socket_connects_through_the_server_socket_file, unix_socket_carries_a_caching_sha2_full_authentication, unix_socket_refuses_an_ssl_mode_that_requires_tls
+Connection & security | Compressed protocol (zlib): server reports Compression=ON; >16 MiB values, TLS, binary/text, streaming, pipelining, cursors over it; the wire carries far fewer bytes | compressed_protocol_is_negotiated_and_carries_every_kind_of_traffic, compression_shrinks_what_crosses_the_wire
+Connection & security | zstd compression algorithm | N/A: the client picks the algorithm; zlib is offered by every MySQL / MariaDB server
 
 Protocol | Prepared statements cached per connection; re-prepared after server reset / DDL | protocol::tests::a_cached_statement_runs_in_one_round_trip_and_survives_a_server_reset, protocol::tests::a_full_statement_cache_evicts_and_closes_the_oldest
 Protocol | Binary protocol decodes numbers natively | protocol::tests::binary_cells_keep_numbers_as_numbers
@@ -20,24 +21,25 @@ Protocol | Values over 16 MiB (packet splitting / reassembly) | writes_small_med
 Protocol | Packet framing: length-encoded ints / strings, OK / ERR / EOF status flags, text rows with NULL | protocol::tests::lenenc_int_widths, protocol::tests::lenenc_str_reads_payload, protocol::tests::ok_and_err_packets, protocol::tests::status_flags_are_read_from_ok_and_eof_packets, protocol::tests::text_row_handles_null_and_values
 Protocol | Multi-result responses read to the end; errors never desync the connection | call_returns_every_result_set_then_the_call_status, an_error_inside_a_procedure_leaves_the_connection_usable, a_row_that_fails_to_decode_does_not_desync_the_connection
 Protocol | Injection safety: values always bound, stacked statements refused | prepared_binds_special_values, scripts_run_several_statements_but_ordinary_calls_never_stack, protocol::tests::escape_blocks_injection
-Protocol | Server-side cursors (COM_STMT_FETCH) | GAP: rows are streamed client-side instead (query_each)
+Protocol | Server-side cursors (COM_STMT_FETCH): batches on demand, other statements in between, closed with the transaction | server_side_cursor_fetches_on_demand_and_leaves_the_connection_usable, mysql_conforms
 
 Types | Every column type typed correctly and identical over text and binary protocols (ints incl. unsigned 64-bit, FLOAT/DOUBLE, DECIMAL, DATE/DATETIME/TIMESTAMP/TIME with fractions, YEAR, CHAR/VARCHAR/TEXT, BINARY/VARBINARY/BLOB, JSON, BIT, ENUM/SET, GEOMETRY, BOOLEAN) | every_column_type_decodes_to_its_typed_value_on_both_protocols
 Types | Bound parameters of every kind (i64 min, u64 max, floats, bytes, NULL, decimals and datetimes as text) | bound_parameters_round_trip_every_kind, prepared_binds_special_values
 Types | LONGTEXT / LONGBLOB 0 B – 20 MiB byte-exact, over TLS and plaintext | large_text_and_binary_round_trip_over_tls_and_plaintext, writes_small_medium_and_large_values_byte_exact
 
-ORM (shared layer) | Shared conformance suite (CRUD, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL) | mysql_conforms
+ORM (shared layer) | Shared conformance suite (CRUD, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL, joins/aggregates, execute_many failure semantics, server cursors) | mysql_conforms
 ORM (shared layer) | CRUD repository; DDL from entities; row -> entity decoding | crud_roundtrip, mysql_conforms, value::tests::create_table_is_mysql_flavoured, value::tests::row_roundtrips_into_entity
 ORM (shared layer) | Batch insert with generated keys | batch_insert_select_delete
 ORM (shared layer) | Transactions: commit, rollback on error | transaction_commit_with_row_lock, transaction_rolls_back_on_error
 ORM (shared layer) | SELECT … FOR UPDATE under concurrency (no lost update) | concurrent_for_update_no_lost_update
-ORM (shared layer) | Query builder aggregates / GROUP BY / JOIN | GAP: use hand-written SQL (query_as) for now
+ORM (shared layer) | Select builder: INNER / LEFT JOIN, WHERE on any joined entity, GROUP BY, COUNT/COUNT DISTINCT/SUM/AVG/MIN/MAX, HAVING, ORDER BY, LIMIT, counting groups, entity pairs from a join | mysql_conforms
+ORM (shared layer) | Results into any struct / tuple by column name (no entity needed), per-field conversion | mysql_conforms, value_de::tests::structs_match_columns_by_name_and_convert_per_field, value_de::tests::tuples_take_values_by_position_and_single_columns_read_directly, value_de::tests::a_value_that_does_not_fit_is_an_error
 
 Hand-written SQL | Any query with bound params; joins, GROUP BY, CTE, window functions mapped onto an entity by name | joins_and_aggregates_map_onto_an_entity_by_column_name
 Hand-written SQL | Streaming large results (200k rows) without collecting; callback errors stop cleanly | large_results_stream_without_being_collected
 Hand-written SQL | Raw SQL inside transactions (commit / rollback) | raw_sql_inside_a_transaction_commits_or_rolls_back_with_it
 Hand-written SQL | execute_many (one statement per row) | mysql_conforms
-Hand-written SQL | execute_many as a single multi-row round trip | GAP: runs row by row on MySQL
+Hand-written SQL | execute_many pipelined (1200 rows in a handful of round trips, counted on the wire), same outcome as row by row on a failure part-way | execute_many_is_pipelined_into_a_few_round_trips, mysql_conforms
 
 Stored programs | CALL: every result set + call status; procedure names never SQL | call_returns_every_result_set_then_the_call_status, protocol::tests::call_sql_quotes_identifiers_and_refuses_anything_else
 Stored programs | CALL with OUT / INOUT arguments, typed | typed_call_maps_results_by_name_and_returns_out_arguments

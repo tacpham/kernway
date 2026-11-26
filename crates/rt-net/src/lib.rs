@@ -34,6 +34,8 @@ pub mod mesh;
 pub mod shard;
 pub mod stream;
 pub mod sys;
+#[cfg(unix)]
+pub mod unix;
 
 pub use listener::AsyncTcpListener;
 pub use mesh::CoreMesh;
@@ -42,4 +44,6 @@ pub use shard::{
     shard_thread_count, ShardConfig, DEFAULT_DRAIN_TIMEOUT,
 };
 pub use stream::AsyncTcpStream;
+#[cfg(unix)]
+pub use unix::AsyncUnixStream;
 pub use sys::{balances_reuseport, supports_reuseport};

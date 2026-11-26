@@ -59,6 +59,11 @@ const SERVER_PS_OUT_PARAMS: u16 = 0x1000;
 /// Client capability: may answer `LOAD DATA LOCAL INFILE` requests (only
 /// ever with data the caller handed to [`Conn::load_local_infile`]).
 const CLIENT_LOCAL_FILES: u32 = 0x0000_0080;
+/// Compressed protocol (zlib), switched on after authentication.
+const CLIENT_COMPRESS: u32 = 0x0000_0020;
+/// Payloads shorter than this travel uncompressed inside a compressed frame,
+/// as the official client does.
+const MIN_COMPRESS_LENGTH: usize = 50;
 /// Packet size for `LOAD DATA LOCAL INFILE` data.
 const LOCAL_INFILE_CHUNK: usize = 1 << 20;
 
@@ -101,6 +106,16 @@ pub struct MysqlConfig {
     /// Off by default, as in the official client: over plaintext the key
     /// itself could be swapped by a man in the middle.
     pub get_server_public_key: bool,
+    /// Connect through this Unix-domain socket file instead of TCP (URL:
+    /// `?socket=/var/run/mysqld/mysqld.sock`). The socket is local, so it is
+    /// trusted like TLS: no TLS is negotiated over it (an `ssl-mode` that
+    /// requires TLS is refused) and `caching_sha2_password` full
+    /// authentication sends the password as the official client does.
+    pub socket: Option<std::path::PathBuf>,
+    /// Use the compressed protocol (zlib) when the server offers it (URL:
+    /// `?compress=true`). Worth it for large results over slow links; it
+    /// costs CPU on both sides.
+    pub compress: bool,
 }
 
 /// TLS policy, with the same names and meaning as the official client's
@@ -181,6 +196,9 @@ impl MysqlConfig {
         let mut ssl_ca = None;
         let (mut ssl_cert, mut ssl_key, mut server_public_key) = (None, None, None);
         let mut get_server_public_key = false;
+        let mut socket = None;
+        let mut compress = false;
+        let flag = |v: &str| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes");
         for pair in options.split('&').filter(|p| !p.is_empty()) {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
             match key.to_ascii_lowercase().replace('_', "-").as_str() {
@@ -189,9 +207,9 @@ impl MysqlConfig {
                 "ssl-cert" => ssl_cert = Some(std::path::PathBuf::from(value)),
                 "ssl-key" => ssl_key = Some(std::path::PathBuf::from(value)),
                 "server-public-key" => server_public_key = Some(std::path::PathBuf::from(value)),
-                "get-server-public-key" => {
-                    get_server_public_key = matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes")
-                }
+                "get-server-public-key" => get_server_public_key = flag(value),
+                "socket" => socket = Some(std::path::PathBuf::from(value)),
+                "compress" => compress = flag(value),
                 other => return Err(conn_err(format!("unknown MySQL URL option '{other}'"))),
             }
         }
@@ -224,6 +242,8 @@ impl MysqlConfig {
             ssl_key,
             server_public_key,
             get_server_public_key,
+            socket,
+            compress,
         })
     }
 }
@@ -310,6 +330,8 @@ const ER_NEED_REPREPARE: u16 = 1615;
 struct Stmt {
     id: u32,
     num_params: u16,
+    /// Columns of its result set (0 for DML).
+    num_columns: u16,
 }
 
 /// A live, authenticated MySQL connection over the per-core async reactor.
@@ -324,7 +346,48 @@ pub struct Conn {
     /// Data for the `LOAD DATA LOCAL INFILE` request of the statement in
     /// flight (see [`Conn::load_local_infile`]); `None` refuses any request.
     local_data: Option<Vec<u8>>,
+    /// The compressed-protocol layer, once negotiated.
+    z: Option<Box<Compressed>>,
+    /// Server status flags of the last OK / EOF packet (`SERVER_STATUS_*`).
+    status: u16,
+    /// Open server-side cursors by id (`SqlConn::cursor_open`).
+    pub(crate) cursors: std::collections::HashMap<u64, CursorState>,
+    pub(crate) next_cursor: u64,
 }
+
+/// Compressed protocol state: decompressed bytes not yet consumed by the
+/// packet reader, and the compressed-frame sequence id.
+#[derive(Default)]
+struct Compressed {
+    inb: Vec<u8>,
+    pos: usize,
+    seq: u8,
+    /// Plain frames waiting to be compressed into the socket's write buffer.
+    out: Vec<u8>,
+}
+
+impl Compressed {
+    fn avail(&self) -> usize {
+        self.inb.len() - self.pos
+    }
+
+    /// Drop consumed bytes (and memory a large frame made the buffer grow).
+    fn compact(&mut self) {
+        if self.pos == self.inb.len() {
+            self.inb.clear();
+            self.pos = 0;
+            if self.inb.capacity() > READ_RETAIN {
+                self.inb = Vec::new();
+            }
+        } else if self.pos > 0 {
+            self.inb.drain(..self.pos);
+            self.pos = 0;
+        }
+    }
+}
+
+/// Server status flag: a transaction is open.
+const SERVER_STATUS_IN_TRANS: u16 = 0x0001;
 
 impl Conn {
     /// Connect, authenticate, and select the default database if one was given.
@@ -332,6 +395,9 @@ impl Conn {
         // DNS resolution is blocking, but happens once per connection; for an IP
         // literal it is a parse. (A future refinement: resolve on the blocking
         // pool for slow DNS.)
+        if let Some(path) = &cfg.socket {
+            return Self::connect_unix(cfg, path).await;
+        }
         let addr = (cfg.host.as_str(), cfg.port)
             .to_socket_addrs()
             .map_err(|e| conn_err(format!("resolve {}:{} failed: {e}", cfg.host, cfg.port)))?
@@ -340,20 +406,118 @@ impl Conn {
         let stream = AsyncTcpStream::connect(addr)
             .await
             .map_err(|e| conn_err(format!("connect {}:{} failed: {e}", cfg.host, cfg.port)))?;
-        let mut conn = Self {
-            io: BufStream::new(stream),
-            seq: 0,
-            big: Vec::new(),
-            stmts: StmtCache::new(STMT_CACHE_CAP),
-            local_data: None,
-        };
+        let mut conn = Self::over(BufStream::new(stream));
         conn.handshake(cfg).await?;
         Ok(conn)
     }
 
+    #[cfg(unix)]
+    async fn connect_unix(cfg: &MysqlConfig, path: &std::path::Path) -> Result<Self, OrmError> {
+        if cfg.ssl_mode.requires_tls() {
+            return Err(conn_err(format!(
+                "ssl-mode={:?} over a Unix socket: the socket is local and is not encrypted; \
+                 use ssl-mode=preferred or disabled with socket=",
+                cfg.ssl_mode
+            )));
+        }
+        let sock = rt_net::AsyncUnixStream::connect(path)
+            .await
+            .map_err(|e| conn_err(format!("connect {} failed: {e}", path.display())))?;
+        let mut conn = Self::over(BufStream::new_unix(sock));
+        conn.handshake(cfg).await?;
+        Ok(conn)
+    }
+
+    #[cfg(not(unix))]
+    async fn connect_unix(_: &MysqlConfig, _: &std::path::Path) -> Result<Self, OrmError> {
+        Err(OrmError::Unsupported("Unix-domain sockets on this platform".into()))
+    }
+
+    fn over(io: BufStream) -> Self {
+        Self {
+            io,
+            seq: 0,
+            big: Vec::new(),
+            stmts: StmtCache::new(STMT_CACHE_CAP),
+            local_data: None,
+            z: None,
+            status: 0,
+            cursors: std::collections::HashMap::new(),
+            next_cursor: 1,
+        }
+    }
+
+    /// Whether the session uses the compressed protocol.
+    pub fn is_compressed(&self) -> bool {
+        self.z.is_some()
+    }
+
+    /// Whether the connection runs over a Unix-domain socket.
+    pub fn is_unix_socket(&self) -> bool {
+        self.io.is_unix()
+    }
+
+    /// Whether the server reported an open transaction in its last reply.
+    pub fn in_transaction(&self) -> bool {
+        self.status & SERVER_STATUS_IN_TRANS != 0
+    }
+
+    /// Each command starts a fresh sequence (and compressed sequence).
+    fn start_command(&mut self) {
+        self.seq = 0;
+        if let Some(z) = &mut self.z {
+            z.seq = 0;
+        }
+    }
+
     /// Make at least `n` unconsumed bytes available in the read buffer.
     async fn fill(&mut self, n: usize) -> Result<(), OrmError> {
-        self.io.fill(n).await.map_err(|e| conn_err(format!("read: {e}")))
+        let Some(z) = self.z.as_deref_mut() else {
+            return self.io.fill(n).await.map_err(|e| conn_err(format!("read: {e}")));
+        };
+        if z.avail() >= n {
+            return Ok(());
+        }
+        z.compact();
+        while z.avail() < n {
+            // Compressed frame: 3-byte compressed length, sequence id, 3-byte
+            // uncompressed length (0 = sent as is), then the payload.
+            self.io.fill(7).await.map_err(|e| conn_err(format!("read: {e}")))?;
+            let h = self.io.take(7);
+            let clen = (h[0] as usize) | (h[1] as usize) << 8 | (h[2] as usize) << 16;
+            let ulen = (h[4] as usize) | (h[5] as usize) << 8 | (h[6] as usize) << 16;
+            z.seq = h[3].wrapping_add(1);
+            self.io.fill(clen).await.map_err(|e| conn_err(format!("read: {e}")))?;
+            let body = self.io.take(clen);
+            if ulen == 0 {
+                z.inb.extend_from_slice(body);
+            } else {
+                let start = z.inb.len();
+                z.inb.reserve(ulen);
+                let mut dec = flate2::read::ZlibDecoder::new(body);
+                std::io::Read::read_to_end(&mut dec, &mut z.inb)
+                    .map_err(|e| conn_err(format!("decompress: {e}")))?;
+                if z.inb.len() - start != ulen {
+                    return Err(conn_err(format!(
+                        "compressed frame inflated to {} bytes, header said {ulen}",
+                        z.inb.len() - start
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Consume the next `n` buffered bytes (after [`fill`](Self::fill)).
+    fn take(&mut self, n: usize) -> &[u8] {
+        match self.z.as_deref_mut() {
+            Some(z) => {
+                let start = z.pos;
+                z.pos += n;
+                &z.inb[start..start + n]
+            }
+            None => self.io.take(n),
+        }
     }
 
     // --- Packet framing ---------------------------------------------------
@@ -362,6 +526,11 @@ impl Conn {
     /// back memory a large packet made it (or the assembly area) grow.
     fn release_drained(&mut self) {
         self.io.release_drained();
+        if let Some(z) = self.z.as_deref_mut() {
+            if z.pos == z.inb.len() {
+                z.compact();
+            }
+        }
         if self.big.capacity() > READ_RETAIN {
             self.big = Vec::new();
         }
@@ -375,12 +544,19 @@ impl Conn {
         let mut len = self.take_header();
         if len < 0xFF_FFFF {
             self.fill(len).await?;
-            return Ok(self.io.take(len));
+            return Ok(self.take(len));
         }
         self.big.clear();
         loop {
             self.fill(len).await?;
-            self.big.extend_from_slice(self.io.take(len));
+            let chunk = match self.z.as_deref_mut() {
+                Some(z) => {
+                    z.pos += len;
+                    &z.inb[z.pos - len..z.pos]
+                }
+                None => self.io.take(len),
+            };
+            self.big.extend_from_slice(chunk);
             if len < 0xFF_FFFF {
                 return Ok(&self.big);
             }
@@ -392,7 +568,7 @@ impl Conn {
     /// Consume a 4-byte packet header: returns the payload length and advances
     /// the sequence id.
     fn take_header(&mut self) -> usize {
-        let h = self.io.take(4);
+        let h = self.take(4);
         let len = (h[0] as usize) | (h[1] as usize) << 8 | (h[2] as usize) << 16;
         self.seq = h[3].wrapping_add(1);
         len
@@ -415,9 +591,20 @@ impl Conn {
         loop {
             let len = rest.len().min(0xFF_FFFF);
             let seq = self.seq;
-            let frame = self.io.write_buf();
-            frame.extend_from_slice(&[len as u8, (len >> 8) as u8, (len >> 16) as u8, seq]);
-            frame.extend_from_slice(&rest[..len]);
+            let header = [len as u8, (len >> 8) as u8, (len >> 16) as u8, seq];
+            match self.z.as_deref_mut() {
+                None => {
+                    let frame = self.io.write_buf();
+                    frame.extend_from_slice(&header);
+                    frame.extend_from_slice(&rest[..len]);
+                }
+                Some(z) => {
+                    z.out.clear();
+                    z.out.extend_from_slice(&header);
+                    z.out.extend_from_slice(&rest[..len]);
+                    compress_frames(z, self.io.write_buf())?;
+                }
+            }
             self.seq = self.seq.wrapping_add(1);
             self.io
                 .flush()
@@ -446,9 +633,13 @@ impl Conn {
                 cfg.ssl_mode
             )));
         }
-        let use_tls = cfg.ssl_mode != SslMode::Disabled && server_tls;
+        let use_tls = cfg.ssl_mode != SslMode::Disabled && server_tls && !self.io.is_unix();
+        let compress = cfg.compress && hello.capabilities & CLIENT_COMPRESS != 0;
+        let compress_cap = if compress { CLIENT_COMPRESS } else { 0 };
         if use_tls {
-            self.write_packet(&handshake_header(cfg, CLIENT_SSL)).await?;
+            // The SSLRequest must announce the same capabilities as the
+            // handshake response that follows (the server keeps these).
+            self.write_packet(&handshake_header(cfg, CLIENT_SSL | compress_cap)).await?;
             self.upgrade_to_tls(cfg).await?;
         }
 
@@ -459,10 +650,18 @@ impl Conn {
             _ => "mysql_native_password",
         };
         let auth = auth_response(plugin, cfg.password.as_bytes(), &hello.salt);
-        let extra = if use_tls { CLIENT_SSL } else { 0 };
+        let extra = if use_tls { CLIENT_SSL } else { 0 } | compress_cap;
         self.write_packet(&build_handshake_response(cfg, &auth, plugin, extra))
             .await?;
-        self.finish_auth(cfg, plugin, use_tls, hello.salt).await
+        // A local socket is as private as TLS (the official client treats
+        // it the same way for the clear-text password exchange).
+        let secure = use_tls || self.io.is_unix();
+        self.finish_auth(cfg, plugin, secure, hello.salt).await?;
+        // Every packet after the authentication OK travels compressed.
+        if compress {
+            self.z = Some(Box::default());
+        }
+        Ok(())
     }
 
     /// Swap the plaintext socket for a TLS session over it, checking the server
@@ -605,7 +804,7 @@ impl Conn {
         F: FnMut(&[Cell<'_>]) -> Result<R, OrmError>,
     {
         // Each command starts a fresh sequence.
-        self.seq = 0;
+        self.start_command();
         let mut payload = Vec::with_capacity(sql.len() + 1);
         payload.push(0x03); // COM_QUERY
         payload.extend_from_slice(sql.as_bytes());
@@ -620,7 +819,7 @@ impl Conn {
     /// e.g. a `CALL` whose procedure runs several `SELECT`s yields one
     /// [`QueryResult::Rows`] per `SELECT`, then the [`QueryResult::Ok`] of the call.
     pub async fn query_multi(&mut self, sql: &str) -> Result<Vec<QueryResult>, OrmError> {
-        self.seq = 0;
+        self.start_command();
         let mut payload = Vec::with_capacity(sql.len() + 1);
         payload.push(0x03); // COM_QUERY
         payload.extend_from_slice(sql.as_bytes());
@@ -658,7 +857,7 @@ impl Conn {
         F: FnMut(&[ColMeta], &[Cell<'_>]) -> Result<R, OrmError>,
     {
         if params.is_empty() {
-            self.seq = 0;
+            self.start_command();
             let mut payload = Vec::with_capacity(sql.len() + 1);
             payload.push(0x03); // COM_QUERY
             payload.extend_from_slice(sql.as_bytes());
@@ -686,7 +885,7 @@ impl Conn {
 
     /// `COM_SET_OPTION`: turn multi-statement support on (`0`) or off (`1`).
     async fn set_option(&mut self, option: u16) -> Result<(), OrmError> {
-        self.seq = 0;
+        self.start_command();
         let mut payload = vec![0x1b]; // COM_SET_OPTION
         payload.extend_from_slice(&option.to_le_bytes());
         self.write_packet(&payload).await?;
@@ -749,7 +948,8 @@ impl Conn {
         loop {
             let (result, more) = match first.first().copied() {
                 Some(0x00) => {
-                    let more = ok_status(&first) & SERVER_MORE_RESULTS_EXISTS != 0;
+                    self.status = ok_status(&first);
+                    let more = self.status & SERVER_MORE_RESULTS_EXISTS != 0;
                     (Ok(ok_fetched(&first)), more)
                 }
                 Some(0xFF) => return Err(parse_err_packet(&first)),
@@ -853,9 +1053,11 @@ impl Conn {
         let more = loop {
             let packet = self.read_packet_ref().await?;
             if is_eof(packet) {
+                let status = eof_status(packet);
+                self.status = status;
                 // The OUT-parameter result set's EOF does not set
                 // MORE_RESULTS, yet the CALL's own OK always follows it.
-                break out_params || eof_status(packet) & SERVER_MORE_RESULTS_EXISTS != 0;
+                break out_params || status & SERVER_MORE_RESULTS_EXISTS != 0;
             }
             if packet.first() == Some(&0xFF) {
                 return Err(parse_err_packet(packet));
@@ -949,8 +1151,8 @@ impl Conn {
         if let Some(old) = self.stmts.evict_for_insert() {
             self.stmt_close(old.id).await?;
         }
-        let (id, num_params) = self.stmt_prepare(sql).await?;
-        let stmt = Stmt { id, num_params };
+        let (id, num_params, num_columns) = self.stmt_prepare(sql).await?;
+        let stmt = Stmt { id, num_params, num_columns };
         self.stmts.insert(sql, stmt);
         Ok(stmt)
     }
@@ -967,8 +1169,8 @@ impl Conn {
         self.stmts.len()
     }
 
-    async fn stmt_prepare(&mut self, sql: &str) -> Result<(u32, u16), OrmError> {
-        self.seq = 0;
+    async fn stmt_prepare(&mut self, sql: &str) -> Result<(u32, u16, u16), OrmError> {
+        self.start_command();
         let mut payload = Vec::with_capacity(sql.len() + 1);
         payload.push(0x16); // COM_STMT_PREPARE
         payload.extend_from_slice(sql.as_bytes());
@@ -998,7 +1200,7 @@ impl Conn {
         if num_columns > 0 {
             self.read_packet().await?; // EOF
         }
-        Ok((stmt_id, num_params))
+        Ok((stmt_id, num_params, num_columns))
     }
 
     async fn stmt_execute<R, F>(
@@ -1018,33 +1220,8 @@ impl Conn {
                 params.len()
             )));
         }
-        self.seq = 0;
-        let mut payload = Vec::with_capacity(16 + params.len() * 8);
-        payload.push(0x17); // COM_STMT_EXECUTE
-        payload.extend_from_slice(&stmt_id.to_le_bytes());
-        payload.push(0x00); // flags: CURSOR_TYPE_NO_CURSOR
-        payload.extend_from_slice(&1u32.to_le_bytes()); // iteration count
-
-        if num_params > 0 {
-            // NULL bitmap.
-            let bitmap_len = (num_params as usize).div_ceil(8);
-            let mut bitmap = vec![0u8; bitmap_len];
-            for (i, p) in params.iter().enumerate() {
-                if matches!(p, BindValue::Null) {
-                    bitmap[i / 8] |= 1 << (i % 8);
-                }
-            }
-            payload.extend_from_slice(&bitmap);
-            payload.push(0x01); // new-params-bound flag
-            for p in params {
-                let (type_code, unsigned) = p.type_code();
-                payload.push(type_code);
-                payload.push(if unsigned { 0x80 } else { 0x00 });
-            }
-            for p in params {
-                p.encode(&mut payload);
-            }
-        }
+        self.start_command();
+        let payload = execute_payload(stmt_id, params, CURSOR_TYPE_NO_CURSOR);
         self.write_packet(&payload).await?;
 
         let first = self.read_packet().await?;
@@ -1057,11 +1234,352 @@ impl Conn {
     }
 
     async fn stmt_close(&mut self, stmt_id: u32) -> Result<(), OrmError> {
-        self.seq = 0;
+        self.start_command();
         let mut payload = Vec::with_capacity(5);
         payload.push(0x19); // COM_STMT_CLOSE
         payload.extend_from_slice(&stmt_id.to_le_bytes());
         self.write_packet(&payload).await // no response packet
+    }
+}
+
+/// Wrap the plain packet bytes in `z.out` into compressed frames appended to
+/// `wire`: each frame carries at most 16 MiB - 1 plain bytes, deflated unless
+/// tiny.
+fn compress_frames(z: &mut Compressed, wire: &mut Vec<u8>) -> Result<(), OrmError> {
+    let mut deflated = Vec::new();
+    for plain in z.out.chunks(0xFF_FFFF) {
+        let (body, ulen): (&[u8], usize) = if plain.len() < MIN_COMPRESS_LENGTH {
+            (plain, 0)
+        } else {
+            deflated.clear();
+            let mut enc = flate2::write::ZlibEncoder::new(&mut deflated, flate2::Compression::default());
+            std::io::Write::write_all(&mut enc, plain).map_err(|e| conn_err(format!("compress: {e}")))?;
+            enc.finish().map_err(|e| conn_err(format!("compress: {e}")))?;
+            if deflated.len() >= plain.len() {
+                (plain, 0) // incompressible: send as is
+            } else {
+                (&deflated[..], plain.len())
+            }
+        };
+        let clen = body.len();
+        wire.extend_from_slice(&[
+            clen as u8,
+            (clen >> 8) as u8,
+            (clen >> 16) as u8,
+            z.seq,
+            ulen as u8,
+            (ulen >> 8) as u8,
+            (ulen >> 16) as u8,
+        ]);
+        wire.extend_from_slice(body);
+        z.seq = z.seq.wrapping_add(1);
+    }
+    Ok(())
+}
+
+/// `COM_STMT_EXECUTE` flags: run to completion, or open a read-only cursor.
+const CURSOR_TYPE_NO_CURSOR: u8 = 0x00;
+const CURSOR_TYPE_READ_ONLY: u8 = 0x01;
+/// Status flags of a cursor: one is open / its last row has been sent.
+const SERVER_STATUS_CURSOR_EXISTS: u16 = 0x0040;
+const SERVER_STATUS_LAST_ROW_SENT: u16 = 0x0080;
+/// Rows per pipelined flight of [`Conn::execute_pipelined`]: their `OK`
+/// replies (a few dozen bytes each) must fit in the socket buffers while the
+/// flight is still being written, or both sides would wait on each other.
+const PIPELINE_ROWS: usize = 500;
+/// …and at most this many request bytes per flight.
+const PIPELINE_BYTES: usize = 4 << 20;
+
+/// A `COM_STMT_EXECUTE` payload binding `params`.
+fn execute_payload(stmt_id: u32, params: &[BindValue], flags: u8) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(16 + params.len() * 8);
+    payload.push(0x17); // COM_STMT_EXECUTE
+    payload.extend_from_slice(&stmt_id.to_le_bytes());
+    payload.push(flags);
+    payload.extend_from_slice(&1u32.to_le_bytes()); // iteration count
+    if !params.is_empty() {
+        // NULL bitmap.
+        let mut bitmap = vec![0u8; params.len().div_ceil(8)];
+        for (i, p) in params.iter().enumerate() {
+            if matches!(p, BindValue::Null) {
+                bitmap[i / 8] |= 1 << (i % 8);
+            }
+        }
+        payload.extend_from_slice(&bitmap);
+        payload.push(0x01); // new-params-bound flag
+        for p in params {
+            let (type_code, unsigned) = p.type_code();
+            payload.push(type_code);
+            payload.push(if unsigned { 0x80 } else { 0x00 });
+        }
+        for p in params {
+            p.encode(&mut payload);
+        }
+    }
+    payload
+}
+
+/// A server-side cursor (`COM_STMT_EXECUTE` with `CURSOR_TYPE_READ_ONLY`):
+/// rows stay on the server until fetched in batches, and the connection is
+/// free for other statements in between.
+#[derive(Debug)]
+pub(crate) struct CursorState {
+    stmt_id: u32,
+    metas: Vec<ColMeta>,
+    done: bool,
+}
+
+impl CursorState {
+    /// Column definitions of the cursor's result set.
+    pub(crate) fn metas(&self) -> &[ColMeta] {
+        &self.metas
+    }
+
+    /// Whether every row has been fetched.
+    pub fn is_done(&self) -> bool {
+        self.done
+    }
+}
+
+/// Outcome of one pipelined flight of [`Conn::execute_pipelined`].
+#[derive(Debug)]
+pub(crate) enum Pipelined {
+    /// Every row ran; total rows affected.
+    Done(u64),
+    /// Row `index` (into the slice given) failed with `error`; rows after it
+    /// in the same flight were still run by the server.
+    Failed {
+        /// Position of the first failing row.
+        index: usize,
+        /// Its error.
+        error: OrmError,
+    },
+    /// The server no longer knew the cached statement (reset, or DDL forced a
+    /// re-prepare); it was dropped from the cache and nothing ran
+    /// successfully that the caller has to keep. Run the rows again.
+    Stale,
+}
+
+impl Conn {
+    /// Open a server-side cursor over `sql` (a dedicated prepared statement,
+    /// closed with the cursor). `None` — without running it — when the
+    /// statement has no result set.
+    pub(crate) async fn stmt_cursor_open(&mut self, sql: &str, params: &[BindValue]) -> Result<Option<CursorState>, OrmError> {
+        let (stmt_id, num_params, num_columns) = self.stmt_prepare(sql).await?;
+        if num_columns == 0 {
+            // Refused before it runs: a cursor needs a result set.
+            self.stmt_close(stmt_id).await?;
+            return Ok(None);
+        }
+        if params.len() != num_params as usize {
+            self.stmt_close(stmt_id).await?;
+            return Err(OrmError::Query(format!(
+                "prepared statement expects {num_params} params, got {}",
+                params.len()
+            )));
+        }
+        self.start_command();
+        self.write_packet(&execute_payload(stmt_id, params, CURSOR_TYPE_READ_ONLY)).await?;
+        let first = self.read_packet().await?;
+        match first.first().copied() {
+            Some(0xFF) => {
+                let err = parse_err_packet(&first);
+                self.stmt_close(stmt_id).await?;
+                Err(err)
+            }
+            Some(0x00) => {
+                self.status = ok_status(&first);
+                self.stmt_close(stmt_id).await?;
+                Ok(None)
+            }
+            _ => {
+                let (col_count, _) = read_lenenc_int(&first, 0)
+                    .ok_or_else(|| OrmError::Query("bad column count packet".into()))?;
+                let mut metas = Vec::with_capacity(col_count as usize);
+                for _ in 0..col_count {
+                    metas.push(parse_col_meta(self.read_packet_ref().await?));
+                }
+                let eof = self.read_packet().await?;
+                if !is_eof(&eof) {
+                    return Err(conn_err("expected EOF after the cursor's column definitions"));
+                }
+                self.status = eof_status(&eof);
+                // A server that could not open a cursor sends the rows at once.
+                if self.status & SERVER_STATUS_CURSOR_EXISTS == 0 {
+                    return Err(conn_err("the server did not open a cursor"));
+                }
+                Ok(Some(CursorState { stmt_id, metas, done: false }))
+            }
+        }
+    }
+
+    /// Fetch up to `max_rows` rows of an open cursor (`COM_STMT_FETCH`),
+    /// handing each to `row`. After the last row the cursor is marked done
+    /// and its statement closed. An error from `row` is returned once the
+    /// batch is read off the wire.
+    pub(crate) async fn stmt_cursor_fetch<F>(&mut self, cur: &mut CursorState, max_rows: u32, mut row: F) -> Result<(), OrmError>
+    where
+        F: FnMut(&[ColMeta], &[Cell<'_>]) -> Result<(), OrmError>,
+    {
+        if cur.done {
+            return Ok(());
+        }
+        self.start_command();
+        let mut payload = Vec::with_capacity(9);
+        payload.push(0x1c); // COM_STMT_FETCH
+        payload.extend_from_slice(&cur.stmt_id.to_le_bytes());
+        payload.extend_from_slice(&max_rows.max(1).to_le_bytes());
+        self.write_packet(&payload).await?;
+        let mut failed: Option<OrmError> = None;
+        let mut scratch: Vec<Cell<'static>> = Vec::with_capacity(cur.metas.len());
+        loop {
+            let packet = self.read_packet_ref().await?;
+            if packet.first() == Some(&0xFF) {
+                let err = parse_err_packet(packet);
+                self.release_drained();
+                return Err(err);
+            }
+            if is_eof(packet) {
+                let status = eof_status(packet);
+                self.status = status;
+                cur.done = status & SERVER_STATUS_LAST_ROW_SENT != 0;
+                break;
+            }
+            if failed.is_none() {
+                let mut cells = recycle(std::mem::take(&mut scratch));
+                let outcome = decode_row(packet, true, &cur.metas, &mut cells).and_then(|()| row(&cur.metas, &cells));
+                scratch = recycle(cells);
+                if let Err(e) = outcome {
+                    failed = Some(e);
+                }
+            }
+        }
+        self.release_drained();
+        if cur.done {
+            self.stmt_close(cur.stmt_id).await?;
+        }
+        failed.map_or(Ok(()), Err)
+    }
+
+    /// Close a cursor before its end (closes its statement on the server).
+    pub(crate) async fn stmt_cursor_close(&mut self, cur: CursorState) -> Result<(), OrmError> {
+        if cur.done {
+            return Ok(());
+        }
+        self.stmt_close(cur.stmt_id).await
+    }
+
+    /// Prepare (or reuse) `sql` and report whether it is DML-shaped (no
+    /// result set) — the statements [`execute_pipelined`](Self::execute_pipelined) accepts.
+    pub(crate) async fn prepare_for_batch(&mut self, sql: &str) -> Result<bool, OrmError> {
+        let stmt = match self.stmts.get(sql) {
+            Some(s) => s,
+            None => self.prepare_cached(sql).await?,
+        };
+        Ok(stmt.num_columns == 0)
+    }
+
+    /// Run the prepared `sql` once per row of `rows`, **pipelined**: a flight
+    /// of executes is written in one go, then their replies are read, so a
+    /// batch costs one round trip per [`PIPELINE_ROWS`] rows instead of one
+    /// per row. The statement must have no result set (see
+    /// [`prepare_for_batch`](Self::prepare_for_batch)). The server runs every
+    /// row it was sent even after one fails; the caller decides what to keep
+    /// (see `SqlConn::execute_many`, which wraps this in a savepoint).
+    pub(crate) async fn execute_pipelined(&mut self, sql: &str, rows: &[Vec<BindValue>]) -> Result<Pipelined, OrmError> {
+        let stmt = match self.stmts.get(sql) {
+            Some(s) => s,
+            None => self.prepare_cached(sql).await?,
+        };
+        if stmt.num_columns != 0 {
+            return Err(OrmError::Query("execute_pipelined: the statement returns rows".into()));
+        }
+        if let Some(bad) = rows.iter().find(|r| r.len() != stmt.num_params as usize) {
+            return Err(OrmError::Query(format!(
+                "prepared statement expects {} params, got {}",
+                stmt.num_params,
+                bad.len()
+            )));
+        }
+        let mut total = 0u64;
+        let mut first_error: Option<(usize, OrmError)> = None;
+        let mut stale = false;
+        let mut start = 0;
+        // Flights stop after the one where a row failed.
+        while start < rows.len() && first_error.is_none() && !stale {
+            // Write one flight.
+            let mut end = start;
+            let mut bytes = 0;
+            self.io.write_buf();
+            while end < rows.len() && end - start < PIPELINE_ROWS && bytes < PIPELINE_BYTES {
+                let payload = execute_payload(stmt.id, &rows[end], CURSOR_TYPE_NO_CURSOR);
+                bytes += payload.len();
+                self.queue_packet(&payload)?;
+                end += 1;
+            }
+            self.io.flush().await.map_err(|e| conn_err(format!("write packet: {e}")))?;
+            // Read its replies, in order.
+            for i in start..end {
+                let reply = self.read_packet().await?;
+                match reply.first().copied() {
+                    Some(0x00) => {
+                        self.status = ok_status(&reply);
+                        if first_error.is_none() {
+                            if let Fetched::Ok { affected_rows, .. } = ok_fetched::<()>(&reply) {
+                                total += affected_rows;
+                            }
+                        }
+                    }
+                    Some(0xFF) if matches!(err_code(&reply), Some(ER_UNKNOWN_STMT_HANDLER | ER_NEED_REPREPARE)) => {
+                        stale = true;
+                    }
+                    Some(0xFF) => {
+                        if first_error.is_none() {
+                            first_error = Some((i, parse_err_packet(&reply)));
+                        }
+                    }
+                    _ => return Err(conn_err("unexpected reply to a pipelined execute")),
+                }
+            }
+            start = end;
+        }
+        if stale {
+            self.forget_stmt(sql);
+            return Ok(Pipelined::Stale);
+        }
+        Ok(match first_error {
+            Some((index, error)) => Pipelined::Failed { index, error },
+            None => Pipelined::Done(total),
+        })
+    }
+
+    /// Append one command packet (sequence id 0) to the write buffer without
+    /// sending it — for pipelined flights.
+    fn queue_packet(&mut self, payload: &[u8]) -> Result<(), OrmError> {
+        self.start_command();
+        let mut rest = payload;
+        loop {
+            let len = rest.len().min(0xFF_FFFF);
+            let header = [len as u8, (len >> 8) as u8, (len >> 16) as u8, self.seq];
+            match self.z.as_deref_mut() {
+                None => {
+                    let wire = self.io.write_buf_append();
+                    wire.extend_from_slice(&header);
+                    wire.extend_from_slice(&rest[..len]);
+                }
+                Some(z) => {
+                    z.out.clear();
+                    z.out.extend_from_slice(&header);
+                    z.out.extend_from_slice(&rest[..len]);
+                    compress_frames(z, self.io.write_buf_append())?;
+                }
+            }
+            self.seq = self.seq.wrapping_add(1);
+            rest = &rest[len..];
+            if len < 0xFF_FFFF {
+                return Ok(());
+            }
+        }
     }
 }
 
