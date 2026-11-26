@@ -38,8 +38,12 @@ pub enum Value {
     Date(String),
     /// A time of day or duration: `[-]HH:MM:SS[.fraction]` (hours may exceed 24).
     Time(String),
-    /// A date and time: `YYYY-MM-DD HH:MM:SS[.fraction]`.
+    /// A date and time: `YYYY-MM-DD HH:MM:SS[.fraction][ ±HH:MM]` (the
+    /// offset only for a time-zone-aware type).
     DateTime(String),
+    /// An interval (Oracle `INTERVAL YEAR TO MONTH` `+YY-MM` / `DAY TO
+    /// SECOND` `+DD HH:MM:SS.fraction`).
+    Interval(String),
     /// A result set returned as a value (a REF CURSOR).
     Rows(Box<Rows>),
 }
@@ -84,9 +88,13 @@ impl Value {
     /// The value as text: character data, decimals, JSON and temporal values.
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            Value::Text(s) | Value::Decimal(s) | Value::Json(s) | Value::Date(s) | Value::Time(s) | Value::DateTime(s) => {
-                Some(s)
-            }
+            Value::Text(s)
+            | Value::Decimal(s)
+            | Value::Json(s)
+            | Value::Date(s)
+            | Value::Time(s)
+            | Value::DateTime(s)
+            | Value::Interval(s) => Some(s),
             _ => None,
         }
     }
@@ -223,6 +231,8 @@ pub struct CallResult {
     pub out: Vec<Value>,
     /// Rows affected by the call's last statement.
     pub affected_rows: u64,
+    /// Lines the procedure printed (Oracle `DBMS_OUTPUT`), in order.
+    pub output: Vec<String>,
 }
 
 impl From<i64> for Param {

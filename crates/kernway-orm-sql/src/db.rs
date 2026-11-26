@@ -74,6 +74,17 @@ impl<C: SqlConnect> SqlDb<C> {
         settle(&mut g, r)
     }
 
+    /// Run one INSERT / UPDATE / DELETE for every row of `rows` (array DML
+    /// where the database has it); returns the total rows affected. Outside
+    /// a transaction a failure part-way leaves earlier rows applied — run it
+    /// inside [`transaction`](kernway_orm_core::transaction::TransactionalDriver::transaction)
+    /// for all-or-nothing.
+    pub async fn execute_many(&self, sql: &str, rows: &[Vec<Param>]) -> Result<u64, OrmError> {
+        let mut g = self.pool.acquire().await?;
+        let r = g.execute_many(sql, rows).await;
+        settle(&mut g, r)
+    }
+
     /// Run any query with bound parameters — joins, aggregates, subqueries,
     /// window functions — and collect its rows as typed [`Value`]s.
     pub async fn query(&self, sql: &str, params: &[Param]) -> Result<Rows, OrmError> {

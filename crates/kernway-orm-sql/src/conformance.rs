@@ -420,6 +420,21 @@ fn raw_sql<H: Harness>(h: H) {
             .unwrap();
         assert_eq!(n, 1);
 
+        // Many rows of one statement (array DML where the backend has it).
+        let rows: Vec<Vec<Param>> = (0..30i64).map(|i| vec![(100 + i).into(), format!("m{i}").into()]).collect();
+        let n = db
+            .execute_many(&format!("UPDATE {t} SET {qty} = {} WHERE {name} = {}", p(0), p(1)), &rows)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "no row named m*");
+        let rows: Vec<Vec<Param>> = (1..=6i64).map(|i| vec![(1000 + i).into(), format!("r{i}").into()]).collect();
+        let n = db.execute_many(&format!("UPDATE {t} SET {qty} = {} WHERE {name} = {}", p(0), p(1)), &rows).await.unwrap();
+        assert_eq!(n, 6);
+        assert_eq!(
+            db.query_scalar(&format!("SELECT SUM({qty}) FROM {t}"), &[]).await.unwrap().as_i64(),
+            Some(6 * 1000 + 21)
+        );
+
         // Hand-written SQL inside a transaction rolls back with it.
         let r: Result<(), OrmError> = db
             .transaction(move |tx| {

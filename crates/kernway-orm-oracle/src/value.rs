@@ -22,8 +22,12 @@ pub(crate) mod ora_type {
     pub const BLOB: u8 = 113;
     pub const JSON: u8 = 119;
     pub const VECTOR: u8 = 127;
+    pub const OBJECT: u8 = 109;
+    pub const BFILE: u8 = 114;
     pub const TIMESTAMP: u8 = 180;
     pub const TIMESTAMP_TZ: u8 = 181;
+    pub const INTERVAL_YM: u8 = 182;
+    pub const INTERVAL_DS: u8 = 183;
     pub const UROWID: u8 = 208;
     pub const TIMESTAMP_LTZ: u8 = 231;
     pub const BOOLEAN: u8 = 252;
@@ -46,6 +50,85 @@ pub struct DateTime {
     pub second: u8,
     /// Fractional seconds in nanoseconds (0 for a DATE).
     pub nanos: u32,
+}
+
+/// An interval as Oracle's TO_CHAR prints it: `+YY-MM` / `+DD HH:MM:SS.ff`,
+/// the leading field padded to `lead` digits, `frac` fractional digits.
+pub fn fmt_interval(v: &Value, lead: u8, frac: u8) -> String {
+    match *v {
+        Value::IntervalYm { years, months } => {
+            let neg = years < 0 || months < 0;
+            format!(
+                "{}{:0w$}-{:02}",
+                if neg { '-' } else { '+' },
+                years.unsigned_abs(),
+                months.unsigned_abs(),
+                w = usize::from(lead)
+            )
+        }
+        Value::IntervalDs { days, hours, minutes, seconds, nanos } => {
+            let neg = days < 0 || hours < 0 || minutes < 0 || seconds < 0 || nanos < 0;
+            let mut s = format!(
+                "{}{:0w$} {:02}:{:02}:{:02}",
+                if neg { '-' } else { '+' },
+                days.unsigned_abs(),
+                hours.unsigned_abs(),
+                minutes.unsigned_abs(),
+                seconds.unsigned_abs(),
+                w = usize::from(lead)
+            );
+            if frac > 0 {
+                s.push('.');
+                s.push_str(&format!("{:09}", nanos.unsigned_abs())[..usize::from(frac.min(9))]);
+            }
+            s
+        }
+        _ => String::new(),
+    }
+}
+
+/// `+HH:MM` / `-HH:MM` for an offset in minutes.
+pub fn fmt_offset(minutes: i16) -> String {
+    let sign = if minutes < 0 { '-' } else { '+' };
+    let m = minutes.unsigned_abs();
+    format!("{sign}{:02}:{:02}", m / 60, m % 60)
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian date (Howard Hinnant's
+/// `days_from_civil`).
+fn days_from_civil(y: i32, m: u8, d: u8) -> i64 {
+    let y = i64::from(y) - i64::from(m <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let m = i64::from(m);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + i64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn civil_from_days(z: i64) -> (i32, u8, u8) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u8;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u8;
+    ((yoe + era * 400 + i64::from(m <= 2)) as i32, m, d)
+}
+
+impl DateTime {
+    /// This wall time shifted by `minutes` (dates roll over as needed).
+    pub fn add_minutes(&self, minutes: i64) -> DateTime {
+        let total = days_from_civil(self.year, self.month, self.day) * 1440
+            + i64::from(self.hour) * 60
+            + i64::from(self.minute)
+            + minutes;
+        let (days, mins) = (total.div_euclid(1440), total.rem_euclid(1440));
+        let (year, month, day) = civil_from_days(days);
+        DateTime { year, month, day, hour: (mins / 60) as u8, minute: (mins % 60) as u8, ..*self }
+    }
 }
 
 impl fmt::Display for DateTime {
@@ -82,6 +165,29 @@ pub enum Value {
     Raw(Vec<u8>),
     /// BOOLEAN (Oracle 23ai+).
     Bool(bool),
+    /// TIMESTAMP WITH TIME ZONE: the local wall time and its UTC offset in
+    /// minutes.
+    TimestampTz(DateTime, i16),
+    /// INTERVAL YEAR TO MONTH (both parts carry the sign).
+    IntervalYm {
+        /// Years.
+        years: i32,
+        /// Months (-11 to 11).
+        months: i32,
+    },
+    /// INTERVAL DAY TO SECOND (every part carries the sign).
+    IntervalDs {
+        /// Days.
+        days: i32,
+        /// Hours.
+        hours: i32,
+        /// Minutes.
+        minutes: i32,
+        /// Seconds.
+        seconds: i32,
+        /// Fractional seconds in nanoseconds.
+        nanos: i32,
+    },
     /// A REF CURSOR returned by PL/SQL, already fetched to the end.
     Cursor(ResultSet),
 }
@@ -103,6 +209,8 @@ impl Value {
             Value::Str(s) | Value::Number(s) => Some(s.clone()),
             Value::Float(f) => Some(f.to_string()),
             Value::Date(d) | Value::Timestamp(d) => Some(d.to_string()),
+            Value::TimestampTz(d, off) => Some(format!("{d} {}", fmt_offset(*off))),
+            Value::IntervalYm { .. } | Value::IntervalDs { .. } => Some(fmt_interval(self, 9, 9)),
             Value::Raw(b) => Some(b.iter().map(|x| format!("{x:02X}")).collect()),
             Value::Bool(b) => Some(if *b { "1" } else { "0" }.to_string()),
             Value::Cursor(rs) => Some(format!("<cursor: {} rows>", rs.rows.len())),
@@ -301,6 +409,35 @@ pub(crate) fn encode_timestamp(d: &DateTime) -> Vec<u8> {
     b
 }
 
+/// TIMESTAMP WITH TIME ZONE: 11 bytes of UTC date-time, then the offset
+/// (hour + 20, minute + 60). A named region (high bit) is refused rather
+/// than guessed.
+pub(crate) fn decode_timestamp_tz(b: &[u8]) -> Result<Value, String> {
+    let utc = decode_date(b)?;
+    if b.len() <= 11 || b[11] == 0 || b[12] == 0 {
+        return Ok(Value::TimestampTz(utc, 0));
+    }
+    if b[11] & 0x80 != 0 {
+        return Err("TIMESTAMP WITH TIME ZONE in a named region (e.g. 'Asia/Ho_Chi_Minh') is not \
+                    supported; select it with TO_CHAR(…, 'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM') or \
+                    SYS_EXTRACT_UTC(…)"
+            .into());
+    }
+    let off = (i16::from(b[11]) - 20) * 60 + (i16::from(b[12]) - 60);
+    Ok(Value::TimestampTz(utc.add_minutes(i64::from(off)), off))
+}
+
+/// Encode a local wall time with its offset as TIMESTAMP WITH TIME ZONE.
+pub(crate) fn encode_timestamp_tz(local: &DateTime, offset_minutes: i16) -> Vec<u8> {
+    let utc = local.add_minutes(-i64::from(offset_minutes));
+    let mut b = encode_date(&utc);
+    b.extend_from_slice(&utc.nanos.to_be_bytes());
+    let (h, m) = (offset_minutes / 60, offset_minutes % 60);
+    b.push((h + 20) as u8);
+    b.push((m + 60) as u8);
+    b
+}
+
 pub(crate) fn decode_date(b: &[u8]) -> Result<DateTime, String> {
     if b.len() < 7 {
         return Err(format!("bad DATE length {}", b.len()));
@@ -352,7 +489,20 @@ pub(crate) fn decode(ora_type: u8, csfrm: u8, b: Vec<u8>) -> Result<Value, Strin
     Ok(match ora_type {
         NUMBER | BINARY_INTEGER => Value::Number(decode_number(&b)?),
         DATE => Value::Date(decode_date(&b)?),
-        TIMESTAMP | TIMESTAMP_LTZ | TIMESTAMP_TZ => Value::Timestamp(decode_date(&b)?),
+        TIMESTAMP | TIMESTAMP_LTZ => Value::Timestamp(decode_date(&b)?),
+        TIMESTAMP_TZ => decode_timestamp_tz(&b)?,
+        INTERVAL_YM if b.len() >= 5 => Value::IntervalYm {
+            years: (i64::from(u32::from_be_bytes([b[0], b[1], b[2], b[3]])) - 0x8000_0000) as i32,
+            months: i32::from(b[4]) - 60,
+        },
+        INTERVAL_DS if b.len() >= 11 => Value::IntervalDs {
+            days: (i64::from(u32::from_be_bytes([b[0], b[1], b[2], b[3]])) - 0x8000_0000) as i32,
+            hours: i32::from(b[4]) - 60,
+            minutes: i32::from(b[5]) - 60,
+            seconds: i32::from(b[6]) - 60,
+            nanos: (i64::from(u32::from_be_bytes([b[7], b[8], b[9], b[10]])) - 0x8000_0000) as i32,
+        },
+        INTERVAL_YM | INTERVAL_DS => return Err(format!("bad INTERVAL length {}", b.len())),
         BINARY_FLOAT | BINARY_DOUBLE => Value::Float(decode_double(&b)?),
         RAW | LONG_RAW => Value::Raw(b),
         BOOLEAN => Value::Bool(b.first() == Some(&1)),
@@ -367,6 +517,29 @@ pub(crate) fn decode(ora_type: u8, csfrm: u8, b: Vec<u8>) -> Result<Value, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timestamp_tz_round_trips_with_offsets_and_day_rollover() {
+        let local = DateTime { year: 2026, month: 1, day: 1, hour: 0, minute: 30, second: 5, nanos: 120_000_000 };
+        for off in [0i16, 420, -330, 840, -720] {
+            let b = encode_timestamp_tz(&local, off);
+            assert_eq!(decode_timestamp_tz(&b).unwrap(), Value::TimestampTz(local, off), "offset {off}");
+        }
+        // 00:30 local at +07:00 is 17:30 UTC the previous day, previous year.
+        let utc = decode_date(&encode_timestamp_tz(&local, 420)).unwrap();
+        assert_eq!((utc.year, utc.month, utc.day, utc.hour, utc.minute), (2025, 12, 31, 17, 30));
+        let leap = DateTime { year: 2028, month: 2, day: 28, hour: 23, minute: 0, ..DateTime::default() };
+        assert_eq!(leap.add_minutes(90).day, 29);
+        assert_eq!(fmt_offset(-330), "-05:30");
+    }
+
+    #[test]
+    fn intervals_format_like_to_char() {
+        let ym = Value::IntervalYm { years: 1, months: 2 };
+        assert_eq!(fmt_interval(&ym, 2, 0), "+01-02");
+        let ds = Value::IntervalDs { days: -3, hours: -4, minutes: -5, seconds: -6, nanos: -789_000_000 };
+        assert_eq!(fmt_interval(&ds, 2, 3), "-03 04:05:06.789");
+    }
 
     fn hex(b: &[u8]) -> String {
         b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" ")

@@ -17,18 +17,29 @@
 //!     .out;
 //! ```
 //!
-//! Scope today: TCP or TCPS, user/password logon (11g and 12c verifiers), SQL and
-//! PL/SQL with IN / OUT / IN OUT binds, NUMBER, VARCHAR2 / NVARCHAR2, DATE,
-//! TIMESTAMP, BINARY_FLOAT / DOUBLE, RAW, BOOLEAN, CLOB / NCLOB / BLOB (read
-//! inline; written as long binds), REF CURSOR OUT parameters, and TCPS (TLS,
-//! including the listener's TLS renegotiation). Not yet: native network
-//! encryption, implicit result sets, object types.
+//! Through the shared SQL layer, [`OracleDriver`] gives repositories, the
+//! query builder, transactions and hand-written SQL (`query`, `query_as`,
+//! streaming `query_each`, `execute_many` as array DML, `call` with OUT /
+//! IN OUT / cursor arguments, implicit results and `DBMS_OUTPUT`,
+//! `execute_script` with PL/SQL units ended by `/`).
+//!
+//! Scope: TCP or TCPS (incl. the listener's TLS renegotiation), user /
+//! password logon (11g and 12c verifiers), SQL and PL/SQL with IN / OUT /
+//! IN OUT binds, array DML, implicit result sets, REF CURSORs. Types:
+//! NUMBER, BINARY_FLOAT / DOUBLE, VARCHAR2 / NVARCHAR2 / CHAR / LONG, RAW /
+//! LONG RAW, DATE, TIMESTAMP (with time zone as an offset, with local time
+//! zone), INTERVAL YEAR TO MONTH / DAY TO SECOND, CLOB / NCLOB / BLOB (read
+//! inline; written as long binds), JSON (OSON decoded), VECTOR, BOOLEAN,
+//! ROWID / UROWID. Refused with a clear error (convert in SQL instead):
+//! object types, XMLType, BFILE, nested `CURSOR(…)` columns, time zones
+//! given as a named region. Not yet: native network encryption.
 
 mod auth_crypto;
 mod backend;
 mod buf;
 mod conn;
 mod dialect;
+mod oson;
 mod driver;
 mod pool;
 mod data_types_table;

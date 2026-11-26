@@ -49,16 +49,22 @@
    | `begin` / `commit` / `rollback` | transaction control; outside a transaction every statement must be committed on its own |
    | `query_each(sql, params, f)` | any statement; each row handed to `f` as typed `Value`s while it is read (no collecting); returns columns, rows affected, generated key |
    | `query_rows` | provided: `query_each` collected into `Rows` |
-   | `call(name, args)` | optional: stored procedure with `CallArg::{In, Out(kind), InOut}` → result sets + OUT values |
-   | `execute_script(sql)` | optional: several `;`-separated statements, stopping at the first error |
+   | `call(name, args)` | optional: stored procedure with `CallArg::{In, Out(kind), InOut}` → result sets + OUT values (+ `DBMS_OUTPUT` lines on Oracle) |
+   | `execute_script(sql)` | optional: several `;`-separated statements, stopping at the first error (Oracle: PL/SQL units end at a `/` line) |
+   | `execute_many(sql, rows)` | provided: one DML statement per row (default: one by one; Oracle: array DML in one round trip) |
    | `capabilities()` | optional: what the backend supports |
 
    **Value typing.** Every backend maps its column types onto the shared
    `Value`: `Int`/`UInt` (integers, by signedness), `Float` (binary floating
    point), `Decimal` (exact numbers, as text — never rounded), `Text`,
    `Bytes` (binary strings / BLOB / bit / spatial), `Json`, `Date`, `Time`,
-   `DateTime` (the database's own text form, fractional digits as declared),
-   `Bool`, `Rows` (a cursor). A value must decode identically however the
+   `DateTime` (the database's own text form, fractional digits as declared,
+   ` ±HH:MM` for a time-zone-aware type), `Interval`, `Bool`, `Rows` (a
+   cursor). Each backend's live tests compare these against the server's
+   own rendering (MySQL: its text protocol; Oracle: TO_CHAR /
+   JSON_SERIALIZE / ROWIDTOCHAR). A type the backend cannot decode is
+   refused with `OrmError::Unsupported` — never returned as garbage — and
+   the connection stays usable. A value must decode identically however the
    driver fetched it (e.g. MySQL text vs binary protocol).
 
    **Rows affected** means rows *matched* (MySQL connects with

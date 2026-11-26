@@ -45,6 +45,11 @@ impl<C: SqlConnect> SqlTx<C> {
         SqlConn::execute(&mut **self.conn()?, sql, params).await
     }
 
+    /// Run one DML statement per row of `rows` inside the transaction.
+    pub async fn execute_many(&self, sql: &str, rows: &[Vec<Param>]) -> Result<u64, OrmError> {
+        self.conn()?.execute_many(sql, rows).await
+    }
+
     /// Run a query inside the transaction and collect its rows.
     pub async fn query(&self, sql: &str, params: &[Param]) -> Result<Rows, OrmError> {
         self.conn()?.query_rows(sql, params).await

@@ -105,6 +105,19 @@ pub trait SqlConn {
     where
         F: FnMut(Vec<Value>) -> Result<(), OrmError>;
 
+    /// Run one DML statement once per row of `rows`; returns the total rows
+    /// affected. The default runs them one by one; backends with array
+    /// execution (Oracle) send them in one round trip.
+    fn execute_many(&mut self, sql: &str, rows: &[Vec<Param>]) -> impl Future<Output = Result<u64, OrmError>> {
+        async move {
+            let mut total = 0;
+            for row in rows {
+                total += self.execute(sql, row).await?;
+            }
+            Ok(total)
+        }
+    }
+
     /// Run any statement with bound parameters and collect its result set.
     fn query_rows(&mut self, sql: &str, params: &[Param]) -> impl Future<Output = Result<Rows, OrmError>> {
         async move {

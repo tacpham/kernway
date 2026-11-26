@@ -28,6 +28,14 @@ const PREFETCH_ROWS: u32 = 2;
 /// inline) and for long binds.
 const MAX_LONG_LENGTH: u64 = 0x7FFF_FFFF;
 const FETCH_ARRAY_SIZE: u32 = 100;
+/// Column define flag: prefetch the LOB's whole content with the row.
+const LOB_PREFETCH_FLAG: u64 = 0x200_0000;
+/// Largest JSON / VECTOR image prefetched with a row.
+const JSON_MAX_LENGTH: u64 = 32 * 1024 * 1024;
+const VECTOR_MAX_LENGTH: u64 = 1024 * 1024;
+
+/// Receives each fetched row with its columns.
+type RowSink<'a> = dyn FnMut(&[Column], Vec<Value>) -> Result<(), OrmError> + 'a;
 
 /// The declared type of an OUT (or IN OUT) bind.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -84,6 +92,23 @@ pub struct Column {
     pub scale: i8,
     /// Whether the column accepts NULL.
     pub nullable: bool,
+    /// The type the column is fetched as after a define (0 = as described):
+    /// CLOB as LONG, BLOB as LONG RAW, JSON / VECTOR as text, ROWID and
+    /// INTERVAL as their text form.
+    pub wire_type: u8,
+    /// Character set form of [`wire_type`](Self::wire_type).
+    pub wire_csfrm: u8,
+}
+
+impl Column {
+    /// (type, csfrm) the values arrive in.
+    fn wire(&self) -> (u8, u8) {
+        if self.wire_type != 0 {
+            (self.wire_type, self.wire_csfrm)
+        } else {
+            (self.ora_type, self.csfrm)
+        }
+    }
 }
 
 /// The outcome of [`Conn::execute`].
@@ -98,6 +123,9 @@ pub struct Executed {
     /// One entry per bind: the returned value of an OUT / IN OUT bind, `Null`
     /// for an IN bind.
     pub out: Vec<Value>,
+    /// Result sets a PL/SQL block returned with `DBMS_SQL.RETURN_RESULT`,
+    /// each fetched to the end.
+    pub implicit: Vec<ResultSet>,
 }
 
 fn out_meta(t: OutType) -> (u8, u8, u32) {
@@ -121,6 +149,9 @@ fn value_meta(v: &Value) -> (u8, u8, u32) {
         Value::Float(_) => (ora_type::BINARY_DOUBLE, 0, 8),
         Value::Date(_) => (ora_type::DATE, 0, 7),
         Value::Timestamp(_) => (ora_type::TIMESTAMP, 0, 11),
+        Value::TimestampTz(..) => (ora_type::TIMESTAMP_TZ, 0, 13),
+        Value::IntervalYm { .. } => (ora_type::INTERVAL_YM, 0, 5),
+        Value::IntervalDs { .. } => (ora_type::INTERVAL_DS, 0, 11),
         Value::Raw(b) => (ora_type::RAW, 0, (b.len() as u32).max(1)),
         Value::Bool(_) => (ora_type::BOOLEAN, 0, 4),
         Value::Cursor(_) => (ora_type::CURSOR, 0, 4),
@@ -165,6 +196,20 @@ fn write_value(w: &mut Writer, ora_type_num: u8, v: Option<&Value>) -> Result<()
         Value::Timestamp(d) => {
             w.bytes_wl(&value::encode_timestamp(d));
         }
+        Value::TimestampTz(d, off) => {
+            w.bytes_wl(&value::encode_timestamp_tz(d, *off));
+        }
+        Value::IntervalYm { years, months } => {
+            let mut b = ((i64::from(*years) + 0x8000_0000) as u32).to_be_bytes().to_vec();
+            b.push((months + 60) as u8);
+            w.bytes_wl(&b);
+        }
+        Value::IntervalDs { days, hours, minutes, seconds, nanos } => {
+            let mut b = ((i64::from(*days) + 0x8000_0000) as u32).to_be_bytes().to_vec();
+            b.extend([(hours + 60) as u8, (minutes + 60) as u8, (seconds + 60) as u8]);
+            b.extend(((i64::from(*nanos) + 0x8000_0000) as u32).to_be_bytes());
+            w.bytes_wl(&b);
+        }
         Value::Raw(b) => {
             w.bytes_wl(b);
         }
@@ -180,18 +225,44 @@ fn write_value(w: &mut Writer, ora_type_num: u8, v: Option<&Value>) -> Result<()
     Ok(())
 }
 
-/// The EXECUTE request body (after the function header) for a new cursor.
+/// Bind metadata for one placeholder across every row of an execution: the
+/// type of the first non-NULL value, the largest size.
+fn merged_meta(rows: &[&[Bind]], i: usize) -> Result<(u8, u8, u32), String> {
+    let mut meta: Option<(u8, u8, u32)> = None;
+    let mut max = 0;
+    for row in rows {
+        let b = &row[i];
+        let m = b.meta();
+        max = max.max(m.2);
+        let is_null = matches!(b, Bind::In(Value::Null));
+        match meta {
+            None if !is_null => meta = Some(m),
+            Some((t, _, _)) if !is_null && t != m.0 => {
+                return Err(format!("bind {} mixes value types across rows ({t} and {})", i + 1, m.0));
+            }
+            _ => {}
+        }
+    }
+    let (t, csfrm, _) = meta.unwrap_or((ora_type::VARCHAR, 1, 4));
+    Ok((t, csfrm, max))
+}
+
+/// The EXECUTE request body (after the function header) for a new cursor,
+/// run once per row of `rows` (array DML when there are several).
 fn write_execute(
     w: &mut Writer,
     fv: u8,
     max_string_size: u32,
     sql: &str,
     kind: Kind,
-    binds: &[Bind],
+    rows: &[&[Bind]],
     autocommit: bool,
 ) -> Result<(), String> {
     let is_query = kind == Kind::Query;
+    let binds: &[Bind] = rows.first().copied().unwrap_or(&[]);
     let num_params = binds.len() as u64;
+    let executions = rows.len().max(1) as u64;
+    let metas: Vec<(u8, u8, u32)> = (0..binds.len()).map(|i| merged_meta(rows, i)).collect::<Result<_, _>>()?;
     let mut options = OPT_EXECUTE | OPT_PARSE;
     let exec_flags = EXEC_FLAG_IMPLICIT_RESULTSET;
     let num_iters = if is_query { PREFETCH_ROWS } else { 1 };
@@ -237,15 +308,14 @@ fn write_execute(
     }
     w.bytes_wl(sql.as_bytes());
     w.ub(1); // al8i4[0]: parse
-    w.ub(if is_query { 0 } else { 1 }); // al8i4[1]: executions
+    w.ub(if is_query { 0 } else { executions }); // al8i4[1]: executions
     w.ub(0).ub(0).ub(0).ub(0).ub(0); // [2..6]
     w.ub(u64::from(is_query)); // [7]
     w.ub(0); // [8]
     w.ub(u64::from(exec_flags)); // [9]
     w.ub(0).ub(0).ub(0); // [10..12]
     if num_params > 0 {
-        for b in binds {
-            let (t, csfrm, size) = b.meta();
+        for &(t, csfrm, size) in &metas {
             w.u8(t).u8(BIND_USE_INDICATORS).u8(0).u8(0);
             w.ub(u64::from(size)).ub(0).ub(0).ub(0).ub(0);
             w.ub(if csfrm != 0 { 873 } else { 0 }).u8(csfrm).ub(0);
@@ -254,27 +324,28 @@ fn write_execute(
             }
         }
         if kind == Kind::PlSql {
-            if let Some(b) = binds.iter().find(|b| b.meta().2 > max_string_size && is_text_or_raw(b.meta().0)) {
+            if let Some(&(_, csfrm, size)) = metas.iter().find(|m| m.2 > max_string_size && is_text_or_raw(m.0)) {
                 return Err(format!(
                     "a {}-byte value is too long for a PL/SQL bind (limit {max_string_size}); \
                      write it with SQL (INSERT / UPDATE) instead",
-                    b.meta().2 / if b.meta().1 != 0 { 4 } else { 1 }
+                    size / if csfrm != 0 { 4 } else { 1 }
                 ));
             }
         }
-        w.u8(msg::ROW_DATA);
         // In SQL, values longer than the server's string limit are "long"
         // binds: sent after all the others (in their original order). The
         // server converts them for CLOB / BLOB columns.
-        let is_long = |b: &Bind| kind != Kind::PlSql && b.meta().2 > max_string_size && is_text_or_raw(b.meta().0);
-        for long_pass in [false, true] {
-            for b in binds.iter().filter(|b| is_long(b) == long_pass) {
-                let (t, _, _) = b.meta();
-                let v = match b {
-                    Bind::In(v) | Bind::InOut(v, _) => Some(v),
-                    Bind::Out(_) => None,
-                };
-                write_value(w, t, v)?;
+        let is_long = |m: &(u8, u8, u32)| kind != Kind::PlSql && m.2 > max_string_size && is_text_or_raw(m.0);
+        for row in rows {
+            w.u8(msg::ROW_DATA);
+            for long_pass in [false, true] {
+                for (b, m) in row.iter().zip(&metas).filter(|(_, m)| is_long(m) == long_pass) {
+                    let v = match b {
+                        Bind::In(v) | Bind::InOut(v, _) => Some(v),
+                        Bind::Out(_) => None,
+                    };
+                    write_value(w, m.0, v)?;
+                }
             }
         }
     }
@@ -286,12 +357,59 @@ fn is_text_or_raw(t: u8) -> bool {
 }
 
 /// The type a column is fetched as: CLOB / NCLOB inline as LONG, BLOB as
-/// LONG RAW; everything else as described.
+/// LONG RAW; JSON and VECTOR with their whole binary image prefetched
+/// (decoded by `oson`); everything else as described.
 fn define_type(c: &Column) -> (u8, u8, u64) {
+    use ora_type::*;
     match c.ora_type {
-        ora_type::CLOB => (ora_type::LONG, c.csfrm.max(1), MAX_LONG_LENGTH),
-        ora_type::BLOB => (ora_type::LONG_RAW, 0, MAX_LONG_LENGTH),
+        CLOB => (LONG, c.csfrm.max(1), MAX_LONG_LENGTH),
+        BLOB => (LONG_RAW, 0, MAX_LONG_LENGTH),
+        JSON => (JSON, 0, JSON_MAX_LENGTH),
+        VECTOR => (VECTOR, 0, VECTOR_MAX_LENGTH),
         t => (t, c.csfrm, u64::from(c.buffer_size)),
+    }
+}
+
+fn converted_by_define(t: u8) -> bool {
+    use ora_type::*;
+    matches!(t, CLOB | BLOB | JSON | VECTOR)
+}
+
+/// The first column whose type this driver cannot fetch (object types,
+/// XMLType, BFILE, nested cursors …) — refused up front instead of
+/// returning garbage.
+fn unsupported_column(cols: &[Column]) -> Option<&Column> {
+    use ora_type::*;
+    cols.iter().find(|c| {
+        !converted_by_define(c.ora_type)
+            && !matches!(
+                c.ora_type,
+                VARCHAR | NUMBER | BINARY_INTEGER | LONG | DATE | RAW | LONG_RAW | CHAR | BINARY_FLOAT
+                    | BINARY_DOUBLE | TIMESTAMP | TIMESTAMP_TZ | TIMESTAMP_LTZ | BOOLEAN | JSON | VECTOR | INTERVAL_YM | INTERVAL_DS | ROWID | UROWID
+            )
+    })
+}
+
+fn unsupported_error(c: &Column) -> OrmError {
+    let what = match c.ora_type {
+        ora_type::OBJECT => "an object type / XMLType",
+        ora_type::BFILE => "BFILE",
+        ora_type::CURSOR => "a nested cursor",
+        _ => "a type this driver does not decode",
+    };
+    OrmError::Unsupported(format!(
+        "column {} is {what} (Oracle type {}); convert it in SQL (e.g. TO_CHAR, XMLSERIALIZE, JSON_SERIALIZE)",
+        c.name, c.ora_type
+    ))
+}
+
+/// Set the types the rows will arrive in after a define.
+fn apply_define(cols: &mut [Column]) {
+    for c in cols {
+        let (t, csfrm, _) = define_type(c);
+        c.wire_type = t;
+        c.wire_csfrm = csfrm;
+        c.buffer_size = c.buffer_size.max(1);
     }
 }
 
@@ -331,7 +449,7 @@ fn write_cursor_fetch(w: &mut Writer, fv: u8, cursor_id: u16) {
 
 /// Whether the columns need a define round trip before rows can be fetched.
 fn needs_define(cols: &[Column]) -> bool {
-    cols.iter().any(|c| matches!(c.ora_type, ora_type::CLOB | ora_type::BLOB))
+    cols.iter().any(|c| converted_by_define(c.ora_type))
 }
 
 /// An EXECUTE that only (re)defines the output columns of an open cursor.
@@ -367,9 +485,15 @@ fn write_define(w: &mut Writer, fv: u8, cursor_id: u16, cols: &[Column]) {
     w.ub(0).ub(0).ub(0); // [10..12]
     for c in cols {
         let (t, csfrm, size) = define_type(c);
+        // JSON / VECTOR come as LOBs whose whole content is prefetched.
+        let prefetch = match t {
+            ora_type::JSON | ora_type::VECTOR => size,
+            _ => 0,
+        };
+        let cont_flag = if prefetch > 0 { LOB_PREFETCH_FLAG } else { 0 };
         w.u8(t).u8(BIND_USE_INDICATORS).u8(0).u8(0);
-        w.ub(size).ub(0).ub(0).ub(0).ub(0);
-        w.ub(if csfrm != 0 { 873 } else { 0 }).u8(csfrm).ub(0);
+        w.ub(size).ub(0).ub(cont_flag).ub(0).ub(0); // size, max elements, cont flag, OID, version
+        w.ub(if csfrm != 0 { 873 } else { 0 }).u8(csfrm).ub(prefetch);
         if fv >= 8 {
             w.ub(0);
         }
@@ -387,6 +511,11 @@ struct Response {
     /// REF CURSORs among the OUT values: (index into `out_values`, server
     /// cursor id, columns), to be fetched after the call.
     cursors: Vec<(usize, u16, Vec<Column>)>,
+    /// Implicit result sets (`DBMS_SQL.RETURN_RESULT`): cursor id, columns.
+    implicit: Vec<(u16, Vec<Column>)>,
+    /// Nested cursors (`CURSOR(…)` columns) the server opened: closed, as
+    /// they are not supported.
+    nested: Vec<u16>,
     status: CallStatus,
     flush_out_binds: bool,
 }
@@ -470,7 +599,7 @@ fn parse_response(
                             row.push(last_row.get(i).cloned().unwrap_or(Value::Null));
                             continue;
                         }
-                        row.push(read_column(&mut r, c)?);
+                        row.push(read_column(&mut r, c, fv, &mut out.nested)?);
                     }
                     bit_vector = None;
                     last_row = row.clone();
@@ -521,7 +650,14 @@ fn parse_response(
                 break;
             }
             msg::IMPLICIT_RESULTSET => {
-                return Err(ParseError::Invalid("implicit result sets are not supported yet".into()));
+                let n = r.ub4()?;
+                for _ in 0..n {
+                    let skip = r.u8()? as usize;
+                    r.skip(skip)?;
+                    let cols = parse_describe(&mut r, fv)?;
+                    let id = r.ub2()?;
+                    out.implicit.push((id, cols));
+                }
             }
             other => {
                 if common_message(&mut r, other, fv, &mut out.status)? && !eor {
@@ -533,28 +669,127 @@ fn parse_response(
     Ok(out)
 }
 
-fn read_column(r: &mut Reader<'_>, c: &Column) -> PResult<Value> {
-    use ora_type::*;
-    if c.buffer_size == 0 && !matches!(c.ora_type, LONG | LONG_RAW | UROWID) {
-        return Ok(Value::Null);
-    }
-    match c.ora_type {
-        JSON | VECTOR | CURSOR | ROWID | UROWID | CLOB | BLOB => Err(ParseError::Invalid(format!(
-            "column {} has a type not supported yet ({}); convert it in SQL (TO_CHAR, DBMS_LOB.SUBSTR, ROWIDTOCHAR)",
-            c.name, c.ora_type
-        ))),
-        _ => {
-            let v = match r.bytes()? {
-                Some(b) => value::decode(c.ora_type, c.csfrm, b).map_err(ParseError::Invalid)?,
-                None => Value::Null,
-            };
-            if matches!(c.ora_type, LONG | LONG_RAW) {
-                r.sb()?;
-                r.skip_ub()?;
-            }
-            Ok(v)
+const ROWID_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Oracle's extended rowid text: object (6), file (3), block (6), row (3)
+/// in base64 digits.
+fn encode_rowid(rba: u32, partition: u16, block: u32, slot: u16) -> String {
+    let mut out = String::with_capacity(18);
+    for (value, digits) in [(u64::from(rba), 6), (u64::from(partition), 3), (u64::from(block), 6), (u64::from(slot), 3)] {
+        for i in (0..digits).rev() {
+            out.push(ROWID_ALPHABET[(value >> (6 * i) & 0x3F) as usize] as char);
         }
     }
+    out
+}
+
+fn skip_bytes_with_length(r: &mut Reader<'_>) -> PResult<()> {
+    if r.ub4()? > 0 {
+        r.skip_bytes()?;
+    }
+    Ok(())
+}
+
+fn read_column(r: &mut Reader<'_>, c: &Column, fv: u8, nested: &mut Vec<u16>) -> PResult<Value> {
+    use ora_type::*;
+    let (t, csfrm) = c.wire();
+    if c.buffer_size == 0 && !matches!(t, LONG | LONG_RAW | UROWID) {
+        return Ok(Value::Null);
+    }
+    if c.wire_type == 0 {
+        // Types this driver refuses are still read past exactly, so the
+        // response stays in step; the caller then reports them.
+        match c.ora_type {
+            OBJECT => {
+                for _ in 0..3 {
+                    skip_bytes_with_length(r)?; // type OID, OID, snapshot
+                }
+                r.ub2()?; // version
+                let n = r.ub4()?;
+                r.ub2()?; // flags
+                if n > 0 {
+                    r.skip_bytes()?;
+                }
+                return Ok(Value::Null);
+            }
+            BFILE => {
+                skip_bytes_with_length(r)?; // locator
+                return Ok(Value::Null);
+            }
+            CURSOR => {
+                r.u8()?;
+                parse_describe(r, fv)?;
+                nested.push(r.ub2()?);
+                return Ok(Value::Null);
+            }
+            _ => {}
+        }
+    }
+    if t == ROWID {
+        // A physical rowid as its parts; text is Oracle's 18-character base64.
+        let n = r.u8()?;
+        if n == 0 || n == 0xFF {
+            return Ok(Value::Null);
+        }
+        let rba = r.ub4()?;
+        let partition = r.ub2()?;
+        r.u8()?;
+        let block = r.ub4()?;
+        let slot = r.ub2()?;
+        return Ok(Value::Str(encode_rowid(rba, partition, block, slot)));
+    }
+    if t == UROWID {
+        // Two length-prefixed chunks: a length (ignored), then the image.
+        if r.bytes()?.is_none() {
+            return Ok(Value::Null);
+        }
+        let b = r.bytes()?.unwrap_or_default();
+        if b.is_empty() {
+            return Ok(Value::Null);
+        }
+        if b[0] == 1 && b.len() < 13 {
+            return Err(ParseError::Invalid("short physical UROWID".into()));
+        }
+        if b[0] == 1 {
+            let be32 = |i: usize| u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+            let be16 = |i: usize| u16::from_be_bytes([b[i], b[i + 1]]);
+            return Ok(Value::Str(encode_rowid(be32(1), be16(5), be32(7), be16(11))));
+        }
+        // Logical rowid (index-organized table): '*' + base64 of the rest.
+        let mut out = String::from("*");
+        for chunk in b[1..].chunks(3) {
+            let v = chunk.iter().enumerate().fold(0u32, |a, (i, x)| a | u32::from(*x) << (16 - 8 * i));
+            for k in 0..=chunk.len() {
+                out.push(ROWID_ALPHABET[(v >> (18 - 6 * k) & 0x3F) as usize] as char);
+            }
+        }
+        return Ok(Value::Str(out));
+    }
+    if matches!(t, JSON | VECTOR) {
+        // A LOB with its whole content prefetched: size, chunk size, the
+        // image, then the (unused) locator.
+        if r.ub4()? == 0 {
+            return Ok(Value::Null);
+        }
+        r.ub8()?;
+        r.ub4()?;
+        let image = r.bytes()?.unwrap_or_default();
+        r.skip_bytes()?;
+        if image.is_empty() {
+            return Ok(Value::Null);
+        }
+        let text = if t == JSON { crate::oson::decode_oson(&image) } else { crate::oson::decode_vector(&image) };
+        return text.map(Value::Str).map_err(ParseError::Invalid);
+    }
+    let v = match r.bytes()? {
+        Some(b) => value::decode(t, csfrm, b).map_err(ParseError::Invalid)?,
+        None => Value::Null,
+    };
+    if matches!(t, LONG | LONG_RAW) {
+        r.sb()?;
+        r.skip_ub()?;
+    }
+    Ok(v)
 }
 
 fn parse_describe(r: &mut Reader<'_>, fv: u8) -> PResult<Vec<Column>> {
@@ -655,45 +890,90 @@ impl Conn {
 
     /// Execute one SQL statement or PL/SQL block with positional `binds`
     /// (one per placeholder: every occurrence in SQL, each distinct name once
-    /// in PL/SQL). Queries return all rows; PL/SQL returns OUT values.
+    /// in PL/SQL). Queries return all rows; PL/SQL returns OUT values and
+    /// implicit result sets.
     pub async fn execute(&mut self, sql: &str, binds: &[Bind]) -> Result<Executed, OrmError> {
-        self.execute_opts(sql, binds, false).await
+        self.execute_collect(sql, binds, false).await
     }
 
     /// [`execute`](Self::execute), committing the transaction as part of the
     /// same call (Oracle's autocommit): one round trip instead of two.
     pub async fn execute_autocommit(&mut self, sql: &str, binds: &[Bind]) -> Result<Executed, OrmError> {
-        self.execute_opts(sql, binds, true).await
+        self.execute_collect(sql, binds, true).await
     }
 
-    async fn execute_opts(&mut self, sql: &str, binds: &[Bind], autocommit: bool) -> Result<Executed, OrmError> {
+    async fn execute_collect(&mut self, sql: &str, binds: &[Bind], autocommit: bool) -> Result<Executed, OrmError> {
+        let mut rows = Vec::new();
+        let mut sink = |_: &[Column], row: Vec<Value>| {
+            rows.push(row);
+            Ok(())
+        };
+        let mut ex = self.execute_core(sql, &[binds], autocommit, &mut sink).await?;
+        ex.rows = rows;
+        Ok(ex)
+    }
+
+    /// Execute a statement, handing each result row to `each` as its fetch
+    /// round arrives — rows are never all held in memory. The returned
+    /// [`Executed`] carries columns, counts and OUT values, but no rows.
+    pub async fn execute_each<F>(&mut self, sql: &str, binds: &[Bind], autocommit: bool, mut each: F) -> Result<Executed, OrmError>
+    where
+        F: FnMut(&[Column], Vec<Value>) -> Result<(), OrmError>,
+    {
+        self.execute_core(sql, &[binds], autocommit, &mut each).await
+    }
+
+    /// Run one DML statement for every row of `rows` in a single round trip
+    /// (array DML); returns the total rows affected. On an error the rows
+    /// before the failing one stay applied — run it in a transaction to get
+    /// all or nothing.
+    pub async fn execute_many(&mut self, sql: &str, rows: &[Vec<Bind>], autocommit: bool) -> Result<u64, OrmError> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let refs: Vec<&[Bind]> = rows.iter().map(Vec::as_slice).collect();
+        let mut sink = |_: &[Column], _: Vec<Value>| Ok(());
+        Ok(self.execute_core(sql, &refs, autocommit, &mut sink).await?.row_count)
+    }
+
+    async fn execute_core(
+        &mut self,
+        sql: &str,
+        rows: &[&[Bind]],
+        autocommit: bool,
+        sink: &mut RowSink<'_>,
+    ) -> Result<Executed, OrmError> {
         let kind = stmt::classify(sql);
         let names = stmt::bind_names(sql, kind);
-        if names.len() != binds.len() {
+        let binds: &[Bind] = rows.first().copied().unwrap_or(&[]);
+        if let Some(bad) = rows.iter().find(|r| r.len() != names.len()) {
             return Err(OrmError::Query(format!(
                 "statement has {} bind placeholder(s) {:?} but {} value(s) were given",
                 names.len(),
                 names,
-                binds.len()
+                bad.len()
             )));
         }
-        if kind != Kind::PlSql && binds.iter().any(|b| !matches!(b, Bind::In(_))) {
+        if rows.len() > 1 && kind != Kind::Dml {
+            return Err(OrmError::Query("several rows of binds can only be run for INSERT / UPDATE / DELETE / MERGE".into()));
+        }
+        if kind != Kind::PlSql && rows.iter().any(|r| r.iter().any(|b| !matches!(b, Bind::In(_)))) {
             return Err(OrmError::Query("OUT binds are only supported in PL/SQL blocks".into()));
         }
         let mut w = Writer::new();
         self.begin_call(&mut w, func::EXECUTE);
-        write_execute(&mut w, self.field_version, self.max_string_size, sql, kind, binds, autocommit)
+        write_execute(&mut w, self.field_version, self.max_string_size, sql, kind, rows, autocommit)
             .map_err(OrmError::TypeConversion)?;
         self.send_data(&w.buf).await?;
 
         let mut resp = self.read_call(None, binds, &[]).await?;
-        let _ = &mut resp.cursors;
         while resp.flush_out_binds {
             self.send_data(&[msg::FLUSH_OUT_BINDS]).await?;
             let more = self.read_call(None, binds, &[]).await?;
             let base = resp.out_values.len();
             resp.cursors.extend(more.cursors.into_iter().map(|(i, id, c)| (base + i, id, c)));
             resp.out_values.extend(more.out_values);
+            resp.implicit.extend(more.implicit);
             resp.status = more.status;
             resp.flush_out_binds = more.flush_out_binds;
             if resp.out_positions.is_none() {
@@ -702,31 +982,49 @@ impl Conn {
         }
 
         let cursor_id = resp.status.cursor_id;
-        let mut result = Executed { columns: resp.columns.unwrap_or_default(), rows: resp.rows, ..Default::default() };
-        let mut status = resp.status;
+        let mut result = Executed { columns: resp.columns.take().unwrap_or_default(), ..Default::default() };
+        let mut status = resp.status.clone();
+        let mut fetched = 0u64;
+        let mut last_row: Vec<Value> = Vec::new();
+        // Hand rows to the sink; on its error stop and release the cursor.
+        macro_rules! emit {
+            ($rows:expr) => {
+                for row in $rows {
+                    fetched += 1;
+                    last_row.clone_from(&row);
+                    if let Err(e) = sink(&result.columns, row) {
+                        self.queue_close(cursor_id);
+                        return Err(e);
+                    }
+                }
+            };
+        }
+        let ok_so_far = status.error.as_ref().is_none_or(|e| e.code == ERR_NO_DATA_FOUND);
+        if kind == Kind::Query && ok_so_far {
+            if let Some(c) = unsupported_column(&result.columns) {
+                let e = unsupported_error(c);
+                self.queue_close(cursor_id);
+                return Err(e);
+            }
+        }
         if kind == Kind::Query && status.error.is_none() && needs_define(&result.columns) {
-            // LOB columns: redefine them to be fetched inline (CLOB as LONG,
-            // BLOB as LONG RAW). The server sends no rows before the define.
+            // Redefine converted columns (LOB / JSON / VECTOR / ROWID /
+            // INTERVAL). The server sends no rows before the define.
             let mut w = Writer::new();
             self.begin_call(&mut w, func::EXECUTE);
             write_define(&mut w, self.field_version, cursor_id, &result.columns);
             self.send_data(&w.buf).await?;
-            // From here rows arrive in the defined types (the define reply may
-            // already carry some).
-            for c in &mut result.columns {
-                let (t, csfrm, _) = define_type(c);
-                c.ora_type = t;
-                c.csfrm = csfrm;
-                c.buffer_size = c.buffer_size.max(1);
-            }
+            apply_define(&mut result.columns);
             let cols = result.columns.clone();
             let r = self.read_call(Some(&cols), &[], &[]).await?;
             if let Some(e) = r.status.error.as_ref().filter(|e| e.code != ERR_NO_DATA_FOUND) {
                 self.queue_close(cursor_id);
                 return Err(server_error(e));
             }
-            result.rows.extend(r.rows);
+            emit!(r.rows);
             status = r.status;
+        } else {
+            emit!(std::mem::take(&mut resp.rows));
         }
         if kind == Kind::Query {
             loop {
@@ -742,10 +1040,9 @@ impl Conn {
                 self.begin_call(&mut w, func::FETCH);
                 w.ub(u64::from(cursor_id)).ub(u64::from(FETCH_ARRAY_SIZE));
                 self.send_data(&w.buf).await?;
-                let prev = result.rows.last().cloned().unwrap_or_default();
                 let cols = result.columns.clone();
-                let r = self.read_call(Some(&cols), &[], &prev).await?;
-                result.rows.extend(r.rows);
+                let r = self.read_call(Some(&cols), &[], &last_row).await?;
+                emit!(r.rows);
                 status = r.status;
             }
         } else if let Some(e) = &status.error {
@@ -753,13 +1050,16 @@ impl Conn {
             return Err(server_error(e));
         }
         self.queue_close(cursor_id);
-        result.row_count = if kind == Kind::Query { result.rows.len() as u64 } else { status.row_count };
+        result.row_count = if kind == Kind::Query { fetched } else { status.row_count };
         // REF CURSORs: fetch each to the end and hand back its rows.
         for (idx, id, cols) in std::mem::take(&mut resp.cursors) {
             let rs = self.fetch_ref_cursor(id, cols).await?;
             if let Some(slot) = resp.out_values.get_mut(idx) {
                 *slot = Value::Cursor(rs);
             }
+        }
+        for (id, cols) in std::mem::take(&mut resp.implicit) {
+            result.implicit.push(self.fetch_ref_cursor(id, cols).await?);
         }
         result.out = vec![Value::Null; binds.len()];
         if let Some(positions) = resp.out_positions {
@@ -776,6 +1076,11 @@ impl Conn {
     /// cursor has no SQL text, so rows come from EXECUTE-with-FETCH calls on
     /// its id (after a define round trip if it has LOB columns).
     async fn fetch_ref_cursor(&mut self, cursor_id: u16, mut columns: Vec<Column>) -> Result<ResultSet, OrmError> {
+        if let Some(c) = unsupported_column(&columns) {
+            let e = unsupported_error(c);
+            self.queue_close(cursor_id);
+            return Err(e);
+        }
         let mut rows: Vec<Vec<Value>> = Vec::new();
         let fv = self.field_version;
         if needs_define(&columns) {
@@ -783,12 +1088,7 @@ impl Conn {
             self.begin_call(&mut w, func::EXECUTE);
             write_define(&mut w, fv, cursor_id, &columns);
             self.send_data(&w.buf).await?;
-            for c in &mut columns {
-                let (t, csfrm, _) = define_type(c);
-                c.ora_type = t;
-                c.csfrm = csfrm;
-                c.buffer_size = c.buffer_size.max(1);
-            }
+            apply_define(&mut columns);
             let r = self.read_call(Some(&columns), &[], &[]).await?;
             rows.extend(r.rows);
             if let Some(e) = &r.status.error {
@@ -828,7 +1128,11 @@ impl Conn {
 
     async fn read_call(&mut self, columns: Option<&[Column]>, binds: &[Bind], prev_row: &[Value]) -> Result<Response, OrmError> {
         let (fv, eor) = (self.field_version, self.end_of_response());
-        self.read_response(|b| parse_response(b, fv, eor, columns, binds, prev_row)).await
+        let mut r = self.read_response(|b| parse_response(b, fv, eor, columns, binds, prev_row)).await?;
+        for id in std::mem::take(&mut r.nested) {
+            self.queue_close(id);
+        }
+        Ok(r)
     }
 
     async fn simple_call(&mut self, code: u8) -> Result<(), OrmError> {
@@ -876,7 +1180,7 @@ mod tests {
     #[test]
     fn execute_of_a_query_matches_the_golden_bytes() {
         let mut w = header(6);
-        write_execute(&mut w, 24, 32767, "SELECT 1 FROM DUAL", Kind::Query, &[], false).unwrap();
+        write_execute(&mut w, 24, 32767, "SELECT 1 FROM DUAL", Kind::Query, &[&[]], false).unwrap();
         assert_eq!(
             hex(&w.buf),
             "03 5E 06 00 02 80 61 00 01 01 12 01 01 0D 00 00 00 01 02 04 7F FF FF FF 00 00 00 00 00 00 \
@@ -889,7 +1193,7 @@ mod tests {
     fn execute_of_plsql_with_out_bind_matches_the_golden_bytes() {
         let mut w = header(7);
         let binds = [Bind::Out(OutType::Number), Bind::In(Value::from(5))];
-        write_execute(&mut w, 24, 32767, "BEGIN :R := F(:A); END;", Kind::PlSql, &binds, false).unwrap();
+        write_execute(&mut w, 24, 32767, "BEGIN :R := F(:A); END;", Kind::PlSql, &[&binds], false).unwrap();
         assert_eq!(
             hex(&w.buf),
             "03 5E 07 00 02 04 29 00 01 01 17 01 01 0D 00 00 00 01 01 04 7F FF FF FF 01 01 02 00 00 00 \
