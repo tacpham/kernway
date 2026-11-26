@@ -60,7 +60,7 @@ pub mod driver;
 #[cfg(feature = "mysql")]
 pub use driver::MySqlDriver;
 #[cfg(feature = "mysql")]
-pub use protocol::{Conn, MysqlConfig, QueryResult};
+pub use protocol::{BindValue, Cell, Conn, Fetched, MysqlConfig, QueryResult};
 #[cfg(feature = "mysql")]
 pub use query::MySqlQueryBuilder;
 #[cfg(feature = "mysql")]

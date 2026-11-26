@@ -13,7 +13,11 @@
 //!   client's `--ssl-mode`).
 //! - `COM_QUERY` (text protocol) and prepared statements (binary protocol, cached
 //!   per connection) for server-side parameter binding.
-//! - Buffered packet I/O: one read syscall serves many small packets.
+//! - Buffered packet I/O: one read syscall serves many small packets; rows are
+//!   decoded in place, straight into the caller's type.
+//! - Multi-result responses (`CLIENT_MULTI_RESULTS`): stored procedures via
+//!   [`Conn::call`] / [`Conn::query_multi`]; every response is read to its end,
+//!   so an error part-way never leaves the connection out of sync.
 //!
 //! ## Not yet
 //!
@@ -36,6 +40,13 @@ const CLIENT_PROTOCOL_41: u32 = 0x0000_0200;
 const CLIENT_TRANSACTIONS: u32 = 0x0000_2000;
 const CLIENT_SECURE_CONNECTION: u32 = 0x0000_8000;
 const CLIENT_PLUGIN_AUTH: u32 = 0x0008_0000;
+/// Accept several result sets per response — required for a `CALL` whose
+/// procedure `SELECT`s (else the server refuses with error 1312).
+const CLIENT_MULTI_RESULTS: u32 = 0x0002_0000;
+/// The same for a `CALL` run as a prepared statement.
+const CLIENT_PS_MULTI_RESULTS: u32 = 0x0004_0000;
+/// Server status flag: another result follows this one in the response.
+const SERVER_MORE_RESULTS_EXISTS: u16 = 0x0008;
 
 const UTF8MB4_GENERAL_CI: u8 = 45;
 const MAX_PACKET: u32 = 16 * 1024 * 1024; // 16 MiB
@@ -620,28 +631,113 @@ impl Conn {
         payload.push(0x03); // COM_QUERY
         payload.extend_from_slice(sql.as_bytes());
         self.write_packet(&payload).await?;
-
         let first = self.read_packet().await?;
-        match first.first().copied() {
-            Some(0x00) => Ok(ok_fetched(&first)),
-            Some(0xFF) => Err(parse_err_packet(&first)),
-            Some(0xFB) => Err(OrmError::Query("LOCAL INFILE not supported".into())),
-            _ => {
-                let (col_count, _) = read_lenenc_int(&first, 0)
-                    .ok_or_else(|| OrmError::Query("bad column count packet".into()))?;
-                self.read_rows(col_count as usize, false, &mut row).await
+        let results = self.read_results(first, false, &mut row, false).await?;
+        Ok(first_result(results))
+    }
+
+    /// Run one textual statement and return **every** result of its response —
+    /// e.g. a `CALL` whose procedure runs several `SELECT`s yields one
+    /// [`QueryResult::Rows`] per `SELECT`, then the [`QueryResult::Ok`] of the call.
+    pub async fn query_multi(&mut self, sql: &str) -> Result<Vec<QueryResult>, OrmError> {
+        self.seq = 0;
+        let mut payload = Vec::with_capacity(sql.len() + 1);
+        payload.push(0x03); // COM_QUERY
+        payload.extend_from_slice(sql.as_bytes());
+        self.write_packet(&payload).await?;
+        let first = self.read_packet().await?;
+        let mut row = cells_to_text;
+        let results = self.read_results(first, false, &mut row, true).await?;
+        Ok(results.into_iter().map(QueryResult::from).collect())
+    }
+
+    /// Call stored procedure `name` with bound arguments (a prepared
+    /// `CALL name(?, …)`) and return every result: one [`QueryResult::Rows`] per
+    /// result set the procedure produces, then the [`QueryResult::Ok`] of the call.
+    /// `name` may be schema-qualified (`db.proc`); it must be a plain identifier.
+    /// `OUT` parameters are read the MySQL way: pass a user variable in SQL via
+    /// [`query_multi`](Self::query_multi) (`CALL p(?, @out)`), then `SELECT @out`.
+    pub async fn call(&mut self, name: &str, args: &[BindValue]) -> Result<Vec<QueryResult>, OrmError> {
+        let sql = call_sql(name, args.len())?;
+        let mut row = cells_to_text;
+        let results = self.exec_prepared_inner(&sql, args, &mut row, true).await?;
+        Ok(results.into_iter().map(QueryResult::from).collect())
+    }
+
+    /// Read every result of a response whose first packet is `first`: result
+    /// sets and `OK`s, following `SERVER_MORE_RESULTS_EXISTS` to the end. Only
+    /// the first result is kept unless `keep_all`, but the rest is always read,
+    /// so the connection is left at a clean command boundary.
+    ///
+    /// An `ERR` packet ends the response and is returned at once. An error from
+    /// the row function (say, a value that does not fit the entity) is held
+    /// until the response is fully read, then returned — never leaving unread
+    /// packets behind to be mistaken for the next command's reply.
+    async fn read_results<R, F>(
+        &mut self,
+        mut first: Vec<u8>,
+        binary: bool,
+        row: &mut F,
+        keep_all: bool,
+    ) -> Result<Vec<Fetched<R>>, OrmError>
+    where
+        F: FnMut(&[Cell<'_>]) -> Result<R, OrmError>,
+    {
+        let mut results = Vec::new();
+        let mut deferred: Option<OrmError> = None;
+        loop {
+            let (result, more) = match first.first().copied() {
+                Some(0x00) => {
+                    let more = ok_status(&first) & SERVER_MORE_RESULTS_EXISTS != 0;
+                    (Ok(ok_fetched(&first)), more)
+                }
+                Some(0xFF) => return Err(parse_err_packet(&first)),
+                Some(0xFB) => return Err(OrmError::Query("LOCAL INFILE not supported".into())),
+                _ => {
+                    let (col_count, _) = read_lenenc_int(&first, 0)
+                        .ok_or_else(|| OrmError::Query("bad column count packet".into()))?;
+                    // Rows of a result set we are not keeping are read and dropped.
+                    if keep_all || results.is_empty() {
+                        self.read_rows(col_count as usize, binary, row).await?
+                    } else {
+                        let (_, more) = self
+                            .read_rows(col_count as usize, binary, &mut |_: &[Cell<'_>]| Ok(()))
+                            .await?;
+                        (Ok(Fetched::Ok { affected_rows: 0, last_insert_id: 0 }), more)
+                    }
+                }
+            };
+            match result {
+                Ok(fetched) if keep_all || results.is_empty() => results.push(fetched),
+                Ok(_) => {}
+                Err(e) => {
+                    deferred.get_or_insert(e);
+                }
             }
+            if !more {
+                break;
+            }
+            first = self.read_packet().await?;
+        }
+        match deferred {
+            Some(e) => Err(e),
+            None => Ok(results),
         }
     }
 
     /// Read a result set — column definitions, EOF, rows, EOF — decoding each
     /// row (text or binary protocol) in place and handing it to `row`.
+    ///
+    /// Returns the result set (or the first error the row function raised — the
+    /// remaining rows are still read off the wire) and whether another result
+    /// follows. An `Err` from this function itself means an `ERR` packet ended
+    /// the response, or the connection failed.
     async fn read_rows<R, F>(
         &mut self,
         col_count: usize,
         binary: bool,
         row: &mut F,
-    ) -> Result<Fetched<R>, OrmError>
+    ) -> Result<(Result<Fetched<R>, OrmError>, bool), OrmError>
     where
         F: FnMut(&[Cell<'_>]) -> Result<R, OrmError>,
     {
@@ -652,31 +748,44 @@ impl Conn {
         let columns: Vec<String> = metas.iter().map(|m| m.name.clone()).collect();
 
         let mut rows = Vec::new();
+        let mut failed: Option<OrmError> = None;
         let mut scratch: Vec<Cell<'static>> = Vec::with_capacity(col_count);
+        // Decode one row and hand it over — unless an earlier row already failed,
+        // in which case the rest are only drained.
+        let mut take = |packet: &[u8], scratch: &mut Vec<Cell<'static>>| {
+            if failed.is_some() {
+                return;
+            }
+            let mut cells = recycle(std::mem::take(scratch));
+            let outcome = decode_row(packet, binary, &metas, &mut cells).and_then(|()| row(&cells));
+            *scratch = recycle(cells);
+            match outcome {
+                Ok(r) => rows.push(r),
+                Err(e) => failed = Some(e),
+            }
+        };
         // EOF after the column definitions (CLIENT_DEPRECATE_EOF is not set). A
         // text result set that skips it starts with its first row instead.
         let after_cols = self.read_packet_ref().await?;
         if !binary && !is_eof(after_cols) {
-            let mut cells = recycle(std::mem::take(&mut scratch));
-            decode_row(after_cols, binary, &metas, &mut cells)?;
-            rows.push(row(&cells)?);
-            scratch = recycle(cells);
+            take(after_cols, &mut scratch);
         }
-        loop {
+        let more = loop {
             let packet = self.read_packet_ref().await?;
             if is_eof(packet) {
-                break;
+                break eof_status(packet) & SERVER_MORE_RESULTS_EXISTS != 0;
             }
             if packet.first() == Some(&0xFF) {
                 return Err(parse_err_packet(packet));
             }
-            let mut cells = recycle(std::mem::take(&mut scratch));
-            decode_row(packet, binary, &metas, &mut cells)?;
-            rows.push(row(&cells)?);
-            scratch = recycle(cells);
-        }
+            take(packet, &mut scratch);
+        };
         self.release_drained();
-        Ok(Fetched::Rows { columns, rows })
+        let result = match failed {
+            Some(e) => Err(e),
+            None => Ok(Fetched::Rows { columns, rows }),
+        };
+        Ok((result, more))
     }
 
     // --- Prepared statements (binary protocol) ---------------------------
@@ -711,17 +820,34 @@ impl Conn {
     where
         F: FnMut(&[Cell<'_>]) -> Result<R, OrmError>,
     {
+        let results = self.exec_prepared_inner(sql, params, &mut row, false).await?;
+        Ok(first_result(results))
+    }
+
+    /// Execute a (cached) prepared statement and read its response; every
+    /// result when `keep_all`, else just the first. Re-prepares once if the
+    /// server forgot the statement.
+    async fn exec_prepared_inner<R, F>(
+        &mut self,
+        sql: &str,
+        params: &[BindValue],
+        row: &mut F,
+        keep_all: bool,
+    ) -> Result<Vec<Fetched<R>>, OrmError>
+    where
+        F: FnMut(&[Cell<'_>]) -> Result<R, OrmError>,
+    {
         let cached = self.stmts.get(sql).copied();
         let stmt = match cached {
             Some(stmt) => stmt,
             None => self.prepare_cached(sql).await?,
         };
-        match self.stmt_execute(stmt.id, stmt.num_params, params, &mut row).await? {
+        match self.stmt_execute(stmt.id, stmt.num_params, params, row, keep_all).await? {
             Exec::Done(result) => Ok(result),
             Exec::Stale if cached.is_some() => {
                 self.forget_stmt(sql);
                 let stmt = self.prepare_cached(sql).await?;
-                match self.stmt_execute(stmt.id, stmt.num_params, params, &mut row).await? {
+                match self.stmt_execute(stmt.id, stmt.num_params, params, row, keep_all).await? {
                     Exec::Done(result) => Ok(result),
                     Exec::Stale => Err(OrmError::Query(
                         "MySQL rejected a freshly prepared statement".into(),
@@ -804,6 +930,7 @@ impl Conn {
         num_params: u16,
         params: &[BindValue],
         row: &mut F,
+        keep_all: bool,
     ) -> Result<Exec<R>, OrmError>
     where
         F: FnMut(&[Cell<'_>]) -> Result<R, OrmError>,
@@ -844,20 +971,12 @@ impl Conn {
         self.write_packet(&payload).await?;
 
         let first = self.read_packet().await?;
-        match first.first().copied() {
-            Some(0x00) => Ok(Exec::Done(ok_fetched(&first))),
-            Some(0xFF) => match err_code(&first) {
-                Some(ER_UNKNOWN_STMT_HANDLER | ER_NEED_REPREPARE) => Ok(Exec::Stale),
-                _ => Err(parse_err_packet(&first)),
-            },
-            _ => {
-                let (col_count, _) = read_lenenc_int(&first, 0)
-                    .ok_or_else(|| OrmError::Query("bad column count packet".into()))?;
-                self.read_rows(col_count as usize, true, row)
-                    .await
-                    .map(Exec::Done)
-            }
+        if matches!(err_code(&first), Some(ER_UNKNOWN_STMT_HANDLER | ER_NEED_REPREPARE)) {
+            return Ok(Exec::Stale);
         }
+        self.read_results(first, true, row, keep_all)
+            .await
+            .map(Exec::Done)
     }
 
     async fn stmt_close(&mut self, stmt_id: u32) -> Result<(), OrmError> {
@@ -949,6 +1068,8 @@ fn handshake_header(cfg: &MysqlConfig, extra_caps: u32) -> Vec<u8> {
         | CLIENT_TRANSACTIONS
         | CLIENT_SECURE_CONNECTION
         | CLIENT_PLUGIN_AUTH
+        | CLIENT_MULTI_RESULTS
+        | CLIENT_PS_MULTI_RESULTS
         | extra_caps;
     if cfg.database.is_some() {
         caps |= CLIENT_CONNECT_WITH_DB;
@@ -1041,6 +1162,46 @@ fn is_eof(p: &[u8]) -> bool {
     p.first() == Some(&0xFE) && p.len() < 9
 }
 
+/// The first result of a response (an empty `OK` if, oddly, there was none).
+fn first_result<R>(results: Vec<Fetched<R>>) -> Fetched<R> {
+    results
+        .into_iter()
+        .next()
+        .unwrap_or(Fetched::Ok { affected_rows: 0, last_insert_id: 0 })
+}
+
+/// Server status flags of an `OK` packet (after its two length-encoded ints).
+fn ok_status(p: &[u8]) -> u16 {
+    let mut i = 1usize;
+    for _ in 0..2 {
+        match read_lenenc_int(p, i) {
+            Some((_, n)) => i += n,
+            None => return 0,
+        }
+    }
+    p.get(i..i + 2).map_or(0, |b| u16::from_le_bytes([b[0], b[1]]))
+}
+
+/// Server status flags of an `EOF` packet (`0xFE`, warnings, status).
+fn eof_status(p: &[u8]) -> u16 {
+    p.get(3..5).map_or(0, |b| u16::from_le_bytes([b[0], b[1]]))
+}
+
+/// `CALL name(?, …)` for `args` arguments. `name` must be an identifier,
+/// optionally schema-qualified; each part is backquoted.
+fn call_sql(name: &str, args: usize) -> Result<String, OrmError> {
+    let parts: Vec<&str> = name.split('.').collect();
+    let valid = parts.len() <= 2
+        && parts.iter().all(|p| {
+            !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$')
+        });
+    if !valid {
+        return Err(OrmError::Query(format!("invalid procedure name '{name}'")));
+    }
+    let quoted: Vec<String> = parts.iter().map(|p| format!("`{p}`")).collect();
+    Ok(format!("CALL {}({})", quoted.join("."), vec!["?"; args].join(", ")))
+}
+
 /// An `OK` packet as a row-less [`Fetched`].
 fn ok_fetched<R>(p: &[u8]) -> Fetched<R> {
     match parse_ok_packet(p) {
@@ -1062,8 +1223,8 @@ fn parse_ok_packet(p: &[u8]) -> QueryResult {
 
 /// Outcome of executing a (possibly cached) prepared statement.
 enum Exec<R> {
-    /// The statement ran; here is its result.
-    Done(Fetched<R>),
+    /// The statement ran; here are its results.
+    Done(Vec<Fetched<R>>),
     /// The server no longer knows this statement id — re-prepare and retry.
     Stale,
 }
@@ -1819,5 +1980,23 @@ mod tests {
             Some("200".to_string()), Some("-5".to_string()), None, Some("hi".to_string())
         ]);
         assert_eq!(Cell::F32(0.1).to_text().as_deref(), Some("0.1"), "FLOAT keeps f32 formatting");
+    }
+
+    #[test]
+    fn call_sql_quotes_identifiers_and_refuses_anything_else() {
+        assert_eq!(call_sql("p", 0).unwrap(), "CALL `p`()");
+        assert_eq!(call_sql("db.p_1$", 2).unwrap(), "CALL `db`.`p_1$`(?, ?)");
+        for bad in ["", "a.b.c", "p;DROP", "p`x", "p x", ".p", "p."] {
+            assert!(call_sql(bad, 0).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn status_flags_are_read_from_ok_and_eof_packets() {
+        // OK: 0x00, affected=1, last_id=0, status=0x000A (MORE_RESULTS | AUTOCOMMIT).
+        assert_eq!(ok_status(&[0x00, 0x01, 0x00, 0x0A, 0x00, 0x00, 0x00]), 0x000A);
+        // EOF: 0xFE, warnings=0, status=0x0008.
+        assert_eq!(eof_status(&[0xFE, 0x00, 0x00, 0x08, 0x00]) & SERVER_MORE_RESULTS_EXISTS, 0x0008);
+        assert_eq!(ok_status(&[0x00]), 0, "a truncated OK reads as no flags");
     }
 }
