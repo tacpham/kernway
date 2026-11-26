@@ -24,6 +24,7 @@
 
 use kernway_orm_core::error::OrmError;
 use rt_net::AsyncTcpStream;
+use std::collections::{HashMap, VecDeque};
 use std::net::ToSocketAddrs;
 
 // --- Capability flags (only the ones we assert) ---
@@ -117,10 +118,41 @@ pub enum QueryResult {
     },
 }
 
+/// Bytes requested from the socket per read: one syscall drains many small
+/// packets (a result set is one packet per row) instead of two reads per packet.
+const READ_CHUNK: usize = 16 * 1024;
+/// A read buffer grown past this (a large packet) is shrunk back once drained,
+/// so one big row does not pin megabytes per idle pooled connection.
+const READ_RETAIN: usize = 256 * 1024;
+/// Prepared statements kept per connection. Past this the oldest is closed on
+/// the server, bounding server-side statement memory (`max_prepared_stmt_count`
+/// is global, ~16k by default) under dynamic SQL such as varying `IN` lists.
+const STMT_CACHE_CAP: usize = 256;
+/// `ER_UNKNOWN_STMT_HANDLER`: the server no longer knows a cached statement id.
+const ER_UNKNOWN_STMT_HANDLER: u16 = 1243;
+/// `ER_NEED_REPREPARE`: the statement must be re-prepared (e.g. after DDL).
+const ER_NEED_REPREPARE: u16 = 1615;
+
+/// A server-side prepared statement, cached by its SQL text.
+#[derive(Clone, Copy)]
+struct Stmt {
+    id: u32,
+    num_params: u16,
+}
+
 /// A live, authenticated MySQL connection over the per-core async reactor.
 pub struct Conn {
     stream: AsyncTcpStream,
     seq: u8,
+    /// Read buffer: bytes `[rpos, rlen)` are received but not yet consumed.
+    rbuf: Vec<u8>,
+    rpos: usize,
+    rlen: usize,
+    /// Reused outgoing frame buffer (header + payload).
+    wbuf: Vec<u8>,
+    /// Prepared statements by SQL text, plus their insertion order for eviction.
+    stmts: HashMap<String, Stmt>,
+    stmt_order: VecDeque<String>,
 }
 
 impl Conn {
@@ -137,24 +169,44 @@ impl Conn {
         let stream = AsyncTcpStream::connect(addr)
             .await
             .map_err(|e| conn_err(format!("connect {}:{} failed: {e}", cfg.host, cfg.port)))?;
-        let mut conn = Self { stream, seq: 0 };
+        let mut conn = Self {
+            stream,
+            seq: 0,
+            rbuf: vec![0; READ_CHUNK],
+            rpos: 0,
+            rlen: 0,
+            wbuf: Vec::with_capacity(READ_CHUNK),
+            stmts: HashMap::new(),
+            stmt_order: VecDeque::new(),
+        };
         conn.handshake(cfg).await?;
         Ok(conn)
     }
 
-    /// Read exactly `buf.len()` bytes, parking on the reactor across short reads.
-    async fn read_exact_into(&mut self, buf: &mut [u8]) -> Result<(), OrmError> {
-        let mut filled = 0;
-        while filled < buf.len() {
-            let n = self
+    /// Make at least `n` unconsumed bytes available in the read buffer, reading
+    /// from the socket only when needed and up to [`READ_CHUNK`] (or the rest of
+    /// a large packet) at a time — so a burst of small packets costs one syscall.
+    async fn fill(&mut self, n: usize) -> Result<(), OrmError> {
+        while self.rlen - self.rpos < n {
+            // Slide the unconsumed tail to the front before reading more.
+            if self.rpos > 0 {
+                self.rbuf.copy_within(self.rpos..self.rlen, 0);
+                self.rlen -= self.rpos;
+                self.rpos = 0;
+            }
+            let want = self.rlen + n.max(READ_CHUNK);
+            if self.rbuf.len() < want {
+                self.rbuf.resize(want, 0);
+            }
+            let got = self
                 .stream
-                .read(&mut buf[filled..])
+                .read(&mut self.rbuf[self.rlen..])
                 .await
                 .map_err(|e| conn_err(format!("read: {e}")))?;
-            if n == 0 {
+            if got == 0 {
                 return Err(conn_err("unexpected EOF from MySQL"));
             }
-            filled += n;
+            self.rlen += got;
         }
         Ok(())
     }
@@ -162,38 +214,59 @@ impl Conn {
     // --- Packet framing ---------------------------------------------------
 
     /// Read one logical packet payload, transparently joining the 16 MiB
-    /// continuation packets MySQL splits large payloads into.
+    /// continuation packets MySQL splits large payloads into. The payload is cut
+    /// straight out of the read buffer: one allocation, one copy.
     async fn read_packet(&mut self) -> Result<Vec<u8>, OrmError> {
-        let mut payload = Vec::new();
+        let mut payload: Option<Vec<u8>> = None;
         loop {
-            let mut header = [0u8; 4];
-            self.read_exact_into(&mut header).await?;
-            let len = (header[0] as usize) | (header[1] as usize) << 8 | (header[2] as usize) << 16;
-            self.seq = header[3].wrapping_add(1);
-            let mut chunk = vec![0u8; len];
-            self.read_exact_into(&mut chunk).await?;
-            payload.extend_from_slice(&chunk);
+            self.fill(4).await?;
+            let h = &self.rbuf[self.rpos..self.rpos + 4];
+            let len = (h[0] as usize) | (h[1] as usize) << 8 | (h[2] as usize) << 16;
+            self.seq = h[3].wrapping_add(1);
+            self.rpos += 4;
+            self.fill(len).await?;
+            let chunk = &self.rbuf[self.rpos..self.rpos + len];
+            match payload.as_mut() {
+                None => payload = Some(chunk.to_vec()),
+                Some(p) => p.extend_from_slice(chunk),
+            }
+            self.rpos += len;
             if len < 0xFF_FFFF {
                 break;
             }
         }
-        Ok(payload)
+        if self.rpos == self.rlen {
+            self.rpos = 0;
+            self.rlen = 0;
+            if self.rbuf.len() > READ_RETAIN {
+                self.rbuf.truncate(READ_CHUNK);
+                self.rbuf.shrink_to(READ_CHUNK);
+            }
+        }
+        Ok(payload.unwrap_or_default())
     }
 
-    /// Write one packet, using (and advancing) the current sequence id.
+    /// Write one packet, using (and advancing) the current sequence id. The frame
+    /// is assembled in a reused buffer, so steady-state writes do not allocate.
     async fn write_packet(&mut self, payload: &[u8]) -> Result<(), OrmError> {
         if payload.len() >= 0xFF_FFFF {
             return Err(conn_err("outgoing packet too large (>16 MiB not split)"));
         }
         let len = payload.len();
-        let mut frame = Vec::with_capacity(4 + len);
-        frame.extend_from_slice(&[len as u8, (len >> 8) as u8, (len >> 16) as u8, self.seq]);
-        frame.extend_from_slice(payload);
+        self.wbuf.clear();
+        self.wbuf
+            .extend_from_slice(&[len as u8, (len >> 8) as u8, (len >> 16) as u8, self.seq]);
+        self.wbuf.extend_from_slice(payload);
         self.seq = self.seq.wrapping_add(1);
-        self.stream
-            .write_all(&frame)
+        let result = self
+            .stream
+            .write_all(&self.wbuf)
             .await
-            .map_err(|e| conn_err(format!("write packet: {e}")))
+            .map_err(|e| conn_err(format!("write packet: {e}")));
+        if self.wbuf.capacity() > READ_RETAIN {
+            self.wbuf = Vec::with_capacity(READ_CHUNK);
+        }
+        result
     }
 
     // --- Connection phase -------------------------------------------------
@@ -322,20 +395,71 @@ impl Conn {
 
     // --- Prepared statements (binary protocol) ---------------------------
 
-    /// Prepare, execute with bound parameters, and close — one round of each.
+    /// Execute `sql` with server-side bound parameters (binary protocol).
     ///
-    /// A statement cache is a later optimisation; this already gives real
-    /// server-side parameter binding (no text escaping) for the hot CRUD paths.
+    /// Statements are cached per connection by their SQL text, so a hot query is
+    /// prepared once and then costs a single round trip (`COM_STMT_EXECUTE`)
+    /// instead of prepare + execute + close. The cache holds at most
+    /// [`STMT_CACHE_CAP`] statements, closing the oldest on the server when full.
+    /// If the server no longer recognises a cached statement (it was reset, or
+    /// DDL forced a re-prepare), the entry is dropped and the statement is
+    /// prepared and run once more.
     pub async fn exec_prepared(
         &mut self,
         sql: &str,
         params: &[BindValue],
     ) -> Result<QueryResult, OrmError> {
-        let (stmt_id, num_params) = self.stmt_prepare(sql).await?;
-        let result = self.stmt_execute(stmt_id, num_params, params).await;
-        // Always try to free the statement, even on error.
-        let _ = self.stmt_close(stmt_id).await;
-        result
+        let cached = self.stmts.get(sql).copied();
+        let stmt = match cached {
+            Some(stmt) => stmt,
+            None => self.prepare_cached(sql).await?,
+        };
+        match self.stmt_execute(stmt.id, stmt.num_params, params).await? {
+            Exec::Done(result) => Ok(result),
+            Exec::Stale if cached.is_some() => {
+                self.forget_stmt(sql);
+                let stmt = self.prepare_cached(sql).await?;
+                match self.stmt_execute(stmt.id, stmt.num_params, params).await? {
+                    Exec::Done(result) => Ok(result),
+                    Exec::Stale => Err(OrmError::Query(
+                        "MySQL rejected a freshly prepared statement".into(),
+                    )),
+                }
+            }
+            Exec::Stale => Err(OrmError::Query(
+                "MySQL rejected a freshly prepared statement".into(),
+            )),
+        }
+    }
+
+    /// Prepare `sql` and remember it, evicting (and closing) the oldest cached
+    /// statement first if the cache is full.
+    async fn prepare_cached(&mut self, sql: &str) -> Result<Stmt, OrmError> {
+        if self.stmts.len() >= STMT_CACHE_CAP {
+            if let Some(oldest) = self.stmt_order.pop_front() {
+                if let Some(old) = self.stmts.remove(&oldest) {
+                    self.stmt_close(old.id).await?;
+                }
+            }
+        }
+        let (id, num_params) = self.stmt_prepare(sql).await?;
+        let stmt = Stmt { id, num_params };
+        self.stmts.insert(sql.to_string(), stmt);
+        self.stmt_order.push_back(sql.to_string());
+        Ok(stmt)
+    }
+
+    /// Drop a cached statement the server no longer knows (no `COM_STMT_CLOSE`:
+    /// the id is already gone server-side).
+    fn forget_stmt(&mut self, sql: &str) {
+        self.stmts.remove(sql);
+        self.stmt_order.retain(|s| s != sql);
+    }
+
+    /// Number of prepared statements currently cached on this connection.
+    #[cfg(test)]
+    fn cached_statements(&self) -> usize {
+        self.stmts.len()
     }
 
     async fn stmt_prepare(&mut self, sql: &str) -> Result<(u32, u16), OrmError> {
@@ -377,7 +501,7 @@ impl Conn {
         stmt_id: u32,
         num_params: u16,
         params: &[BindValue],
-    ) -> Result<QueryResult, OrmError> {
+    ) -> Result<Exec, OrmError> {
         if params.len() != num_params as usize {
             return Err(OrmError::Query(format!(
                 "prepared statement expects {num_params} params, got {}",
@@ -415,12 +539,17 @@ impl Conn {
 
         let first = self.read_packet().await?;
         match first.first().copied() {
-            Some(0x00) => Ok(parse_ok_packet(&first)),
-            Some(0xFF) => Err(parse_err_packet(&first)),
+            Some(0x00) => Ok(Exec::Done(parse_ok_packet(&first))),
+            Some(0xFF) => match err_code(&first) {
+                Some(ER_UNKNOWN_STMT_HANDLER | ER_NEED_REPREPARE) => Ok(Exec::Stale),
+                _ => Err(parse_err_packet(&first)),
+            },
             _ => {
                 let (col_count, _) = read_lenenc_int(&first, 0)
                     .ok_or_else(|| OrmError::Query("bad column count packet".into()))?;
-                self.read_binary_result_set(col_count as usize).await
+                self.read_binary_result_set(col_count as usize)
+                    .await
+                    .map(Exec::Done)
             }
         }
     }
@@ -562,6 +691,19 @@ fn parse_ok_packet(p: &[u8]) -> QueryResult {
     i += n1;
     let (last_insert_id, _n2) = read_lenenc_int(p, i).unwrap_or((0, 1));
     QueryResult::Ok { affected_rows, last_insert_id }
+}
+
+/// Outcome of executing a (possibly cached) prepared statement.
+enum Exec {
+    /// The statement ran; here is its result.
+    Done(QueryResult),
+    /// The server no longer knows this statement id — re-prepare and retry.
+    Stale,
+}
+
+/// The MySQL error code of an `ERR` packet, if it is long enough to carry one.
+fn err_code(p: &[u8]) -> Option<u16> {
+    (p.first() == Some(&0xFF) && p.len() >= 3).then(|| (p[1] as u16) | (p[2] as u16) << 8)
 }
 
 fn parse_err_packet(p: &[u8]) -> OrmError {
@@ -986,5 +1128,118 @@ mod tests {
             OrmError::UniqueViolation { field } => assert_eq!(field, "email"),
             other => panic!("expected UniqueViolation, got {other:?}"),
         }
+    }
+
+    // --- Against a real server (skip unless KERNWAY_MYSQL_URL is set) -------
+
+    /// Run `body` on a fresh connection, or skip when no server is configured.
+    fn live<F, Fut>(name: &str, body: F)
+    where
+        F: FnOnce(Conn) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let Ok(url) = std::env::var("KERNWAY_MYSQL_URL") else {
+            eprintln!("skip {name}: KERNWAY_MYSQL_URL not set");
+            return;
+        };
+        let cfg = MysqlConfig::from_url(&url).unwrap();
+        rt_core::Executor::new()
+            .unwrap()
+            .block_on(async move { body(Conn::connect(&cfg).await.expect("connect")).await })
+            .unwrap();
+    }
+
+    fn one_value(r: QueryResult) -> Option<String> {
+        match r {
+            QueryResult::Rows { mut rows, .. } => rows.remove(0).remove(0),
+            QueryResult::Ok { .. } => panic!("expected a row"),
+        }
+    }
+
+    #[test]
+    fn a_cached_statement_runs_in_one_round_trip_and_survives_a_server_reset() {
+        live("stmt_cache_reset", |mut conn| async move {
+            let sql = "SELECT ? + 1";
+            let r = conn.exec_prepared(sql, &[BindValue::Int(1)]).await.unwrap();
+            assert_eq!(one_value(r).as_deref(), Some("2"));
+            assert_eq!(conn.cached_statements(), 1);
+
+            // Same SQL again: served from the cache, nothing new prepared.
+            let r = conn.exec_prepared(sql, &[BindValue::Int(41)]).await.unwrap();
+            assert_eq!(one_value(r).as_deref(), Some("42"));
+            assert_eq!(conn.cached_statements(), 1);
+
+            // COM_RESET_CONNECTION drops every server-side statement, so the
+            // cached id is now unknown (ER_UNKNOWN_STMT_HANDLER) — the driver must
+            // re-prepare transparently instead of failing the query.
+            conn.seq = 0;
+            conn.write_packet(&[0x1f]).await.unwrap();
+            let ok = conn.read_packet().await.unwrap();
+            assert_eq!(ok.first(), Some(&0x00), "reset acknowledged");
+
+            let r = conn.exec_prepared(sql, &[BindValue::Int(9)]).await.unwrap();
+            assert_eq!(one_value(r).as_deref(), Some("10"));
+            assert_eq!(conn.cached_statements(), 1);
+        });
+    }
+
+    #[test]
+    fn a_full_statement_cache_evicts_and_closes_the_oldest() {
+        live("stmt_cache_evict", |mut conn| async move {
+            let extra = 20;
+            for i in 0..STMT_CACHE_CAP + extra {
+                let sql = format!("SELECT ? + {i}");
+                conn.exec_prepared(&sql, &[BindValue::Int(0)]).await.unwrap();
+            }
+            assert_eq!(conn.cached_statements(), STMT_CACHE_CAP);
+            assert_eq!(conn.stmt_order.len(), STMT_CACHE_CAP);
+            // The oldest were evicted; the newest are still cached.
+            assert!(!conn.stmts.contains_key("SELECT ? + 0"));
+            assert!(conn.stmts.contains_key(&format!("SELECT ? + {}", STMT_CACHE_CAP + extra - 1)));
+
+            // Evicted statements were really closed on the server: this session
+            // sent exactly one COM_STMT_CLOSE per eviction (session status, no
+            // privileges needed).
+            let r = conn
+                .query("SHOW SESSION STATUS LIKE 'Com_stmt_close'")
+                .await
+                .unwrap();
+            let closed = match r {
+                QueryResult::Rows { rows, .. } => rows[0][1].clone(),
+                QueryResult::Ok { .. } => panic!("expected a status row"),
+            };
+            assert_eq!(closed.as_deref(), Some(extra.to_string().as_str()));
+            // And an evicted statement still works (it is simply prepared again).
+            let r = conn.exec_prepared("SELECT ? + 0", &[BindValue::Int(5)]).await.unwrap();
+            assert_eq!(one_value(r).as_deref(), Some("5"));
+        });
+    }
+
+    #[test]
+    fn a_large_packet_grows_the_read_buffer_then_it_shrinks_back() {
+        live("large_packet", |mut conn| async move {
+            let big = 1024 * 1024 + 7;
+            let r = conn.query(&format!("SELECT REPEAT('x', {big})")).await.unwrap();
+            assert_eq!(one_value(r).map(|v| v.len()), Some(big));
+            assert!(conn.rbuf.len() <= READ_RETAIN, "buffer shrunk once drained");
+
+            // Many small rows in one response, then a normal query: the stream
+            // stays in sync across buffer refills.
+            conn.query("SET SESSION cte_max_recursion_depth = 10000").await.unwrap();
+            let r = conn
+                .query("SELECT seq FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL \
+                        SELECT seq + 1 FROM s WHERE seq < 5000) SELECT seq FROM s) t")
+                .await
+                .unwrap();
+            match r {
+                QueryResult::Rows { rows, .. } => {
+                    assert_eq!(rows.len(), 5000);
+                    assert_eq!(rows[4999][0].as_deref(), Some("5000"));
+                }
+                QueryResult::Ok { .. } => panic!("expected rows"),
+            }
+            let r = conn.exec_prepared("SELECT ?", &[BindValue::Str("ok".into())]).await.unwrap();
+            assert_eq!(one_value(r).as_deref(), Some("ok"));
+        });
     }
 }
