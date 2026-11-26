@@ -198,3 +198,104 @@ fn plsql_blocks_procedures_and_functions() {
         c.execute("DROP FUNCTION kw_add_tax", &[]).await.unwrap();
     });
 }
+
+#[test]
+fn clob_and_blob_read_and_write() {
+    let Some(cfg) = cfg() else { return };
+    run(async move {
+        let mut c = Conn::connect(&cfg).await.unwrap();
+        let _ = c.execute("DROP TABLE kw_lobs PURGE", &[]).await;
+        c.execute("CREATE TABLE kw_lobs (id NUMBER PRIMARY KEY, note VARCHAR2(20), c CLOB, nc NCLOB, b BLOB)", &[])
+            .await
+            .unwrap();
+        let sizes = [0usize, 1, 100, 4000, 4001, 32767, 32768, 100_000, 1_000_000];
+        for (i, &n) in sizes.iter().enumerate() {
+            let text: String = "Việt✓ab".chars().cycle().take(n).collect();
+            let bytes: Vec<u8> = (0..n as u32).map(|k| (k.wrapping_mul(2654435761) >> 24) as u8).collect();
+            c.execute(
+                "INSERT INTO kw_lobs (id, note, c, nc, b) VALUES (:id, :note, :c, :nc, :b)",
+                &[
+                    Bind::from(i as i64),
+                    Bind::from(format!("n={n}")),
+                    Bind::In(if n == 0 { Value::Null } else { Value::Str(text.clone()) }),
+                    Bind::In(if n == 0 { Value::Null } else { Value::Str(text.clone()) }),
+                    Bind::In(if n == 0 { Value::Null } else { Value::Raw(bytes.clone()) }),
+                ],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("insert {n}: {e}"));
+        }
+        c.commit().await.unwrap();
+        let r = c.execute("SELECT id, note, c, nc, b, DBMS_LOB.GETLENGTH(c) FROM kw_lobs ORDER BY id", &[]).await.unwrap();
+        assert_eq!(r.rows.len(), sizes.len());
+        for (row, &n) in r.rows.iter().zip(&sizes) {
+            let text: String = "Việt✓ab".chars().cycle().take(n).collect();
+            let bytes: Vec<u8> = (0..n as u32).map(|k| (k.wrapping_mul(2654435761) >> 24) as u8).collect();
+            assert_eq!(s(&row[1]), format!("n={n}"));
+            if n == 0 {
+                assert_eq!(row[2], Value::Null);
+                assert_eq!(row[4], Value::Null);
+                continue;
+            }
+            assert_eq!(row[2], Value::Str(text.clone()), "CLOB of {n} chars");
+            assert_eq!(row[3], Value::Str(text.clone()), "NCLOB of {n} chars");
+            assert_eq!(row[4], Value::Raw(bytes), "BLOB of {n} bytes");
+            assert_eq!(row[5].as_i64(), Some(n as i64), "server-side length of {n}");
+        }
+        c.execute("DROP TABLE kw_lobs PURGE", &[]).await.unwrap();
+    });
+}
+
+#[test]
+fn ref_cursors_from_procedures_and_functions() {
+    let Some(cfg) = cfg() else { return };
+    run(async move {
+        let mut c = Conn::connect(&cfg).await.unwrap();
+        c.execute(
+            "CREATE OR REPLACE PROCEDURE kw_two_cursors(n IN NUMBER, a OUT SYS_REFCURSOR, b OUT SYS_REFCURSOR) IS \
+             BEGIN \
+               OPEN a FOR SELECT level AS id, 'item ' || level AS name, TO_CLOB(RPAD('z', 4000, 'z')) || TO_CLOB(RPAD('y', 1000, 'y')) AS big \
+                 FROM dual CONNECT BY level <= n; \
+               OPEN b FOR SELECT 'only' AS v FROM dual WHERE 1 = 0; \
+             END;",
+            &[],
+        )
+        .await
+        .unwrap();
+        c.execute(
+            "CREATE OR REPLACE FUNCTION kw_cursor_fn RETURN SYS_REFCURSOR IS r SYS_REFCURSOR; \
+             BEGIN OPEN r FOR SELECT level * 10 AS x FROM dual CONNECT BY level <= 250; RETURN r; END;",
+            &[],
+        )
+        .await
+        .unwrap();
+
+        let r = c
+            .execute(
+                "BEGIN kw_two_cursors(:n, :a, :b); END;",
+                &[Bind::from(130i64), Bind::Out(OutType::Cursor), Bind::Out(OutType::Cursor)],
+            )
+            .await
+            .unwrap();
+        let Value::Cursor(a) = &r.out[1] else { panic!("expected a cursor, got {:?}", r.out[1]) };
+        assert_eq!(a.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["ID", "NAME", "BIG"]);
+        assert_eq!(a.rows.len(), 130, "rows beyond one fetch round");
+        assert_eq!(a.rows[129][0].as_i64(), Some(130));
+        assert_eq!(s(&a.rows[0][1]), "item 1");
+        assert_eq!(s(&a.rows[0][2]).len(), 5000, "CLOB column inside a ref cursor");
+        let Value::Cursor(b) = &r.out[2] else { panic!("expected a cursor") };
+        assert!(b.rows.is_empty(), "an empty cursor");
+
+        let r = c.execute("BEGIN :r := kw_cursor_fn; END;", &[Bind::Out(OutType::Cursor)]).await.unwrap();
+        let Value::Cursor(f) = &r.out[0] else { panic!("expected a cursor") };
+        assert_eq!(f.rows.len(), 250);
+        assert_eq!(f.rows.iter().map(|r| r[0].as_i64().unwrap()).sum::<i64>(), 10 * 250 * 251 / 2);
+
+        // Cursors are closed afterwards: many calls never hit ORA-01000.
+        for _ in 0..400 {
+            c.execute("BEGIN :r := kw_cursor_fn; END;", &[Bind::Out(OutType::Cursor)]).await.unwrap();
+        }
+        c.execute("DROP PROCEDURE kw_two_cursors", &[]).await.unwrap();
+        c.execute("DROP FUNCTION kw_cursor_fn", &[]).await.unwrap();
+    });
+}

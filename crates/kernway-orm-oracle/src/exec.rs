@@ -8,9 +8,10 @@ use crate::buf::{PResult, ParseError, Reader, Writer};
 use crate::conn::{common_message, func, msg, CallStatus, Conn};
 use crate::stmt::{self, Kind};
 use crate::tns::packet_type;
-use crate::value::{self, ora_type, Value};
+use crate::value::{self, ora_type, ResultSet, Value};
 
 const OPT_PARSE: u32 = 0x01;
+const OPT_DEFINE: u32 = 0x10;
 const OPT_BIND: u32 = 0x08;
 const OPT_EXECUTE: u32 = 0x20;
 const OPT_FETCH: u32 = 0x40;
@@ -22,6 +23,9 @@ const BIND_DIR_INPUT: u8 = 32;
 const ERR_NO_DATA_FOUND: u32 = 1403;
 /// Rows requested with the execute of a new query, and per FETCH.
 const PREFETCH_ROWS: u32 = 2;
+/// Buffer size declared for a LONG / LONG RAW define (CLOB / BLOB fetched
+/// inline) and for long binds.
+const MAX_LONG_LENGTH: u64 = 0x7FFF_FFFF;
 const FETCH_ARRAY_SIZE: u32 = 100;
 
 /// The declared type of an OUT (or IN OUT) bind.
@@ -41,6 +45,8 @@ pub enum OutType {
     Bool,
     /// RAW of at most this many bytes.
     Raw(u32),
+    /// SYS_REFCURSOR: returned as [`Value::Cursor`] with every row fetched.
+    Cursor,
 }
 
 /// A bind variable, by position.
@@ -61,7 +67,7 @@ impl<T: Into<Value>> From<T> for Bind {
 }
 
 /// Column metadata from DESCRIBE_INFO.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Column {
     /// Column name (upper case unless quoted in the SQL).
     pub name: String,
@@ -102,6 +108,7 @@ fn out_meta(t: OutType) -> (u8, u8, u32) {
         OutType::Timestamp => (ora_type::TIMESTAMP, 0, 11),
         OutType::Bool => (ora_type::BOOLEAN, 0, 4),
         OutType::Raw(n) => (ora_type::RAW, 0, n.max(1)),
+        OutType::Cursor => (ora_type::CURSOR, 0, 4),
     }
 }
 
@@ -115,6 +122,7 @@ fn value_meta(v: &Value) -> (u8, u8, u32) {
         Value::Timestamp(_) => (ora_type::TIMESTAMP, 0, 11),
         Value::Raw(b) => (ora_type::RAW, 0, (b.len() as u32).max(1)),
         Value::Bool(_) => (ora_type::BOOLEAN, 0, 4),
+        Value::Cursor(_) => (ora_type::CURSOR, 0, 4),
     }
 }
 
@@ -132,6 +140,8 @@ fn write_value(w: &mut Writer, ora_type_num: u8, v: Option<&Value>) -> Result<()
     let Some(v) = v.filter(|v| !matches!(v, Value::Null)) else {
         if ora_type_num == ora_type::BOOLEAN {
             w.raw(&[0xFD, 0x01]);
+        } else if ora_type_num == ora_type::CURSOR {
+            w.raw(&[0x01, 0x00]);
         } else {
             w.u8(0);
         }
@@ -164,12 +174,20 @@ fn write_value(w: &mut Writer, ora_type_num: u8, v: Option<&Value>) -> Result<()
                 w.raw(&[0x01, 0x00]);
             }
         }
+        Value::Cursor(_) => return Err("a cursor cannot be passed as an input bind".into()),
     }
     Ok(())
 }
 
 /// The EXECUTE request body (after the function header) for a new cursor.
-fn write_execute(w: &mut Writer, fv: u8, sql: &str, kind: Kind, binds: &[Bind]) -> Result<(), String> {
+fn write_execute(
+    w: &mut Writer,
+    fv: u8,
+    max_string_size: u32,
+    sql: &str,
+    kind: Kind,
+    binds: &[Bind],
+) -> Result<(), String> {
     let is_query = kind == Kind::Query;
     let num_params = binds.len() as u64;
     let mut options = OPT_EXECUTE | OPT_PARSE;
@@ -230,17 +248,127 @@ fn write_execute(w: &mut Writer, fv: u8, sql: &str, kind: Kind, binds: &[Bind]) 
                 w.ub(0);
             }
         }
+        if kind == Kind::PlSql {
+            if let Some(b) = binds.iter().find(|b| b.meta().2 > max_string_size && is_text_or_raw(b.meta().0)) {
+                return Err(format!(
+                    "a {}-byte value is too long for a PL/SQL bind (limit {max_string_size}); \
+                     write it with SQL (INSERT / UPDATE) instead",
+                    b.meta().2 / if b.meta().1 != 0 { 4 } else { 1 }
+                ));
+            }
+        }
         w.u8(msg::ROW_DATA);
-        for b in binds {
-            let (t, _, _) = b.meta();
-            let v = match b {
-                Bind::In(v) | Bind::InOut(v, _) => Some(v),
-                Bind::Out(_) => None,
-            };
-            write_value(w, t, v)?;
+        // In SQL, values longer than the server's string limit are "long"
+        // binds: sent after all the others (in their original order). The
+        // server converts them for CLOB / BLOB columns.
+        let is_long = |b: &Bind| kind != Kind::PlSql && b.meta().2 > max_string_size && is_text_or_raw(b.meta().0);
+        for long_pass in [false, true] {
+            for b in binds.iter().filter(|b| is_long(b) == long_pass) {
+                let (t, _, _) = b.meta();
+                let v = match b {
+                    Bind::In(v) | Bind::InOut(v, _) => Some(v),
+                    Bind::Out(_) => None,
+                };
+                write_value(w, t, v)?;
+            }
         }
     }
     Ok(())
+}
+
+fn is_text_or_raw(t: u8) -> bool {
+    matches!(t, ora_type::VARCHAR | ora_type::RAW)
+}
+
+/// The type a column is fetched as: CLOB / NCLOB inline as LONG, BLOB as
+/// LONG RAW; everything else as described.
+fn define_type(c: &Column) -> (u8, u8, u64) {
+    match c.ora_type {
+        ora_type::CLOB => (ora_type::LONG, c.csfrm.max(1), MAX_LONG_LENGTH),
+        ora_type::BLOB => (ora_type::LONG_RAW, 0, MAX_LONG_LENGTH),
+        t => (t, c.csfrm, u64::from(c.buffer_size)),
+    }
+}
+
+/// An EXECUTE that fetches the next rows of an open cursor without SQL text
+/// (a REF CURSOR).
+fn write_cursor_fetch(w: &mut Writer, fv: u8, cursor_id: u16) {
+    w.ub(u64::from(OPT_FETCH | OPT_NOT_PLSQL)).ub(u64::from(cursor_id));
+    w.u8(0).ub(0); // no SQL
+    w.u8(1).ub(13);
+    w.u8(0).u8(0);
+    w.ub(0);
+    w.ub(u64::from(FETCH_ARRAY_SIZE));
+    w.ub(MAX_LONG_LENGTH);
+    w.u8(0).ub(0); // binds
+    w.u8(0).u8(0).u8(0).u8(0).u8(0);
+    w.u8(0).ub(0); // defines
+    w.ub(0);
+    w.u8(0).u8(1);
+    w.u8(0).ub(0);
+    w.u8(0).ub(0);
+    w.ub(0);
+    w.u8(0).ub(0).u8(0);
+    if fv >= 8 {
+        w.u8(0).ub(0).u8(0).ub(0).u8(0);
+        if fv >= 9 {
+            w.u8(0).ub(0);
+        }
+    }
+    w.ub(0); // [0] no parse
+    w.ub(u64::from(FETCH_ARRAY_SIZE)); // [1]
+    w.ub(0).ub(0).ub(0).ub(0).ub(0);
+    w.ub(1); // [7] is query
+    w.ub(0);
+    w.ub(0); // [9]
+    w.ub(0).ub(0).ub(0);
+}
+
+/// Whether the columns need a define round trip before rows can be fetched.
+fn needs_define(cols: &[Column]) -> bool {
+    cols.iter().any(|c| matches!(c.ora_type, ora_type::CLOB | ora_type::BLOB))
+}
+
+/// An EXECUTE that only (re)defines the output columns of an open cursor.
+fn write_define(w: &mut Writer, fv: u8, cursor_id: u16, cols: &[Column]) {
+    w.ub(u64::from(OPT_DEFINE | OPT_NOT_PLSQL)).ub(u64::from(cursor_id));
+    w.u8(0).ub(0); // no SQL
+    w.u8(1).ub(13); // al8i4
+    w.u8(0).u8(0); // al8o4, al8o4l
+    w.ub(0); // prefetch buffer size
+    w.ub(u64::from(PREFETCH_ROWS));
+    w.ub(MAX_LONG_LENGTH);
+    w.u8(0).ub(0); // binds
+    w.u8(0).u8(0).u8(0).u8(0).u8(0);
+    w.u8(1).ub(cols.len() as u64); // defines
+    w.ub(0);
+    w.u8(0).u8(1);
+    w.u8(0).ub(0);
+    w.u8(0).ub(0);
+    w.ub(0);
+    w.u8(0).ub(0).u8(0);
+    if fv >= 8 {
+        w.u8(0).ub(0).u8(0).ub(0).u8(0);
+        if fv >= 9 {
+            w.u8(0).ub(0);
+        }
+    }
+    w.ub(0); // al8i4[0]: no parse
+    w.ub(u64::from(PREFETCH_ROWS)); // [1]
+    w.ub(0).ub(0).ub(0).ub(0).ub(0); // [2..6]
+    w.ub(1); // [7] is query
+    w.ub(0); // [8]
+    w.ub(0); // [9] exec flags
+    w.ub(0).ub(0).ub(0); // [10..12]
+    for c in cols {
+        let (t, csfrm, size) = define_type(c);
+        w.u8(t).u8(BIND_USE_INDICATORS).u8(0).u8(0);
+        w.ub(size).ub(0).ub(0).ub(0).ub(0);
+        w.ub(if csfrm != 0 { 873 } else { 0 }).u8(csfrm).ub(0);
+        if fv >= 8 {
+            w.ub(0);
+        }
+    }
 }
 
 /// What one execute / fetch response yielded.
@@ -251,6 +379,9 @@ struct Response {
     /// Bind directions from the IO vector (PL/SQL).
     out_positions: Option<Vec<usize>>,
     out_values: Vec<Value>,
+    /// REF CURSORs among the OUT values: (index into `out_values`, server
+    /// cursor id, columns), to be fetched after the call.
+    cursors: Vec<(usize, u16, Vec<Column>)>,
     status: CallStatus,
     flush_out_binds: bool,
 }
@@ -302,6 +433,15 @@ fn parse_response(
                     // followed by its actual length.
                     for &i in positions {
                         let (ot, csfrm, _) = binds[i].meta();
+                        if ot == ora_type::CURSOR {
+                            r.u8()?; // fixed length
+                            let cols = parse_describe(&mut r, fv)?;
+                            let id = r.ub2()?;
+                            r.sb()?; // actual length
+                            out.cursors.push((out.out_values.len(), id, cols));
+                            out.out_values.push(Value::Null);
+                            continue;
+                        }
                         let v = match r.bytes()? {
                             Some(b) => value::decode(ot, csfrm, b).map_err(ParseError::Invalid)?,
                             None => Value::Null,
@@ -394,7 +534,7 @@ fn read_column(r: &mut Reader<'_>, c: &Column) -> PResult<Value> {
         return Ok(Value::Null);
     }
     match c.ora_type {
-        CLOB | BLOB | JSON | VECTOR | CURSOR | ROWID | UROWID => Err(ParseError::Invalid(format!(
+        JSON | VECTOR | CURSOR | ROWID | UROWID | CLOB | BLOB => Err(ParseError::Invalid(format!(
             "column {} has a type not supported yet ({}); convert it in SQL (TO_CHAR, DBMS_LOB.SUBSTR, ROWIDTOCHAR)",
             c.name, c.ora_type
         ))),
@@ -527,13 +667,17 @@ impl Conn {
         }
         let mut w = Writer::new();
         self.begin_call(&mut w, func::EXECUTE);
-        write_execute(&mut w, self.field_version, sql, kind, binds).map_err(OrmError::TypeConversion)?;
+        write_execute(&mut w, self.field_version, self.max_string_size, sql, kind, binds)
+            .map_err(OrmError::TypeConversion)?;
         self.send_data(&w.buf).await?;
 
         let mut resp = self.read_call(None, binds, &[]).await?;
+        let _ = &mut resp.cursors;
         while resp.flush_out_binds {
             self.send_data(&[msg::FLUSH_OUT_BINDS]).await?;
             let more = self.read_call(None, binds, &[]).await?;
+            let base = resp.out_values.len();
+            resp.cursors.extend(more.cursors.into_iter().map(|(i, id, c)| (base + i, id, c)));
             resp.out_values.extend(more.out_values);
             resp.status = more.status;
             resp.flush_out_binds = more.flush_out_binds;
@@ -545,6 +689,30 @@ impl Conn {
         let cursor_id = resp.status.cursor_id;
         let mut result = Executed { columns: resp.columns.unwrap_or_default(), rows: resp.rows, ..Default::default() };
         let mut status = resp.status;
+        if kind == Kind::Query && status.error.is_none() && needs_define(&result.columns) {
+            // LOB columns: redefine them to be fetched inline (CLOB as LONG,
+            // BLOB as LONG RAW). The server sends no rows before the define.
+            let mut w = Writer::new();
+            self.begin_call(&mut w, func::EXECUTE);
+            write_define(&mut w, self.field_version, cursor_id, &result.columns);
+            self.send_data(&w.buf).await?;
+            // From here rows arrive in the defined types (the define reply may
+            // already carry some).
+            for c in &mut result.columns {
+                let (t, csfrm, _) = define_type(c);
+                c.ora_type = t;
+                c.csfrm = csfrm;
+                c.buffer_size = c.buffer_size.max(1);
+            }
+            let cols = result.columns.clone();
+            let r = self.read_call(Some(&cols), &[], &[]).await?;
+            if let Some(e) = r.status.error.as_ref().filter(|e| e.code != ERR_NO_DATA_FOUND) {
+                self.queue_close(cursor_id);
+                return Err(server_error(e));
+            }
+            result.rows.extend(r.rows);
+            status = r.status;
+        }
         if kind == Kind::Query {
             loop {
                 match &status.error {
@@ -571,6 +739,13 @@ impl Conn {
         }
         self.queue_close(cursor_id);
         result.row_count = if kind == Kind::Query { result.rows.len() as u64 } else { status.row_count };
+        // REF CURSORs: fetch each to the end and hand back its rows.
+        for (idx, id, cols) in std::mem::take(&mut resp.cursors) {
+            let rs = self.fetch_ref_cursor(id, cols).await?;
+            if let Some(slot) = resp.out_values.get_mut(idx) {
+                *slot = Value::Cursor(rs);
+            }
+        }
         result.out = vec![Value::Null; binds.len()];
         if let Some(positions) = resp.out_positions {
             for (pos, v) in positions.into_iter().zip(resp.out_values) {
@@ -580,6 +755,54 @@ impl Conn {
             }
         }
         Ok(result)
+    }
+
+    /// Fetch every row of a REF CURSOR the server opened, then close it. A
+    /// cursor has no SQL text, so rows come from EXECUTE-with-FETCH calls on
+    /// its id (after a define round trip if it has LOB columns).
+    async fn fetch_ref_cursor(&mut self, cursor_id: u16, mut columns: Vec<Column>) -> Result<ResultSet, OrmError> {
+        let mut rows: Vec<Vec<Value>> = Vec::new();
+        let fv = self.field_version;
+        if needs_define(&columns) {
+            let mut w = Writer::new();
+            self.begin_call(&mut w, func::EXECUTE);
+            write_define(&mut w, fv, cursor_id, &columns);
+            self.send_data(&w.buf).await?;
+            for c in &mut columns {
+                let (t, csfrm, _) = define_type(c);
+                c.ora_type = t;
+                c.csfrm = csfrm;
+                c.buffer_size = c.buffer_size.max(1);
+            }
+            let r = self.read_call(Some(&columns), &[], &[]).await?;
+            rows.extend(r.rows);
+            if let Some(e) = &r.status.error {
+                self.queue_close(cursor_id);
+                if e.code == ERR_NO_DATA_FOUND {
+                    return Ok(ResultSet { columns, rows });
+                }
+                return Err(server_error(e));
+            }
+        }
+        loop {
+            let mut w = Writer::new();
+            self.begin_call(&mut w, func::EXECUTE);
+            write_cursor_fetch(&mut w, fv, cursor_id);
+            self.send_data(&w.buf).await?;
+            let prev = rows.last().cloned().unwrap_or_default();
+            let r = self.read_call(Some(&columns), &[], &prev).await?;
+            rows.extend(r.rows);
+            match &r.status.error {
+                None => {}
+                Some(e) if e.code == ERR_NO_DATA_FOUND => break,
+                Some(e) => {
+                    self.queue_close(cursor_id);
+                    return Err(server_error(e));
+                }
+            }
+        }
+        self.queue_close(cursor_id);
+        Ok(ResultSet { columns, rows })
     }
 
     fn queue_close(&mut self, cursor_id: u16) {
@@ -638,7 +861,7 @@ mod tests {
     #[test]
     fn execute_of_a_query_matches_the_golden_bytes() {
         let mut w = header(6);
-        write_execute(&mut w, 24, "SELECT 1 FROM DUAL", Kind::Query, &[]).unwrap();
+        write_execute(&mut w, 24, 32767, "SELECT 1 FROM DUAL", Kind::Query, &[]).unwrap();
         assert_eq!(
             hex(&w.buf),
             "03 5E 06 00 02 80 61 00 01 01 12 01 01 0D 00 00 00 01 02 04 7F FF FF FF 00 00 00 00 00 00 \
@@ -651,7 +874,7 @@ mod tests {
     fn execute_of_plsql_with_out_bind_matches_the_golden_bytes() {
         let mut w = header(7);
         let binds = [Bind::Out(OutType::Number), Bind::In(Value::from(5))];
-        write_execute(&mut w, 24, "BEGIN :R := F(:A); END;", Kind::PlSql, &binds).unwrap();
+        write_execute(&mut w, 24, 32767, "BEGIN :R := F(:A); END;", Kind::PlSql, &binds).unwrap();
         assert_eq!(
             hex(&w.buf),
             "03 5E 07 00 02 04 29 00 01 01 17 01 01 0D 00 00 00 01 01 04 7F FF FF FF 01 01 02 00 00 00 \

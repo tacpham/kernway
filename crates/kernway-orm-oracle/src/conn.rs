@@ -147,7 +147,6 @@ pub struct Conn {
     eor: bool,
     /// Session attributes returned at logon (AUTH_*).
     pub session: HashMap<String, String>,
-    #[allow(dead_code)]
     pub(crate) max_string_size: u32,
     /// Server cursors to close with the next call (close-cursors piggyback).
     pub(crate) pending_close: Vec<u32>,

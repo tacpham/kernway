@@ -33,4 +33,4 @@ mod value;
 
 pub use conn::{Conn, OracleConfig};
 pub use exec::{Bind, Column, Executed, OutType};
-pub use value::{DateTime, Value};
+pub use value::{DateTime, ResultSet, Value};

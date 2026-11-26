@@ -82,6 +82,17 @@ pub enum Value {
     Raw(Vec<u8>),
     /// BOOLEAN (Oracle 23ai+).
     Bool(bool),
+    /// A REF CURSOR returned by PL/SQL, already fetched to the end.
+    Cursor(ResultSet),
+}
+
+/// The columns and rows of a REF CURSOR.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ResultSet {
+    /// Result columns.
+    pub columns: Vec<crate::exec::Column>,
+    /// Every row.
+    pub rows: Vec<Vec<Value>>,
 }
 
 impl Value {
@@ -94,6 +105,7 @@ impl Value {
             Value::Date(d) | Value::Timestamp(d) => Some(d.to_string()),
             Value::Raw(b) => Some(b.iter().map(|x| format!("{x:02X}")).collect()),
             Value::Bool(b) => Some(if *b { "1" } else { "0" }.to_string()),
+            Value::Cursor(rs) => Some(format!("<cursor: {} rows>", rs.rows.len())),
         }
     }
 
