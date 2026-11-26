@@ -177,12 +177,17 @@ impl Persister {
         };
         let records = read_wal(&dir.join("wal"))?;
 
-        // The append handle the writer thread owns from here on.
-        let wal = OpenOptions::new()
+        // The handle the writer thread owns from here on. Not opened in append
+        // mode: on Windows an append-only handle may not truncate the file
+        // (`set_len` at a checkpoint is "Access is denied"). The single writer
+        // keeps the position at the end itself.
+        let mut wal = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
-            .append(true)
+            .write(true)
             .open(dir.join("wal"))?;
+        wal.seek(SeekFrom::End(0))?;
         let writer = Writer {
             dir: dir.clone(),
             wal,
