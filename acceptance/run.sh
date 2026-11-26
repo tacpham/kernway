@@ -114,7 +114,7 @@ if ! grep -q "^test result:" "$WORK/test.log"; then
 fi
 
 if [ "$DB" = sqlite ]; then
-  VERSION="SQLite $(sed -n 's/^SQLite engine: //p' "$WORK/test.log" | head -1)"
+  VERSION="SQLite $(sed -n 's/.*SQLite engine: //p' "$WORK/test.log" | head -1)"
 fi
 
 # Tests that must run next to the server (its Unix socket): build a static
