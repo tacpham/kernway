@@ -5,20 +5,20 @@
 
 | | |
 |---|---|
-| generated | 2026-11-26 14:46 UTC |
+| generated | 2026-11-26 16:15 UTC |
 | server | Oracle AI Database 26ai Free Release 23.26.4.0.0 - Develop, Learn, and Run for Free Version 23.26.4.0.0 |
 | image | gvenzl/oracle-free:23-slim |
 | container | kernway-oracle |
-| driver commit | 8283ee7 on feat/plsql-full |
+| driver commit | 2fd8650 on feat/oracle-full |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
-| command | `cargo test -p kernway-orm-oracle  --lib --tests -- --test-threads=1 --nocapture ` |
+| command | `cargo test -p kernway-orm-oracle  --lib --tests -- --test-threads=1 --nocapture ; CI run 45855818537 (Linux / macOS / Windows)` |
 
-## Verdict: implemented features **PASSED** · completeness **32/42** — NOT complete
+## Verdict: implemented features **PASSED** · completeness **47/50** — NOT complete
 
 - *Implemented features* passes only if every test ran and passed (no skips) in this run.
 - *Completeness* counts 🚧 gaps (listed below) against the full feature catalog.
-- Features verified: **32 / 42** (10 not implemented yet, 0 failing; 0 not applicable to Oracle).
-- Tests run: 41 — 41 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
+- Features verified: **47 / 50** (3 not implemented yet, 0 failing; 0 not applicable to Oracle).
+- Tests run: 62 — 62 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
 - A feature is ✅ only when every test listed as its evidence ran and passed in this run.
 
 ## Connection & security
@@ -27,8 +27,10 @@
 |---|---|---|
 | Login with user / password (O5LOGON, 11g and 12c verifiers) | ✅ PASS | `logs_in_with_user_and_password`<br>`auth_crypto::tests::verifier_11g_matches_the_reference_vectors`<br>`auth_crypto::tests::verifier_12c_matches_the_reference_vectors`<br>`auth_crypto::tests::cbc_padding_always_adds_a_block_on_exact_multiples` |
 | TCPS (TLS) with each certificate check, incl. listener TLS renegotiation | ✅ PASS | `tcps_connections_with_each_certificate_check` |
+| Mutual TLS: client certificate (ssl-cert / ssl-key, or one PEM wallet) presented to a server that requires it (SSL_CLIENT_AUTHENTICATION = TRUE); refused without it | ✅ PASS | `tcps_client_certificate_is_required_and_presented` |
 | Native network encryption (SQLNET.ENCRYPTION) | 🚧 GAP | use TCPS |
-| Wallet / Kerberos / proxy authentication | 🚧 GAP | user/password only |
+| Proxy authentication (user[target] / ?proxy-user=): the server reports USER = target, PROXY_USER = the connecting user; refused without the grant | ✅ PASS | `proxy_authentication_connects_on_behalf_of_another_user` |
+| Kerberos authentication | 🚧 GAP | not in thin mode (python-oracledb thin lacks it too) |
 
 ## Protocol & encoding
 
@@ -41,8 +43,8 @@
 | Statement classification and bind discovery (literals, comments, := skipped) | ✅ PASS | `stmt::tests::classifies_by_first_keyword`<br>`stmt::tests::finds_binds_and_skips_literals_comments_and_assignment` |
 | NUMBER / DATE / BINARY_DOUBLE codecs (reference tables, round trips) | ✅ PASS | `value::tests::numbers_encode_like_the_reference_table`<br>`value::tests::numbers_round_trip`<br>`value::tests::dates_and_doubles_round_trip` |
 | DML, commit / rollback, server errors mapped (unique violation names the constraint) | ✅ PASS | `dml_commit_rollback_and_errors`<br>`exec::tests::unique_violation_names_the_constraint` |
-| Statement cache (re-use parsed cursors) | 🚧 GAP | every execute parses |
-| Scrollable cursors | 🚧 GAP | not implemented |
+| Statement cache: a repeated SQL / PL/SQL statement re-executes its parsed cursor (20 per session; no re-parse, no re-describe, defines kept) — server parse counter +24 vs +170 without it for 150 executions | ✅ PASS | `repeated_statements_reuse_their_parsed_cursor` |
+| Scrollable cursors: first / last / absolute / relative / next / prior over one open cursor (binds kept, CLOB columns defined), other statements in between; through the driver as shared rows | ✅ PASS | `scrollable_cursor_moves_anywhere_in_the_result`<br>`scrollable_cursor_through_the_driver_returns_shared_rows` |
 
 ## Types
 
@@ -57,15 +59,16 @@
 | BOOLEAN | ✅ PASS | `every_column_type_is_typed_and_matches_the_servers_rendering` |
 | ROWID / UROWID (physical and logical) accepted back by the server | ✅ PASS | `every_column_type_is_typed_and_matches_the_servers_rendering`<br>`logical_rowids_of_index_organized_tables_round_trip` |
 | CLOB / NCLOB / BLOB read and written, 0 B – 1 MB | ✅ PASS | `clob_and_blob_read_and_write` |
-| Object types / XMLType / BFILE / nested CURSOR columns refused cleanly (session stays usable) | ✅ PASS | `unsupported_types_are_refused_cleanly` |
-| Object types / XMLType / BFILE / nested CURSOR columns decoded | 🚧 GAP | refused with OrmError::Unsupported (planned: phase 3) |
-| TIMESTAMP WITH TIME ZONE in a named region | 🚧 GAP | refused with a clear message; use TO_CHAR / SYS_EXTRACT_UTC |
+| Nested CURSOR(...) columns: each fetched to the end as a result set (120 rows x their own cursors) | ✅ PASS | `nested_cursor_columns_come_back_as_result_sets` |
+| BFILE columns: the server file read through its locator (open / read / close), byte-exact vs the server's length; a missing file is the server's error | ✅ PASS | `bfile_columns_are_read_from_the_server_file` |
+| Object types (nested), VARRAY / nested tables (of scalars and objects, with NULLs), XMLType (inline and as a CLOB) in query results; LOB / date / BOOLEAN attributes; mapped onto nested structs | ✅ PASS | `objects_collections_and_xmltype_columns_decode` |
+| TIMESTAMP WITH TIME ZONE in a named region: local time, offset at that instant (daylight saving) and IANA region name, computed by the server (region ids from V$TIMEZONE_NAMES); columns and PL/SQL results — beyond python-oracledb thin, which refuses them | ✅ PASS | `timestamps_in_named_regions_come_back_as_the_server_computes_them` |
 
 ## ORM (shared layer)
 
 | Feature | Status | Evidence / note |
 |---|---|---|
-| Shared conformance suite (CRUD, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL, joins/aggregates, execute_many failure semantics) | ✅ PASS | `oracle_conforms` |
+| Shared conformance suite (CRUD, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL, joins/aggregates, execute_many failure semantics, server cursors) | ✅ PASS | `oracle_conforms` |
 | Select builder: INNER / LEFT JOIN, WHERE on any joined entity, GROUP BY, COUNT/COUNT DISTINCT/SUM/AVG/MIN/MAX, HAVING, ORDER BY, OFFSET/FETCH, counting groups, entity pairs from a join | ✅ PASS | `oracle_conforms` |
 | Results into any struct / tuple by column name (no entity needed), per-field conversion | ✅ PASS | `oracle_conforms` |
 
@@ -75,7 +78,7 @@
 |---|---|---|
 | Streaming large results (150k rows); callback errors close the cursor | ✅ PASS | `large_results_stream_and_a_callback_error_stops_cleanly` |
 | Array DML (execute_many, 20k rows in one round trip; same outcome as row by row on a failure part-way) | ✅ PASS | `array_dml_runs_many_rows_in_one_call`<br>`oracle_conforms` |
-| Server-side cursor API (open / fetch batches / close, statements in between) | 🚧 GAP | reports Unsupported (MySQL has it; planned with the Oracle phases) |
+| Server-side cursor API: open / fetch batches (FETCH calls) / close, other statements in between, in a transaction | ✅ PASS | `oracle_conforms` |
 
 ## PL/SQL
 
@@ -89,14 +92,24 @@
 | Compilation errors reported with line / column / message (not left INVALID silently) | ✅ PASS | `compilation_errors_are_reported_with_their_lines` |
 | Scripts: SQL + PL/SQL units ended by '/', quotes / q'[…]' / comments respected | ✅ PASS | `scripts_run_sql_and_plsql_units_and_stop_at_the_first_error`<br>`backend::tests::scripts_split_on_semicolons_and_slash_lines` |
 | Procedure names / parameter names validated (never SQL) | ✅ PASS | `backend::tests::procedure_names_are_identifiers_only`<br>`procedure_calls_return_out_values_cursors_implicit_results_and_output` |
-| CLOB / BLOB as OUT or function result; IN values over 32 KB (LOB locators) | 🚧 GAP | planned phase 2 |
-| RECORD, collections (VARRAY, nested table), associative arrays, object types as arguments | 🚧 GAP | planned phase 3 |
+| CLOB / BLOB of any size: OUT arguments and function results read through locators, IN values past 32 KB as temporary LOBs, IN OUT; UTF-16 CLOB data incl. surrogates; temporary LOBs freed (checked in v$temporary_lobs) | ✅ PASS | `out_clob_and_blob_of_any_size_come_back_whole`<br>`in_values_past_32k_travel_as_temporary_lobs`<br>`in_out_clob_and_blob`<br>`lobs_through_call_and_call_function_of_any_size` |
+| Object, collection, RECORD and associative-array (index-by) arguments: IN (pickled, incl. LOB attributes as freed temporary LOBs), OUT, IN OUT and function results — types taken from the procedure declaration (NAME_RESOLVE + ALL_ARGUMENTS) | ✅ PASS | `object_collection_and_record_arguments_through_call` |
 
 ## Other Oracle features
 
 | Feature | Status | Evidence / note |
 |---|---|---|
-| Advanced Queuing, Continuous Query Notification, SODA, two-phase commit | 🚧 GAP | not implemented |
+| Two-phase commit (XA): begin / end / prepare / commit (two- and one-phase) / rollback, recovery from another session, suspend / resume, read-only branch | ✅ PASS | `two_phase_commit_prepare_commit_recover_and_rollback` |
+| Advanced Queuing: RAW / JSON / object-type queues; enqueue with correlation / priority / delay, dequeue by correlation, browse, wait with timeout, visibility with commit (one round trip each through DBMS_AQ) | ✅ PASS | `advanced_queuing_raw_json_and_object_queues` |
+| Continuous Query Notification, SODA | 🚧 GAP | not in thin mode (python-oracledb thin lacks them too) |
+
+## Platform & runtime
+
+| Feature | Status | Evidence / note |
+|---|---|---|
+| Runs on Linux: whole live suite against Oracle Database Free, no test skipped (CI) | ✅ PASS | `ci::oracle_live_ubuntu_latest` |
+| Builds and passes its unit / protocol tests on macOS and Windows (CI; Oracle ships no server for those runners — the sockets are rt-net's, proven live there by the MySQL jobs) | ✅ PASS | `ci::drivers_macos_latest`<br>`ci::drivers_windows_latest` |
+| Fully async on kernway's reactor: DNS and certificate reads on the blocking pool, PBKDF2 login proof there too; no blocking call on a shard — enforced by a source scan | ✅ PASS | `no_blocking_call_runs_on_the_reactor` |
 
 ## All tests in this run
 
@@ -125,6 +138,7 @@
 | `value::tests::numbers_encode_like_the_reference_table` | PASS | yes |
 | `value::tests::numbers_round_trip` | PASS | yes |
 | `value::tests::timestamp_tz_round_trips_with_offsets_and_day_rollover` | PASS | yes |
+| `advanced_queuing_raw_json_and_object_queues` | PASS | yes |
 | `oracle_conforms` | PASS | yes |
 | `clob_and_blob_read_and_write` | PASS | yes |
 | `dml_commit_rollback_and_errors` | PASS | yes |
@@ -133,14 +147,34 @@
 | `plsql_blocks_procedures_and_functions` | PASS | yes |
 | `ref_cursors_from_procedures_and_functions` | PASS | yes |
 | `select_with_binds_and_types` | PASS | yes |
+| `tcps_client_certificate_is_required_and_presented` | PASS | yes |
 | `tcps_connections_with_each_certificate_check` | PASS | yes |
+| `no_blocking_call_runs_on_the_reactor` | PASS | yes |
+| `object_collection_and_record_arguments_through_call` | PASS | yes |
+| `objects_collections_and_xmltype_columns_decode` | PASS | yes |
+| `in_out_clob_and_blob` | PASS | yes |
+| `in_values_past_32k_travel_as_temporary_lobs` | PASS | yes |
+| `out_clob_and_blob_of_any_size_come_back_whole` | PASS | yes |
+| `scrollable_cursor_moves_anywhere_in_the_result` | PASS | yes |
+| `scrollable_cursor_through_the_driver_returns_shared_rows` | PASS | yes |
 | `array_dml_runs_many_rows_in_one_call` | PASS | yes |
+| `bfile_columns_are_read_from_the_server_file` | PASS | yes |
 | `compilation_errors_are_reported_with_their_lines` | PASS | yes |
 | `every_column_type_is_typed_and_matches_the_servers_rendering` | PASS | yes |
 | `functions_named_arguments_and_every_out_kind` | PASS | yes |
 | `large_results_stream_and_a_callback_error_stops_cleanly` | PASS | yes |
+| `lobs_through_call_and_call_function_of_any_size` | PASS | yes |
 | `logical_rowids_of_index_organized_tables_round_trip` | PASS | yes |
+| `nested_cursor_columns_come_back_as_result_sets` | PASS | yes |
 | `procedure_calls_return_out_values_cursors_implicit_results_and_output` | PASS | yes |
+| `proxy_authentication_connects_on_behalf_of_another_user` | PASS | yes |
+| `repeated_statements_reuse_their_parsed_cursor` | PASS | yes |
 | `scripts_run_sql_and_plsql_units_and_stop_at_the_first_error` | PASS | yes |
-| `unsupported_types_are_refused_cleanly` | PASS | yes |
+| `timestamps_in_named_regions_come_back_as_the_server_computes_them` | PASS | yes |
+| `unsupported_types_are_refused_cleanly` | PASS | no |
+| `two_phase_commit_prepare_commit_recover_and_rollback` | PASS | yes |
+| `ci::drivers_macos_latest` | PASS | yes |
+| `ci::oracle_live_ubuntu_latest` | PASS | yes |
+| `ci::drivers_windows_latest` | PASS | yes |
+| `ci::drivers_ubuntu_latest` | PASS | no |
 

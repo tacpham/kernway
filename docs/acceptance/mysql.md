@@ -5,20 +5,20 @@
 
 | | |
 |---|---|
-| generated | 2026-11-26 14:46 UTC |
+| generated | 2026-11-26 16:15 UTC |
 | server | MySQL 8.0.46 |
 | image | mysql:8.0 |
 | container | kernway-mysql |
-| driver commit | 8283ee7 on feat/plsql-full |
+| driver commit | 2fd8650 on feat/oracle-full |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
-| command | `cargo test -p kernway-orm-mysql --features mysql --lib --tests -- --test-threads=1 --nocapture --skip local_socket_; local_socket_* inside kernway-mysql; CI run 45840229868 (Linux / macOS / Windows)` |
+| command | `cargo test -p kernway-orm-mysql --features mysql --lib --tests -- --test-threads=1 --nocapture --skip local_socket_; local_socket_* inside kernway-mysql; CI run 45855818537 (Linux / macOS / Windows)` |
 
 ## Verdict: implemented features **PASSED** · completeness **43/43** — complete
 
 - *Implemented features* passes only if every test ran and passed (no skips) in this run.
 - *Completeness* counts 🚧 gaps (listed below) against the full feature catalog.
 - Features verified: **43 / 43** (0 not implemented yet, 0 failing; 2 not applicable to MySQL).
-- Tests run: 59 — 59 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
+- Tests run: 60 — 60 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
 - A feature is ✅ only when every test listed as its evidence ran and passed in this run.
 
 ## Connection & security
@@ -33,7 +33,7 @@
 | Connection URL parsing | ✅ PASS | `protocol::tests::url_parsing` |
 | Host names resolved off the reactor (blocking pool); IP literals skip DNS | ✅ PASS | `host_names_resolve_without_blocking_and_ip_literals_skip_dns` |
 | Auth scrambles (native SHA-1, caching_sha2 SHA-256) match the reference construction | ✅ PASS | `protocol::tests::native_scramble_shape`<br>`protocol::tests::sha256_scramble_matches_the_reference_construction` |
-| Local channel: Unix socket file / Windows named pipe (server reports the transport; caching_sha2 full auth over it; TLS-requiring ssl-mode refused) — here inside the MySQL container, on Windows over a named pipe in CI | ✅ PASS | `local_socket_connects_over_the_servers_local_channel`<br>`local_socket_carries_a_caching_sha2_full_authentication`<br>`local_socket_refuses_an_ssl_mode_that_requires_tls`<br>`ci::mysql_windows_latest` |
+| Local channel: Unix socket file / Windows named pipe (server reports the transport; caching_sha2 full auth over it; TLS-requiring ssl-mode refused) — here inside the MySQL container, on Windows over a named pipe in CI | ✅ PASS | `local_socket_connects_over_the_servers_local_channel`<br>`local_socket_carries_a_caching_sha2_full_authentication`<br>`local_socket_refuses_an_ssl_mode_that_requires_tls`<br>`ci::drivers_windows_latest` |
 | Compressed protocol (zlib): server reports Compression=ON; >16 MiB values, TLS, binary/text, streaming, pipelining, cursors over it; the wire carries far fewer bytes | ✅ PASS | `compressed_protocol_is_negotiated_and_carries_every_kind_of_traffic`<br>`compression_shrinks_what_crosses_the_wire` |
 | zstd compression algorithm | ➖ N/A | the client picks the algorithm; zlib is offered by every MySQL / MariaDB server |
 
@@ -101,9 +101,9 @@
 
 | Feature | Status | Evidence / note |
 |---|---|---|
-| Runs on Linux: whole driver suite against MySQL 8.0, incl. the Unix socket (CI) | ✅ PASS | `ci::mysql_ubuntu_latest` |
-| Runs on macOS: whole driver suite against MySQL 8.0.40 for macOS, incl. the Unix socket (CI) | ✅ PASS | `ci::mysql_macos_latest` |
-| Runs on Windows: whole driver suite against MySQL 8.0.40 for Windows, incl. the named pipe (CI) | ✅ PASS | `ci::mysql_windows_latest` |
+| Runs on Linux: whole driver suite against MySQL 8.0, incl. the Unix socket (CI) | ✅ PASS | `ci::drivers_ubuntu_latest` |
+| Runs on macOS: whole driver suite against MySQL 8.0.40 for macOS, incl. the Unix socket (CI) | ✅ PASS | `ci::drivers_macos_latest` |
+| Runs on Windows: whole driver suite against MySQL 8.0.40 for Windows, incl. the named pipe (CI) | ✅ PASS | `ci::drivers_windows_latest` |
 | Fully async on kernway's reactor: no blocking call on a shard (DNS, files, sockets, sleeps only on the blocking pool; large zlib frames too) — enforced by a source scan | ✅ PASS | `no_blocking_call_runs_on_the_reactor`<br>`host_names_resolve_without_blocking_and_ip_literals_skip_dns` |
 
 ## All tests in this run
@@ -166,7 +166,8 @@
 | `local_socket_carries_a_caching_sha2_full_authentication` | PASS | yes |
 | `local_socket_connects_over_the_servers_local_channel` | PASS | yes |
 | `local_socket_refuses_an_ssl_mode_that_requires_tls` | PASS | yes |
-| `ci::mysql_windows_latest` | PASS | yes |
-| `ci::mysql_macos_latest` | PASS | yes |
-| `ci::mysql_ubuntu_latest` | PASS | yes |
+| `ci::drivers_macos_latest` | PASS | yes |
+| `ci::oracle_live_ubuntu_latest` | PASS | no |
+| `ci::drivers_windows_latest` | PASS | yes |
+| `ci::drivers_ubuntu_latest` | PASS | yes |
 
