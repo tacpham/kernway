@@ -1273,26 +1273,32 @@ impl StaticOutcome {
 /// The symlink re-check is here rather than in `kernway-static` because it needs
 /// I/O: `resolve` guarantees *lexical* containment, but a file inside the root
 /// can be a symlink pointing outside it, and only `canonicalize` sees that.
+/// The canonical path and metadata of `path` if it is a regular file that really
+/// lives under `root`. Symlinks and `.`/`..` are resolved for real and the result
+/// must stay under the canonical root — a file that links outside the root fails
+/// here, the defence lexical checks cannot provide. A missing file is a miss.
+/// Shared by GET/HEAD (`load_static`) and OPTIONS, so both see the same files.
+/// Returns `(canonical file, its metadata, canonical root)`.
+fn confined_file(
+    root: &std::path::Path,
+    path: &std::path::Path,
+) -> Option<(std::path::PathBuf, std::fs::Metadata, std::path::PathBuf)> {
+    let canon = std::fs::canonicalize(path).ok()?;
+    let canon_root = std::fs::canonicalize(root).ok()?;
+    if !canon.starts_with(&canon_root) {
+        return None;
+    }
+    let meta = std::fs::metadata(&canon).ok()?;
+    meta.is_file().then_some((canon, meta, canon_root))
+}
+
 fn load_static(
     root: &std::path::Path,
     path: std::path::PathBuf,
     if_none_match: Option<&str>,
     accept_encoding: Option<&str>,
 ) -> Option<StaticOutcome> {
-    // Resolve symlinks and `.`/`..` for real, then require the result to stay
-    // under the canonical root. A file that links outside the root fails here —
-    // this is the defence lexical checks cannot provide. `canonicalize` also
-    // errors for a missing file, which is simply a miss.
-    let canon = std::fs::canonicalize(&path).ok()?;
-    let canon_root = std::fs::canonicalize(root).ok()?;
-    if !canon.starts_with(&canon_root) {
-        return None;
-    }
-
-    let meta = std::fs::metadata(&canon).ok()?;
-    if !meta.is_file() {
-        return None;
-    }
+    let (canon, meta, canon_root) = confined_file(root, &path)?;
 
     // The Content-Type is always the *original* file's — a `.br` variant of
     // `app.js` is still JavaScript once decoded.
@@ -1384,7 +1390,8 @@ fn with_suffix(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
 ///
 /// All I/O (canonicalize, stat, read) runs on the blocking pool via
 /// [`rt_core::spawn_blocking`], so it never stalls the shard ([KEP-0000 §4]).
-/// Handles GET and HEAD, conditional (`If-None-Match` → 304), and a single byte
+/// Handles GET and HEAD (plus OPTIONS — see [`static_options`]), conditional
+/// (`If-None-Match` → 304), and a single byte
 /// `Range` (→ 206, or 416 if unsatisfiable). The HEAD/body distinction is the
 /// caller's — [`write_response`] writes head-only for a HEAD.
 ///
@@ -1396,8 +1403,11 @@ async fn try_static(
 ) -> Option<Response> {
     let sf = static_files?;
 
-    // GET and HEAD are served from the filesystem; other methods fall through.
     let method = &request.method;
+    if method.eq_ignore_ascii_case("OPTIONS") {
+        return static_options(sf, router, request).await;
+    }
+    // GET and HEAD are served from the filesystem; other methods fall through.
     if !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD") {
         return None;
     }
@@ -1449,6 +1459,35 @@ async fn try_static(
         apply_range(&mut response, range_header, len);
     }
 
+    Some(response)
+}
+
+/// `OPTIONS` for a path that names a static file: `204` + `Allow: GET, HEAD,
+/// OPTIONS`, plus whatever methods routes serve at the same path (routes first).
+/// `None` — fall through to the router — when an explicit OPTIONS route exists
+/// (it wins, as for GET), or when no file is there: a miss, a hostile path, a
+/// directory without an index, or a symlink out of the root all look alike.
+async fn static_options(
+    sf: &StaticFiles,
+    router: &Router,
+    request: &Request,
+) -> Option<Response> {
+    if router.find("OPTIONS", &request.path).is_some() {
+        return None;
+    }
+    let path = sf.resolve(&request.path).ok()?;
+    let root = sf.root().to_path_buf();
+    rt_core::spawn_blocking(move || confined_file(&root, &path))
+        .await??;
+
+    let mut methods = router.allowed_methods(&request.path);
+    for m in ["GET", "HEAD", "OPTIONS"] {
+        if !methods.iter().any(|seen| seen == m) {
+            methods.push(m.to_string());
+        }
+    }
+    let mut response = Response::new(StatusCode::NO_CONTENT);
+    response.headers.insert("allow", &methods.join(", "));
     Some(response)
 }
 
@@ -2088,6 +2127,131 @@ mod tests {
         );
         assert!(got.contains("allow: GET, POST, OPTIONS\r\n"), "got {got:?}");
         assert!(got.ends_with("\r\n\r\n"), "204 carries no body: {got:?}");
+    }
+
+    /// Status line of a raw response, e.g. `HTTP/1.1 204 No Content`.
+    fn status_line(raw: &str) -> &str {
+        raw.lines().next().unwrap_or("")
+    }
+
+    #[test]
+    fn options_odd_paths_match_exactly_what_get_would() {
+        // OPTIONS must agree with routing: wherever GET/POST would match, OPTIONS
+        // answers 204; wherever they would 404, so does OPTIONS.
+        let cases: [(&'static str, &str); 9] = [
+            ("OPTIONS /items?x=1&y=2 HTTP/1.1\r\nHost: x\r\n\r\n", "204"), // query ignored
+            ("OPTIONS /items/ HTTP/1.1\r\nHost: x\r\n\r\n", "204"),        // trailing slash
+            ("OPTIONS //items HTTP/1.1\r\nHost: x\r\n\r\n", "204"),        // doubled slash
+            ("OPTIONS /items/7 HTTP/1.1\r\nHost: x\r\n\r\n", "204"),       // param route
+            ("OPTIONS /items/7/extra HTTP/1.1\r\nHost: x\r\n\r\n", "404"), // deeper than any route
+            ("OPTIONS /ITEMS HTTP/1.1\r\nHost: x\r\n\r\n", "404"),         // paths are case-sensitive
+            ("OPTIONS / HTTP/1.1\r\nHost: x\r\n\r\n", "404"),              // no root route
+            ("OPTIONS /nope HTTP/1.1\r\nHost: x\r\n\r\n", "404"),          // unknown
+            ("GET * HTTP/1.1\r\nHost: x\r\n\r\n", "404"),                  // `*` is OPTIONS-only
+        ];
+        for (raw, want) in cases {
+            let got = round_trip(items_router(), raw);
+            assert!(
+                status_line(&got).contains(want),
+                "{:?} → {:?}, want {want}",
+                raw.lines().next().unwrap(),
+                status_line(&got)
+            );
+        }
+        // And the GET side of the same odd paths, for the comparison above.
+        for (raw, want) in [
+            ("GET /items/ HTTP/1.1\r\nHost: x\r\n\r\n", "200"),
+            ("GET //items HTTP/1.1\r\nHost: x\r\n\r\n", "200"),
+            ("GET /ITEMS HTTP/1.1\r\nHost: x\r\n\r\n", "404"),
+        ] {
+            let got = round_trip(items_router(), raw);
+            assert!(status_line(&got).contains(want), "{raw:?} → {got:?}");
+        }
+    }
+
+    fn cors_layers() -> Vec<Arc<dyn Middleware>> {
+        vec![Arc::new(crate::Cors::new().allow_origin("https://app.example"))]
+    }
+
+    fn with_headers(mut req: Request, headers: &[(&str, &str)]) -> Request {
+        for (k, v) in headers {
+            req.headers.insert(k, v);
+        }
+        req
+    }
+
+    #[test]
+    fn a_cors_preflight_is_answered_by_cors_never_by_the_router() {
+        let mut router = items_router();
+        // An explicit OPTIONS route that would be obvious if it ever ran.
+        router.add(
+            "OPTIONS",
+            "/items",
+            sync_handler(|_req, _ctx| Response::new(StatusCode::OK).body(b"route".to_vec())),
+        );
+        let preflight = |path: &str| {
+            with_headers(
+                options(path),
+                &[
+                    ("origin", "https://app.example"),
+                    ("access-control-request-method", "POST"),
+                ],
+            )
+        };
+        let layers = cors_layers();
+
+        // Known path, even one with an explicit OPTIONS route: Cors answers.
+        let r = block_on(handle(preflight("/items"), &router, &AppContext::new(), &layers));
+        assert_eq!(r.status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            r.headers.get("access-control-allow-origin").unwrap(),
+            "https://app.example"
+        );
+        assert!(r.headers.get("access-control-allow-methods").is_some());
+        assert!(r.body_bytes().is_empty(), "the OPTIONS route must not run");
+        assert!(r.headers.get("allow").is_none(), "the router must not answer");
+
+        // Path no route serves: still Cors' 204, not our 404 — a preflight
+        // never reaches routing (the real request that follows will 404).
+        let r = block_on(handle(preflight("/nope"), &router, &AppContext::new(), &layers));
+        assert_eq!(r.status, StatusCode::NO_CONTENT);
+        assert!(r.headers.get("allow").is_none());
+
+        // Disallowed origin: Cors' bare 204 (no allow-origin) → the browser blocks.
+        let r = block_on(handle(
+            with_headers(
+                options("/items"),
+                &[
+                    ("origin", "https://evil.example"),
+                    ("access-control-request-method", "POST"),
+                ],
+            ),
+            &router,
+            &AppContext::new(),
+            &layers,
+        ));
+        assert_eq!(r.status, StatusCode::NO_CONTENT);
+        assert!(r.headers.get("access-control-allow-origin").is_none());
+        assert!(r.headers.get("allow").is_none());
+    }
+
+    #[test]
+    fn a_plain_options_behind_cors_gets_the_router_answer_plus_cors_headers() {
+        let layers = cors_layers();
+        // No Access-Control-Request-Method → not a preflight → routed.
+        let req = with_headers(options("/items"), &[("origin", "https://app.example")]);
+        let r = block_on(handle(req, &items_router(), &AppContext::new(), &layers));
+        assert_eq!(r.status, StatusCode::NO_CONTENT);
+        assert_eq!(r.headers.get("allow").unwrap(), "GET, POST, OPTIONS");
+        assert_eq!(
+            r.headers.get("access-control-allow-origin").unwrap(),
+            "https://app.example"
+        );
+
+        // …and an unknown path is still 404 through Cors.
+        let req = with_headers(options("/nope"), &[("origin", "https://app.example")]);
+        let r = block_on(handle(req, &items_router(), &AppContext::new(), &layers));
+        assert_eq!(r.status, StatusCode::NOT_FOUND);
     }
 
     #[test]
@@ -3013,6 +3177,53 @@ mod static_file_tests {
     /// — not just `load_static` in isolation. Keep-alive off, so the client
     /// reads to EOF.
     fn serve_static(root: std::path::PathBuf, request: String) -> String {
+        serve_static_with(root, Router::new(), request)
+    }
+
+    #[test]
+    fn options_on_a_static_file_lists_get_and_head() {
+        let root = tmpdir("options-static");
+        fs::write(root.join("a.txt"), b"hello").unwrap();
+
+        let got = serve_static(root.clone(), "OPTIONS /a.txt HTTP/1.1\r\nHost: x\r\n\r\n".into());
+        assert!(got.starts_with("HTTP/1.1 204 No Content\r\n"), "got {got:?}");
+        assert!(got.contains("allow: GET, HEAD, OPTIONS\r\n"), "got {got:?}");
+        assert!(got.ends_with("\r\n\r\n"), "no body: {got:?}");
+
+        // A missing file is still 404.
+        let got = serve_static(root.clone(), "OPTIONS /missing.txt HTTP/1.1\r\nHost: x\r\n\r\n".into());
+        assert!(got.starts_with("HTTP/1.1 404"), "got {got:?}");
+
+        // A traversal attempt is a miss, never a 204.
+        let got = serve_static(root.clone(), "OPTIONS /../etc/passwd HTTP/1.1\r\nHost: x\r\n\r\n".into());
+        assert!(got.starts_with("HTTP/1.1 404"), "got {got:?}");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn options_on_a_static_file_that_also_has_a_route_unions_both() {
+        let root = tmpdir("options-static-route");
+        fs::write(root.join("form.html"), b"<form>").unwrap();
+        let mut router = Router::new();
+        router.add(
+            "POST",
+            "/form.html",
+            sync_handler(|_req, _ctx| Response::new(StatusCode::OK)),
+        );
+
+        let got = serve_static_with(
+            root.clone(),
+            router,
+            "OPTIONS /form.html HTTP/1.1\r\nHost: x\r\n\r\n".into(),
+        );
+        assert!(got.starts_with("HTTP/1.1 204 No Content\r\n"), "got {got:?}");
+        assert!(got.contains("allow: POST, GET, HEAD, OPTIONS\r\n"), "got {got:?}");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    fn serve_static_with(root: std::path::PathBuf, router: Router, request: String) -> String {
         use std::io::{Read, Write};
 
         let ex = rt_core::Executor::new().unwrap();
@@ -3032,7 +3243,7 @@ mod static_file_tests {
             got
         });
 
-        let router = Arc::new(Router::new());
+        let router = Arc::new(router);
         let context = Arc::new(AppContext::new());
         let middlewares: Arc<Vec<Arc<dyn Middleware>>> = Arc::new(Vec::new());
         let static_files = Some(Arc::new(StaticFiles::new(root)));
