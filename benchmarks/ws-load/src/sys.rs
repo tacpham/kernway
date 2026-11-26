@@ -103,7 +103,8 @@ fn max_files_per_proc() -> Option<u64> {
 }
 
 /// Resident set size of `pid` in KiB, via `ps -o rss= -p <pid>` (works the same
-/// on Linux and macOS; both report KiB).
+/// on Linux and macOS; both report KiB). `None` where there is no `ps`
+/// (Windows).
 #[must_use]
 pub fn rss_kib(pid: u32) -> Option<u64> {
     let out = Command::new("ps")
@@ -272,6 +273,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // via `ps`, which Windows does not have (rss_kib is None there)
     fn reads_own_rss() {
         assert!(rss_kib(std::process::id()).unwrap_or(0) > 0);
     }
