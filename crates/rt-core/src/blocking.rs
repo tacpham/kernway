@@ -181,28 +181,33 @@ mod tests {
 
     #[test]
     fn many_jobs_run_concurrently_not_serially() {
+        // Measured by overlap, not wall time (a slow CI runner made a time
+        // bound flaky): each job waits until all four are running at once,
+        // which can only happen if the pool runs them in parallel.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let running = Arc::new(AtomicUsize::new(0));
         let ex = Executor::new().unwrap();
-        let started = std::time::Instant::now();
         ex.block_on(async {
             let jobs: Vec<_> = (0..4)
                 .map(|i| {
+                    let running = Arc::clone(&running);
                     spawn_blocking(move || {
-                        std::thread::sleep(Duration::from_millis(40));
+                        running.fetch_add(1, Ordering::SeqCst);
+                        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                        while running.load(Ordering::SeqCst) < 4 {
+                            assert!(std::time::Instant::now() < deadline, "jobs appear to be serialised");
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
                         i
                     })
                 })
                 .collect();
             for job in jobs {
-                assert!(job.await.is_some());
+                assert!(job.await.is_some(), "a job failed (serialised: it timed out waiting for the others)");
             }
         })
         .unwrap();
-        // Serial execution would need ~160ms; allow a wide margin for CI noise.
-        assert!(
-            started.elapsed() < Duration::from_millis(140),
-            "jobs appear to be serialised: {:?}",
-            started.elapsed()
-        );
     }
 
     #[test]

@@ -266,7 +266,14 @@ fn a_server_requiring_a_client_certificate_refuses_a_client_without_one() {
         }
     });
     let err = outcome.expect_err("the connection must not carry data");
-    assert!(err_text(&err).contains("CertificateRequired"), "{}", err_text(&err));
+    // The server's alert says why; Windows may discard it and report the
+    // reset of a socket closed with our unread bytes in it instead.
+    assert!(
+        err_text(&err).contains("CertificateRequired")
+            || matches!(err.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted),
+        "{}",
+        err_text(&err)
+    );
     assert!(server.join().unwrap().is_err(), "the server refused the handshake");
 }
 
