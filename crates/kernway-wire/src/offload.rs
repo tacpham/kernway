@@ -97,10 +97,12 @@ mod tests {
         let s = run(connect_tcp("localhost", port)).expect("connects over IPv4 after ::1 refuses");
         assert_eq!(s.peer_addr().unwrap(), format!("127.0.0.1:{port}").parse().unwrap());
         accepted.join().unwrap().unwrap();
-        // Nothing listening: the error names every address tried.
-        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let e = run(connect_tcp("localhost", closed)).err().unwrap();
-        assert!(e.to_string().contains(&format!("127.0.0.1:{closed}")), "{e}");
+        // Nothing listening: the error names every address tried. Port 1 —
+        // not a just-freed ephemeral port: Windows hands ephemeral ports out
+        // in order, so connecting to one just closed can pick it as the
+        // source port and connect the socket to itself.
+        let e = run(connect_tcp("localhost", 1)).err().expect("nothing listens on port 1");
+        assert!(e.to_string().contains("127.0.0.1:1"), "{e}");
         let e = run(connect_tcp("kernway-no-such-host.invalid", 1)).err().unwrap();
         assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e}");
     }
