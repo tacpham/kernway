@@ -1,0 +1,26 @@
+[package]
+name        = "kernway-orm-mongodb"
+description = "MongoDB for Kernway — a self-written async driver on the Kernway reactor (BSON, OP_MSG, SCRAM / X.509, TLS, replica sets and sharded clusters, sessions and transactions, change streams, GridFS) and an ORM backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kernway-orm-core = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+rt-core          = { workspace = true }
+rt-net           = { workspace = true }
+kernway-tls      = { workspace = true }
+# Socket / TLS stream, pool, blocking-pool offload, and the shared SCRAM client.
+kernway-wire     = { workspace = true, features = ["scram"] }
+# SCRAM-SHA-1 hashes the password with MD5 first (MONGODB-CR's digest).
+md5              = { package = "md-5", version = "0.11" }
+# zlib wire compression (pure-Rust backend).
+flate2           = { workspace = true }
+
+[dev-dependencies]
+kernway-orm-macro = { workspace = true }
+
+[lints]
+workspace = true

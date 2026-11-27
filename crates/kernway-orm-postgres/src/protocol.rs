@@ -19,7 +19,8 @@
 //!    **COPY**s in and out, and collects asynchronous **notices** and
 //!    **LISTEN / NOTIFY** notifications.
 
-use crate::auth::{self, Binding, Scram};
+use crate::auth;
+use kernway_wire::scram::{self, Binding, Hash, Scram};
 use crate::config::{ChannelBinding, Host, PgConfig, SslMode, TargetSession};
 use crate::types;
 use kernway_orm_core::{decode::Cell, error::OrmError};
@@ -547,7 +548,7 @@ impl Conn {
                             let cert = self.io.peer_certificate().map(<[u8]>::to_vec);
                             let binding = match (cfg.channel_binding, plus, cert) {
                                 (ChannelBinding::Disable, _, _) => Binding::None,
-                                (_, true, Some(cert)) => Binding::Bind(auth::tls_server_end_point(&cert)),
+                                (_, true, Some(cert)) => Binding::Bind(scram::tls_server_end_point(&cert)),
                                 (ChannelBinding::Require, _, _) => {
                                     return Err(conn_err("channel_binding=require, but the server offers no SCRAM-SHA-256-PLUS over this connection"))
                                 }
@@ -559,9 +560,10 @@ impl Conn {
                             }
                             bound = matches!(binding, Binding::Bind(_));
                             let pw = self.password(cfg)?;
-                            let s = Scram::new(&pw, auth::new_nonce().map_err(io_err)?, binding);
+                            // The user name travels in the start-up message; SCRAM's stays empty.
+                            let s = Scram::new(Hash::Sha256, "", pw.as_bytes(), scram::new_nonce().map_err(io_err)?, binding);
                             let first = s.client_first();
-                            let mech = s.mechanism();
+                            let mech = if s.is_bound() { "SCRAM-SHA-256-PLUS" } else { "SCRAM-SHA-256" };
                             msg(self.io.write_buf(), b'p', |w| {
                                 cstr(w, mech);
                                 w.extend_from_slice(&(first.len() as i32).to_be_bytes());

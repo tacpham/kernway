@@ -11,6 +11,14 @@ rt-net      = { workspace = true }
 kernway-tls = { workspace = true }
 # The blocking pool (`offload`: DNS and file reads off the shard).
 rt-core     = { workspace = true }
+# SCRAM (`scram` feature): the hash functions; HMAC / PBKDF2 / base64 are ours.
+sha1 = { version = "0.10", optional = true }
+sha2 = { version = "0.11", optional = true }
+
+[features]
+default = []
+# The shared SCRAM-SHA-1 / SCRAM-SHA-256 client (PostgreSQL, MongoDB).
+scram = ["sha1", "sha2"]
 
 [lints]
 workspace = true

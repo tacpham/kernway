@@ -194,6 +194,64 @@ jobs:
           cargo test -p kernway-orm-postgres --features postgres -- --test-threads=1 --skip unix_domain_socket --nocapture 2>&1 | tee pg14.log
           ! grep -q "skip:" pg14.log
 
+  # The MongoDB driver on every OS against MongoDB 8.0: a standalone with
+  # SCRAM users (and its Unix socket), a TLS-only server with X.509 users, a
+  # three-member replica set and a sharded cluster with two routers
+  # (tests/support/mongo-setup.sh). Linux runs them in Docker; macOS and
+  # Windows run the official binaries natively.
+  mongodb:
+    name: mongodb (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      MONGO_VERSION: 8.0.4
+      MONGOSH_VERSION: 2.3.8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: MongoDB (Linux, Docker)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: MONGO_SOCKET_DIR=/tmp/kwmongo-sock crates/kernway-orm-mongodb/tests/support/mongo-setup.sh "$RUNNER_TEMP/mongo" >> "$GITHUB_ENV"
+
+      - name: MongoDB (macOS, official binaries)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSL "https://fastdl.mongodb.org/osx/mongodb-macos-arm64-$MONGO_VERSION.tgz" | tar xz
+          curl -fsSL -o mongosh.zip "https://downloads.mongodb.com/compass/mongosh-$MONGOSH_VERSION-darwin-arm64.zip" && unzip -q mongosh.zip
+          cd "$GITHUB_WORKSPACE"
+          MONGO_BIN="$RUNNER_TEMP/mongodb-macos-aarch64-$MONGO_VERSION/bin" MONGOSH="$RUNNER_TEMP/mongosh-$MONGOSH_VERSION-darwin-arm64/bin/mongosh" \
+            crates/kernway-orm-mongodb/tests/support/mongo-setup.sh "$RUNNER_TEMP/mongo" >> "$GITHUB_ENV"
+
+      - name: MongoDB (Windows, official binaries)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          T="$(cygpath -u "$RUNNER_TEMP")"
+          curl -fsSL -o "$T/mongodb.zip" "https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-$MONGO_VERSION.zip" && unzip -q "$T/mongodb.zip" -d "$T"
+          curl -fsSL -o "$T/mongosh.zip" "https://downloads.mongodb.com/compass/mongosh-$MONGOSH_VERSION-win32-x64.zip" && unzip -q "$T/mongosh.zip" -d "$T"
+          MONGO_BIN="$(ls -d "$T"/mongodb-win32-x86_64-*/bin | head -1)" MONGOSH="$T/mongosh-$MONGOSH_VERSION-win32-x64/bin/mongosh.exe" \
+            crates/kernway-orm-mongodb/tests/support/mongo-setup.sh "$T/mongo" >> "$GITHUB_ENV"
+
+      - name: MongoDB driver — all tests, live
+        shell: bash
+        run: cargo test -p kernway-orm-mongodb -- --test-threads=1 --nocapture 2>&1 | tee mongo.log
+
+      - name: Nothing was skipped
+        shell: bash
+        run: |
+          ! grep -q "skip:" mongo.log
+          grep -q "^test transactions_and_no_lost_update" mongo.log
+
   # Oracle Database ships a server image for Linux only (no macOS / Windows
   # runner can host one), so the live suite runs here; the client code it
   # exercises is the same on every OS (above: it builds and its unit tests pass

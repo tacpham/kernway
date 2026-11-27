@@ -1,0 +1,65 @@
+# MongoDB feature catalog for the acceptance report.
+# area | feature | evidence
+# evidence = comma-separated test names (all must pass), or
+#            GAP: <why>  (not implemented — counted against completeness)
+#            N/A: <why> (MongoDB has no such feature)
+#
+# Every live test runs against MongoDB 8.0 in Docker, set up by
+# crates/kernway-orm-mongodb/tests/support/mongo-setup.sh: a standalone with
+# SCRAM users, a TLS-only server with an X.509 user, a three-member replica
+# set (tagged members, test commands for fail points) and a sharded cluster
+# with two mongos. CI runs the same suite on Linux (Docker), macOS and
+# Windows (the official binaries, natively).
+
+BSON | Every type (double incl. NaN / ±∞ / −0, string with NUL, document, array, binary + subtypes, ObjectId, bool, datetime before 1970, null, regex, JS code, int32, timestamp, int64, decimal128, min / max key) byte-exact against the BSON corpus and round-tripped through the server | bson::tests::corpus_round_trips, every_bson_type_round_trips
+BSON | Hostile input refused without panicking or over-allocating (bad lengths, truncation, bad booleans, unknown types, invalid UTF-8, 300-deep nesting) | bson::tests::hostile_input_is_an_error
+BSON | Decimal128 text conversion (exponents, clamping, NaN / Infinity, 34-digit limit), RFC 3339 dates, ObjectIds | bson::tests::decimal128_text, bson::tests::dates_and_ids
+BSON | Extended JSON (canonical and relaxed) and serde: typed structs with ObjectId / DateTime / Decimal128 fields | bson::tests::corpus_round_trips, bson::tests::serde_bridge, every_bson_type_round_trips
+
+Connection & security | Connection strings: hosts, IPv6, Unix-socket paths, credentials (percent-decoded), every option with validation; bad ones explained | options::tests::connection_strings, options::tests::bad_connection_strings_say_why
+Connection & security | SCRAM-SHA-256 (speculative, in hello) and SCRAM-SHA-1, negotiated by saslSupportedMechs; wrong passwords and mechanisms refused | scram_mechanisms_and_wrong_passwords
+Connection & security | TLS: full certificate check, wrong name refused, tlsAllowInvalidHostnames, tlsInsecure, missing CA file, plaintext against a TLS server fails fast | tls_certificates_and_x509
+Connection & security | X.509 client-certificate authentication (speculative) | tls_certificates_and_x509
+Connection & security | Unix-domain socket (inside the MongoDB container, and on Linux / macOS CI) | unix_domain_socket, ci::mongodb_ubuntu_latest, ci::mongodb_macos_latest
+Connection & security | mongodb+srv://: SRV seed list and TXT options from a self-written DNS client (over TCP), srvMaxHosts, targets outside the domain refused | srv_connection_strings, dns::tests::parses_srv_and_txt
+Connection & security | Connect and server-selection timeouts bounded, errors naming each server and why | timeouts_and_selection_errors_are_bounded
+Connection & security | PLAIN (LDAP) | GAP: implemented, but only MongoDB Enterprise speaks it — not verified against a server
+Connection & security | GSSAPI / Kerberos, MONGODB-AWS, MONGODB-OIDC | GAP: refused with a clear error
+Connection & security | SASLprep of non-ASCII SCRAM-SHA-256 passwords | GAP: passwords are sent as given
+Connection & security | Encrypted client keys (tlsCertificateKeyFilePassword), OCSP | GAP: refused with a clear error / not checked
+Connection & security | Unix-domain sockets on Windows | GAP: rt-net has no AF_UNIX on Windows; TCP there
+
+Protocol | OP_MSG with document sequences; replies checked (request ids, sizes, sections, checksums) | wire::tests::op_msg_round_trips_compressed_or_not, writes_updates_and_limits
+Protocol | Compression: snappy (written here) and zlib, negotiated in hello and used for every command except the handshake / auth ones | wire::tests::snappy_round_trips, compression_is_negotiated_and_used
+Protocol | Errors with code, code name and labels; write errors per document; write-concern errors; duplicate keys typed | error::tests::replies_and_labels, writes_updates_and_limits
+Protocol | A command abandoned mid-flight (timeout) never leaves its reply on a pooled connection | change_streams_resume_after_errors
+Protocol | zstd compression | GAP: not negotiated (snappy and zlib are)
+Protocol | Exhaust cursors / streaming hello | GAP: cursors use getMore; monitors poll hello every heartbeatFrequencyMS
+
+Topology | Discovery and monitoring (SDAM): standalone, replica set (members from the primary's list, stale primaries by electionId / setVersion, other sets removed), sharded clusters; per-server pools cleared on errors | topology::tests::standalone_and_sharded_discovery, topology::tests::replica_set_discovery_and_failover, replica_set_discovery_and_read_preferences, sharded_cluster_through_mongos
+Topology | Server selection: read preferences, tag sets, latency window, maxStalenessSeconds; direct connections | topology::tests::tags_and_latency_window, topology::tests::max_staleness_skips_lagging_secondaries, replica_set_discovery_and_read_preferences
+Topology | Failover: a stepped-down primary, writes continue on the new one | failover_to_a_new_primary
+Topology | Host names resolved off the reactor; an unknown host a clear error | host_names_resolve_off_the_reactor
+Topology | Load-balanced mode | GAP: implemented (loadBalanced=true, serviceId check), not verified behind a load balancer
+
+Operations | Inserts split by maxWriteBatchSize / message size (120 000 documents), ordered and unordered with per-document errors, 16 MiB limit checked before sending | finds_cursors_and_batches, writes_updates_and_limits
+Operations | find with sort / projection / skip / limit / batch size / hint / collation / comment / maxTimeMS; cursors over many getMores; cursors killed when dropped or closed | finds_cursors_and_batches
+Operations | Updates (operators, pipelines, array filters, upsert), replace, delete, findAndModify (update / replace / delete, before / after) | writes_updates_and_limits
+Operations | Bulk writes (ordered / unordered, mixed models, upserts, error indexes), count / estimated count / distinct, aggregation incl. $out | bulk_aggregate_and_indexes, finds_cursors_and_batches
+Operations | Indexes: unique, TTL, partial, text; list / drop; collections and databases | bulk_aggregate_and_indexes
+Operations | GridFS: upload / download by id and by name revision, metadata queries, rename, delete; missing chunks detected | gridfs_files
+
+Sessions & transactions | Transactions: commit, abort, retried commit, misuse refused; with_transaction retries a write conflict (no lost update) | transactions_and_causal_consistency
+Sessions & transactions | Causal consistency (read-your-writes on secondaries), snapshot sessions | transactions_and_causal_consistency
+Sessions & transactions | Retryable writes (exactly once after a dropped connection) and reads; non-retryable errors and retryWrites=false not retried | retryable_writes_and_reads_survive_one_failure
+Sessions & transactions | Sharded: transactions pinned to one mongos, $readPreference through mongos, retryable writes through mongos | sharded_cluster_through_mongos
+Sessions & transactions | Change streams: collection / database, fullDocument lookup, resume after a dropped getMore, resume tokens, invalidate | change_streams_resume_after_errors
+
+ORM | Repositories: generated numeric keys (counter) and ObjectId text keys, CRUD, values (i64 limits, floats, Unicode, quotes, empty strings), batches in one counter step | crud_values_batches_and_queries, binary_text_ids_and_unique_columns
+ORM | Query builder and specs typed by column (numeric comparisons numeric, NULL as SQL treats it, LIKE patterns as anchored regexes), ordering, pages — checked against an in-memory oracle | crud_values_batches_and_queries, orm::tests::like_patterns
+ORM | Binary and long text, unique columns as unique indexes (violation typed), manual keys upserted | binary_text_ids_and_unique_columns
+ORM | Transactions (commit on Ok, roll back on Err); find_by_id_for_update makes a concurrent writer conflict instead of losing an update; transaction_retrying lands every update | transactions_and_no_lost_update
+
+Reliability | Fully async on kernway's reactor: DNS, files and the Windows resolver lookup on the blocking pool; no blocking call on a shard (source scan) | no_blocking_call_runs_on_the_reactor, host_names_resolve_off_the_reactor
+Reliability | Linux, macOS and Windows (CI on each, against real servers) | ci::mongodb_ubuntu_latest, ci::mongodb_macos_latest, ci::mongodb_windows_latest
+Reliability | Client-side field-level / Queryable Encryption, Stable API, client-side operation timeouts (timeoutMS), command monitoring events | GAP: not implemented

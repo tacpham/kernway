@@ -8,13 +8,14 @@
 #   acceptance/run.sh sqlite   (embedded: no container, real database files)
 #   acceptance/run.sh redis    (single node, TLS, Sentinel, Cluster — all in Docker)
 #   acceptance/run.sh postgres (PostgreSQL 18 with every auth method and TLS, in Docker)
+#   acceptance/run.sh mongodb  (MongoDB 8.0: standalone, TLS / X.509, replica set, sharded — in Docker)
 #
 # Containers (created if missing; existing ones and their data are reused):
 #   kernway-mysql   mysql:8.0                  host port 3307, root password "secret"
 #   kernway-oracle  gvenzl/oracle-free:23-slim host ports 1521 / 2484 (TCPS)
 # Oracle TCPS needs a wallet once: crates/kernway-orm-oracle/tests/support/oracle-tcps-setup.sh
 set -euo pipefail
-DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres}"
+DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb}"
 # CI workflow whose jobs for this commit are the cross-OS evidence.
 WORKFLOW=drivers.yml; IMAGE=""; EXTRA=()
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -143,7 +144,20 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     # The Unix-socket test runs inside the container (in_container_tests).
     SKIP=(--skip unix_domain_socket)
     ;;
-  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres)" >&2; exit 2 ;;
+  mongodb)
+    # Recreated each run (test data only): a standalone with SCRAM users, a
+    # TLS-only server with an X.509 user, a 3-member replica set and a
+    # sharded cluster with two routers.
+    C=kernway-mongo
+    log "MongoDB (${MONGO_IMAGE:-mongo:8.0}): standalone, TLS, replica set, sharded cluster"
+    "$ROOT/crates/kernway-orm-mongodb/tests/support/mongo-setup.sh" "$WORK/mongo" > "$WORK/mongo.env"
+    set -a; . "$WORK/mongo.env"; set +a
+    VERSION="MongoDB $(docker exec "$C" mongod --version | head -1 | sed 's/db version v//')"
+    CRATE=kernway-orm-mongodb; FEATURES=(); TITLE=MongoDB
+    # The Unix-socket test runs inside the container (in_container_tests).
+    SKIP=(--skip unix_domain_socket)
+    ;;
+  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb)" >&2; exit 2 ;;
 esac
 
 CMD="cargo test -p $CRATE ${FEATURES[*]+${FEATURES[*]}} --lib --tests -- --test-threads=1 --nocapture ${EXTRA[*]+${EXTRA[*]}} ${SKIP[*]+${SKIP[*]}}"
@@ -181,6 +195,10 @@ in_container_tests() { # test target, name filter, env...
 if [ "$DB" = redis ]; then
   in_container_tests connection unix_socket_ KERNWAY_REDIS_SOCKET=/tmp/redis.sock
   CMD="$CMD; unix_socket_* inside $C"
+fi
+if [ "$DB" = mongodb ]; then
+  in_container_tests connection unix_domain_socket KERNWAY_MONGO_SOCKET=/tmp/mongodb-27017.sock
+  CMD="$CMD; unix_domain_socket inside $C"
 fi
 if [ "$DB" = postgres ]; then
   in_container_tests postgres unix_domain_socket KERNWAY_PG_SOCKET_DIR=/var/run/postgresql KERNWAY_PG_SOCKET_PORT=5432

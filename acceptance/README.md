@@ -8,6 +8,7 @@ acceptance/run.sh mysql    # -> docs/acceptance/mysql.md
 acceptance/run.sh oracle   # -> docs/acceptance/oracle.md
 acceptance/run.sh sqlite   # -> docs/acceptance/sqlite.md (embedded: no container)
 acceptance/run.sh postgres # -> docs/acceptance/postgres.md (PostgreSQL 18, every auth method, TLS)
+acceptance/run.sh mongodb  # -> docs/acceptance/mongodb.md (MongoDB 8.0: standalone, TLS, replica set, sharded)
 ```
 
 The script creates or reuses the container (data is kept), waits for the

@@ -12,11 +12,10 @@ serde_json       = { workspace = true }
 
 # Driver implementation (behind the `postgres` feature): a self-written async
 # wire protocol on the Kernway reactor (rt-net). Outside help is limited to the
-# SHA-2 hashes SCRAM needs and rustls for TLS.
-sha2            = { version = "0.11", optional = true }
+# MD5 hash (md5 auth) and rustls for TLS; SCRAM is kernway-wire's shared client.
 md5             = { package = "md-5", version = "0.11", optional = true }
 kernway-tls     = { workspace = true, optional = true }
-kernway-wire    = { workspace = true, optional = true }
+kernway-wire    = { workspace = true, optional = true, features = ["scram"] }
 kernway-orm-sql = { workspace = true, optional = true }
 rt-core         = { workspace = true, optional = true }
 rt-net          = { workspace = true, optional = true }
@@ -24,7 +23,7 @@ rt-net          = { workspace = true, optional = true }
 [features]
 default = []
 # The driver. Without it the crate only exports PostgresDialect.
-postgres = ["sha2", "md5", "kernway-tls", "kernway-wire", "kernway-orm-sql", "rt-core", "rt-net"]
+postgres = ["md5", "kernway-tls", "kernway-wire", "kernway-orm-sql", "rt-core", "rt-net"]
 
 [dev-dependencies]
 kernway-orm-macro = { workspace = true }

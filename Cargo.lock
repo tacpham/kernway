@@ -992,6 +992,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernway-orm-mongodb"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "kernway-orm-core",
+ "kernway-orm-macro",
+ "kernway-tls",
+ "kernway-wire",
+ "md-5",
+ "rt-core",
+ "rt-net",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kernway-orm-mysql"
 version = "0.1.0"
 dependencies = [
@@ -1044,7 +1060,6 @@ dependencies = [
  "rt-net",
  "serde",
  "serde_json",
- "sha2",
 ]
 
 [[package]]
@@ -1208,6 +1223,8 @@ dependencies = [
  "kernway-tls",
  "rt-core",
  "rt-net",
+ "sha1",
+ "sha2",
 ]
 
 [[package]]

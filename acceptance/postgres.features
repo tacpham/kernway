@@ -11,7 +11,7 @@
 # (PostgreSQL 18 and 14 in Docker), macOS and Windows (native servers).
 
 Connection & security | URLs: postgres:// and postgresql://, user / password percent-decoded, several hosts, IPv6 literals, Unix-socket directory (host=), port lists, sslmode / sslrootcert / sslcert / sslkey / channel_binding / target_session_attrs / application_name / connect_timeout / options=-c / any other setting; bad ones explained | config::tests::urls, config::tests::bad_urls
-Connection & security | SCRAM-SHA-256 (RFC 7677 vectors, server signature verified, nonce checked), over TLS and plaintext | auth::tests::rfc7677_example, auth::tests::nonce_must_extend_ours, auth::tests::hmac_rfc4231, every_authentication_method
+Connection & security | SCRAM-SHA-256 over TLS and plaintext, server signature verified, nonce checked (the shared kernway-wire SCRAM client; its RFC 5802 / 7677 vectors run in that crate) | every_authentication_method, scram_channel_binding
 Connection & security | SCRAM-SHA-256-PLUS channel binding (tls-server-end-point); channel_binding=require refuses plaintext, MD5 and trust | scram_channel_binding
 Connection & security | MD5, clear-text password, trust; wrong passwords refused (28P01) for each; a missing password explained | auth::tests::md5_matches_postgres, every_authentication_method
 Connection & security | TLS: sslmode disable / prefer / require / verify-ca / verify-full — the name check, the chain check, a missing CA file; TLS-only roles (hostssl) | tls_modes_check_what_they_promise, every_authentication_method

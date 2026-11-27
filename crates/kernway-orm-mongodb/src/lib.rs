@@ -1,0 +1,48 @@
+//! # kernway-orm-mongodb
+//!
+//! MongoDB for Kernway — a **self-written driver** on the per-core async
+//! reactor (no `mongodb` crate, no tokio), and an ORM backend:
+//!
+//! - [`bson`]: the value model, binary codec, Extended JSON, serde bridge;
+//! - `OP_MSG` with document sequences, snappy (written here) / zlib compression;
+//! - TCP / TLS / Unix sockets, `mongodb+srv://` with a self-written DNS client;
+//! - SCRAM-SHA-256 / SHA-1 (speculative), X.509, PLAIN;
+//! - topology discovery and monitoring, server selection (read preferences,
+//!   tags, staleness), per-server pools, failover;
+//! - sessions, causal consistency, snapshot reads, transactions
+//!   (`with_transaction`), retryable reads and writes;
+//! - CRUD, cursors, aggregation, bulk writes, indexes, change streams
+//!   (resumable), GridFS;
+//! - [`MongoDriver`]: the kernway ORM over documents.
+//!
+//! ```rust,ignore
+//! let client = Client::connect("mongodb://127.0.0.1:27017,127.0.0.1:27018/?replicaSet=rs0").await?;
+//! let items = client.database("shop").collection::<Item>("items");
+//! items.insert_one(&item).await?;
+//! let cheap = items.find(doc! { "price" => doc! { "$lt" => 10 } }, FindOptions::default()).await?.collect().await?;
+//! ```
+
+pub mod bson;
+mod client;
+mod collection;
+pub mod conn;
+mod dns;
+pub mod error;
+mod gridfs;
+pub mod options;
+pub mod orm;
+pub mod topology;
+mod wire;
+
+pub use bson::{from_bson, from_document, to_document, Binary, Bson, DateTime, Decimal128, Document, ObjectId, Regex, Timestamp};
+pub use client::{Client, Cursor, Session, TransactionOptions};
+pub use collection::{
+    BulkWriteResult, ChangeStream, ChangeStreamOptions, Collection, Database, FindOneAndModifyOptions, FindOptions, IndexModel, InsertManyResult,
+    UpdateOptions, UpdateResult, WriteModel,
+};
+pub use error::{Error, ErrorKind, Result};
+pub use gridfs::{GridFsBucket, DEFAULT_CHUNK_SIZE};
+pub use orm::{MongoDriver, MongoTx};
+pub use options::{
+    Address, AuthMechanism, ClientOptions, Compressor, Credential, ReadConcern, ReadMode, ReadPreference, TlsOptions, WriteConcern,
+};
