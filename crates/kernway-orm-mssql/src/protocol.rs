@@ -1025,7 +1025,10 @@ async fn tls_config(cfg: &MssqlConfig) -> Result<Option<Arc<ClientConfig>>, OrmE
         None => None,
     };
     let check = if cfg.trust_server_certificate { kernway_tls::CertCheck::None } else { kernway_tls::CertCheck::Full };
-    kernway_tls::client_config(ca.as_deref(), check).map(Some).map_err(|e| conn_err(format!("TLS configuration: {e}")))
+    // TDS 7.x carries the handshake in PRELOGIN packets, where SQL Server
+    // speaks TLS 1.2 only; TLS 1.3 needs TDS 8.0 strict.
+    let tls12_only = cfg.encrypt != Encrypt::Strict;
+    kernway_tls::client_config_versions(ca.as_deref(), check, None, tls12_only).map(Some).map_err(|e| conn_err(format!("TLS configuration: {e}")))
 }
 
 #[cfg(test)]

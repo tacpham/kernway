@@ -338,18 +338,16 @@ fn host_names_resolve_off_the_reactor() {
 
 #[test]
 fn strict_tds8() {
-    let Some(dir) = env("KERNWAY_MSSQL_TLS_DIR") else { return };
-    if std::env::var("KERNWAY_MSSQL_STRICT").is_err() {
-        eprintln!("skip: the server has no TLS 1.3 (TDS 8.0 strict); mssql-setup.sh enables it on x86-64 hosts");
-        return;
-    }
+    let Some(url) = env("KERNWAY_MSSQL_STRICT_URL") else { return };
     block(async move {
-        // TLS before the first TDS byte (ALPN tds/8.0), the certificate checked.
-        let url = format!("mssql://kw_app:Kw_app_pw1%21@localhost:1433/kernway_test?encrypt=strict&caFile={dir}/ca.pem");
+        // TLS before the first TDS byte (ALPN tds/8.0, TLS 1.3), the certificate checked.
         let mut c = connect(&url).await.unwrap();
         assert!(c.is_tls());
         let v = scalar(&mut c, "SELECT protocol_version FROM sys.dm_exec_connections WHERE session_id = @@SPID").await;
-        assert_eq!(v.as_i64().map(|v| v >> 24), Some(0x08), "{v:?}");
+        assert_eq!(v.as_i64().map(|v| (v as u32) >> 24), Some(0x08), "{v:?}");
+        assert_eq!(scalar(&mut c, "SELECT encrypt_option FROM sys.dm_exec_connections WHERE session_id = @@SPID").await, Value::Text("TRUE".into()));
         assert!(connect(&url.replace("localhost", "127.0.0.1")).await.is_err(), "the name is checked");
+        // A TDS 7.x client cannot reach a TLS 1.3-only server: a clear error.
+        assert!(connect(&url.replace("encrypt=strict", "encrypt=true")).await.is_err());
     });
 }

@@ -84,9 +84,25 @@ pub fn client_config_with_identity(
     check: CertCheck,
     identity: Option<ClientIdentity<'_>>,
 ) -> io::Result<Arc<ClientConfig>> {
-    let builder = ClientConfig::builder_with_provider(provider())
-        .with_safe_default_protocol_versions()
-        .map_err(io::Error::other)?;
+    client_config_versions(ca_pem, check, identity, false)
+}
+
+/// [`client_config_with_identity`], optionally limited to TLS 1.2 — for
+/// protocols that wrap the handshake in their own framing and have no TLS
+/// 1.3 there (SQL Server's TDS 7.x).
+pub fn client_config_versions(
+    ca_pem: Option<&[u8]>,
+    check: CertCheck,
+    identity: Option<ClientIdentity<'_>>,
+    tls12_only: bool,
+) -> io::Result<Arc<ClientConfig>> {
+    let builder = ClientConfig::builder_with_provider(provider());
+    let builder = if tls12_only {
+        builder.with_protocol_versions(&[&rustls::version::TLS12])
+    } else {
+        builder.with_safe_default_protocol_versions()
+    }
+    .map_err(io::Error::other)?;
 
     let wants_cert = match check {
         CertCheck::None => builder.dangerous().with_custom_certificate_verifier(Arc::new(NoCertCheck(provider()))),

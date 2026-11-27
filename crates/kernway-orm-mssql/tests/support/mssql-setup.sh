@@ -15,9 +15,11 @@ DIR="${1:-$(cd "$(dirname "$0")/../../../.." && pwd)/target/mssql}"
 NAME="${MSSQL_CONTAINER:-kernway-mssql}"
 IMAGE="${MSSQL_IMAGE:-mcr.microsoft.com/mssql/server:2022-latest}"
 SA_PW='Kernway_pw1!'
-# TLS 1.3 (which TDS 8.0 strict connections use) crashes the server under
-# x86 emulation (Apple silicon); native x86-64 hosts get it.
-TLS_PROTOCOLS="${MSSQL_TLS_PROTOCOLS:-$([ "$(uname -m)" = x86_64 ] && echo 1.2,1.3 || echo 1.2)}"
+# TDS 7.x clients (sqlcmd, the driver's default mode) need TLS 1.2; TDS 8.0
+# strict needs TLS 1.3, which crashes the server under x86 emulation (Apple
+# silicon) — so on native x86-64 hosts a second server, TLS 1.3 only, takes
+# strict connections on port 1434.
+STRICT="${MSSQL_STRICT:-$([ "$(uname -m)" = x86_64 ] && echo 1 || echo 0)}"
 mkdir -p "$DIR"
 DIR="$(cd "$DIR" && pwd)"
 cd "$DIR"
@@ -32,7 +34,7 @@ cat > mssql.conf <<CONF
 [network]
 tlscert = /var/opt/mssql/certs/server.pem
 tlskey = /var/opt/mssql/certs/server.key
-tlsprotocols = $TLS_PROTOCOLS
+tlsprotocols = 1.2
 forceencryption = 0
 CONF
 
@@ -59,4 +61,17 @@ GRANT VIEW SERVER STATE TO kw_app;
 echo "KERNWAY_MSSQL_URL=mssql://kw_app:Kw_app_pw1%21@127.0.0.1:1433/kernway_test?trustServerCertificate=true"
 echo "KERNWAY_MSSQL_SA_URL=mssql://sa:Kernway_pw1%21@127.0.0.1:1433/master?trustServerCertificate=true"
 echo "KERNWAY_MSSQL_TLS_DIR=$DIR"
-case "$TLS_PROTOCOLS" in *1.3*) echo "KERNWAY_MSSQL_STRICT=1" ;; esac
+if [ "$STRICT" = 1 ]; then
+  sed 's/^tlsprotocols = .*/tlsprotocols = 1.3/' mssql.conf > mssql-strict.conf
+  docker rm -f "$NAME-strict" >/dev/null 2>&1 || true
+  docker create --name "$NAME-strict" --hostname kernway-mssql --platform linux/amd64 -e ACCEPT_EULA=Y -e "MSSQL_SA_PASSWORD=$SA_PW" -p 1434:1433 "$IMAGE" >/dev/null
+  docker cp "$DIR/mssql-strict.conf" "$NAME-strict:/var/opt/mssql/mssql.conf"
+  docker cp "$DIR/certs" "$NAME-strict:/var/opt/mssql/certs"
+  docker start "$NAME-strict" >/dev/null
+  for _ in $(seq 1 120); do
+    docker logs "$NAME-strict" 2>&1 | grep -q "ready for client connections" && break
+    sleep 2
+  done
+  sleep 5
+  echo "KERNWAY_MSSQL_STRICT_URL=mssql://sa:Kernway_pw1%21@localhost:1434/master?encrypt=strict&caFile=$DIR/ca.pem"
+fi
