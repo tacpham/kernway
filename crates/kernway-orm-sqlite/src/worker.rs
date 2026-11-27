@@ -152,17 +152,27 @@ fn set_journal_mode(conn: &Db, want: &str) -> Result<(), raw::Error> {
             _ => String::new(),
         })
     };
+    let is_busy = |e: &raw::Error| matches!(e.code & 0xff, ffi::SQLITE_BUSY | ffi::SQLITE_LOCKED);
     let deadline = std::time::Instant::now() + SETUP_BUSY_TIMEOUT;
     loop {
-        if current()?.eq_ignore_ascii_case(want) {
-            return Ok(());
+        // Even reading the mode can meet a lock for a moment (the last
+        // connection of a WAL database checkpointing as it closes, seen on
+        // Windows): retry that too.
+        match current() {
+            Ok(m) if m.eq_ignore_ascii_case(want) => return Ok(()),
+            Ok(_) => {}
+            Err(e) if is_busy(&e) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                continue;
+            }
+            Err(e) => return Err(e),
         }
         let attempt = (|| {
             let mut stmt = conn.prepare(&format!("PRAGMA journal_mode = {want}"), false)?;
             while stmt.step()? {}
             Ok::<(), raw::Error>(())
         })();
-        let busy = matches!(&attempt, Err(e) if matches!(e.code & 0xff, ffi::SQLITE_BUSY | ffi::SQLITE_LOCKED));
+        let busy = matches!(&attempt, Err(e) if is_busy(e));
         if let Err(e) = attempt {
             if !busy {
                 return Err(e);

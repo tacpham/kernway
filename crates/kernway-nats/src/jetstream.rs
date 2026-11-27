@@ -112,7 +112,16 @@ impl JetStream {
     /// Create or update a durable consumer on `stream`.
     pub async fn create_consumer(&self, stream: &str, config: &Value) -> MsgResult<Value> {
         let name = config.get("durable_name").and_then(Value::as_str).ok_or_else(|| MsgError::Config("consumer config without durable_name".into()))?;
-        self.api(&format!("CONSUMER.CREATE.{stream}.{name}"), &json!({ "stream_name": stream, "config": config })).await
+        let body = json!({ "stream_name": stream, "config": config });
+        // Creating with the same config is idempotent: a reply lost to a slow
+        // clustered placement (an R3 consumer electing its leader) is retried.
+        let mut attempt = 1;
+        loop {
+            match self.api(&format!("CONSUMER.CREATE.{stream}.{name}"), &body).await {
+                Err(MsgError::Broker(m)) if attempt < 3 && m.contains("timed out") => attempt += 1,
+                r => return r,
+            }
+        }
     }
 
     /// A consumer's state.
