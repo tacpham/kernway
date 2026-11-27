@@ -5,20 +5,20 @@
 
 | | |
 |---|---|
-| generated | 2026-11-27 02:59 UTC |
+| generated | 2026-11-27 15:52 UTC |
 | server | MongoDB 8.0.38 |
 | image | mongo:8.0 |
 | container | kernway-mongo |
-| driver commit | f848976 on feat/mongodb-full |
+| driver commit | 31efd48 on docs/acceptance-orm-reuse |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
-| command | `cargo test -p kernway-orm-mongodb  --lib --tests -- --test-threads=1 --nocapture  --skip unix_domain_socket; unix_domain_socket inside kernway-mongo; CI run 45930904303 (Linux / macOS / Windows)` |
+| command | `cargo test -p kernway-orm-mongodb  --lib --tests -- --test-threads=1 --nocapture  --skip unix_domain_socket; unix_domain_socket inside kernway-mongo; CI run 46027569836 (Linux / macOS / Windows)` |
 
-## Verdict: implemented features **PASSED** · completeness **36/45** — NOT complete
+## Verdict: implemented features **PASSED** · completeness **37/46** — NOT complete
 
 - *Implemented features* passes only if every test ran and passed (no skips) in this run.
 - *Completeness* counts 🚧 gaps (listed below) against the full feature catalog.
-- Features verified: **36 / 45** (9 not implemented yet, 0 failing; 0 not applicable to MongoDB).
-- Tests run: 51 — 51 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
+- Features verified: **37 / 46** (9 not implemented yet, 0 failing; 0 not applicable to MongoDB).
+- Tests run: 70 — 70 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
 - A feature is ✅ only when every test listed as its evidence ran and passed in this run.
 
 ## BSON
@@ -29,6 +29,7 @@
 | Hostile input refused without panicking or over-allocating (bad lengths, truncation, bad booleans, unknown types, invalid UTF-8, 300-deep nesting) | ✅ PASS | `bson::tests::hostile_input_is_an_error` |
 | Decimal128 text conversion (exponents, clamping, NaN / Infinity, 34-digit limit), RFC 3339 dates, ObjectIds | ✅ PASS | `bson::tests::decimal128_text`<br>`bson::tests::dates_and_ids` |
 | Extended JSON (canonical and relaxed) and serde: typed structs with ObjectId / DateTime / Decimal128 fields | ✅ PASS | `bson::tests::corpus_round_trips`<br>`bson::tests::serde_bridge`<br>`every_bson_type_round_trips` |
+| Field order kept (documents are ordered): Extended JSON text parsed and written in order, structs serialized in declaration order, Document fields read back in stored order, ORM entities stored _id-first then by declaration (nested objects too) — independent of serde_json's preserve_order | ✅ PASS | `bson::tests::key_order_is_kept_through_json_and_serde`<br>`documents_keep_field_order` |
 
 ## Connection & security
 
@@ -52,7 +53,7 @@
 | Feature | Status | Evidence / note |
 |---|---|---|
 | OP_MSG with document sequences; replies checked (request ids, sizes, sections, checksums) | ✅ PASS | `wire::tests::op_msg_round_trips_compressed_or_not`<br>`writes_updates_and_limits` |
-| Compression: snappy (written here) and zlib, negotiated in hello and used for every command except the handshake / auth ones | ✅ PASS | `wire::tests::snappy_round_trips`<br>`compression_is_negotiated_and_used` |
+| Compression: snappy (kernway-wire's, shared with Kafka) and zlib, negotiated in hello and used for every command except the handshake / auth ones | ✅ PASS | `wire::tests::op_msg_round_trips_compressed_or_not`<br>`compression_is_negotiated_and_used` |
 | Errors with code, code name and labels; write errors per document; write-concern errors; duplicate keys typed | ✅ PASS | `error::tests::replies_and_labels`<br>`writes_updates_and_limits` |
 | A command abandoned mid-flight (timeout) never leaves its reply on a pooled connection | ✅ PASS | `change_streams_resume_after_errors` |
 | zstd compression | 🚧 GAP | not negotiated (snappy and zlib are) |
@@ -114,6 +115,7 @@
 | `bson::tests::dates_and_ids` | PASS | yes |
 | `bson::tests::decimal128_text` | PASS | yes |
 | `bson::tests::hostile_input_is_an_error` | PASS | yes |
+| `bson::tests::key_order_is_kept_through_json_and_serde` | PASS | yes |
 | `bson::tests::serde_bridge` | PASS | yes |
 | `dns::tests::parses_srv_and_txt` | PASS | yes |
 | `error::tests::replies_and_labels` | PASS | yes |
@@ -125,7 +127,6 @@
 | `topology::tests::standalone_and_sharded_discovery` | PASS | yes |
 | `topology::tests::tags_and_latency_window` | PASS | yes |
 | `wire::tests::op_msg_round_trips_compressed_or_not` | PASS | yes |
-| `wire::tests::snappy_round_trips` | PASS | yes |
 | `compression_is_negotiated_and_used` | PASS | yes |
 | `host_names_resolve_off_the_reactor` | PASS | yes |
 | `scram_mechanisms_and_wrong_passwords` | PASS | yes |
@@ -146,19 +147,38 @@
 | `no_blocking_call_runs_on_the_reactor` | PASS | yes |
 | `binary_text_ids_and_unique_columns` | PASS | yes |
 | `crud_values_batches_and_queries` | PASS | yes |
+| `documents_keep_field_order` | PASS | yes |
 | `transactions_and_no_lost_update` | PASS | yes |
 | `unix_domain_socket` | PASS | yes |
-| `ci::mongodb_ubuntu_latest` | PASS | yes |
-| `ci::redis_ubuntu_latest` | PASS | no |
-| `ci::redis_macos_latest` | PASS | no |
-| `ci::postgres_windows_latest` | PASS | no |
 | `ci::drivers_macos_latest` | PASS | no |
-| `ci::postgres_macos_latest` | PASS | no |
-| `ci::postgres_ubuntu_latest` | PASS | no |
-| `ci::redis_windows_latest` | PASS | no |
+| `ci::nats_windows_latest` | PASS | no |
 | `ci::mongodb_macos_latest` | PASS | yes |
-| `ci::drivers_windows_latest` | PASS | no |
-| `ci::mongodb_windows_latest` | PASS | yes |
+| `ci::redis_windows_latest` | PASS | no |
+| `ci::rabbitmq_macos_latest` | PASS | no |
+| `ci::redis_macos_latest` | PASS | no |
+| `ci::postgres_macos_latest` | PASS | no |
 | `ci::drivers_ubuntu_latest` | PASS | no |
+| `ci::nats_macos_latest` | PASS | no |
+| `ci::meilisearch_windows_latest` | PASS | no |
+| `ci::meilisearch_ubuntu_latest` | PASS | no |
+| `ci::postgres_windows_latest` | PASS | no |
+| `ci::mongodb_ubuntu_latest` | PASS | yes |
+| `ci::kafka_windows_latest` | PASS | no |
+| `ci::mongodb_windows_latest` | PASS | yes |
+| `ci::drivers_windows_latest` | PASS | no |
+| `ci::s3_windows_latest` | PASS | no |
 | `ci::oracle_live_ubuntu_latest` | PASS | no |
+| `ci::rabbitmq_windows_latest` | PASS | no |
+| `ci::nats_ubuntu_latest` | PASS | no |
+| `ci::redis_ubuntu_latest` | PASS | no |
+| `ci::mariadb_ubuntu_latest` | PASS | no |
+| `ci::valkey_ubuntu_latest` | PASS | no |
+| `ci::meilisearch_macos_latest` | PASS | no |
+| `ci::rabbitmq_ubuntu_latest` | PASS | no |
+| `ci::postgres_ubuntu_latest` | PASS | no |
+| `ci::s3_ubuntu_latest` | PASS | no |
+| `ci::mssql_live_ubuntu_latest` | PASS | no |
+| `ci::kafka_ubuntu_latest` | PASS | no |
+| `ci::kafka_macos_latest` | PASS | no |
+| `ci::s3_macos_latest` | PASS | no |
 
