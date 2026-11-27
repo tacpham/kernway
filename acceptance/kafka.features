@@ -1,0 +1,49 @@
+# Kafka feature catalog for the acceptance report.
+# area | feature | evidence
+# evidence = comma-separated test names (all must pass), or
+#            GAP: <why>  (not implemented / not verified — counted against completeness)
+#            N/A: <why>  (Kafka has no such feature)
+#
+# Every live test runs against one Kafka 3.9 KRaft node set up by
+# crates/kernway-kafka/tests/support/kafka-setup.sh: PLAINTEXT, SASL
+# (PLAIN, SCRAM-SHA-256, SCRAM-SHA-512) and TLS listeners with a test CA.
+# CI runs the same suite on Linux (Docker) and macOS (the official release,
+# natively); on Windows the client builds and its broker-free tests run.
+
+Messaging contract | Confirmed publish (acks=all): payloads binary / empty / 900 KiB / UTF-8, headers intact; every message once | kafka_conforms
+Messaging contract | Groups: every group sees every message; members split the partitions | kafka_conforms
+Messaging contract | Redelivery: a nack comes again flagged; a member that closes hands its unacknowledged deliveries over, flagged (the committed offset's metadata records how far it delivered) | kafka_conforms
+Messaging contract | Acks are durable (the offset committed synchronously up to the first unacknowledged message) | kafka_conforms
+Messaging contract | Per-key order, also across the members of a group (a key lives on one partition, one member) | kafka_conforms
+Messaging contract | New groups start at the earliest message or after the latest (fixed when the group is created); a group keeps its position with no member connected | kafka_conforms
+Messaging contract | A delivery left unacknowledged past ack_wait is redelivered (kept by the client) | kafka_conforms
+Messaging contract | Rejected deliveries reach the dead-letter topic with key and headers | kafka_conforms
+Messaging contract | Data sent and received byte-exact: every byte value, empty / one-byte / 900 KiB payloads, UTF-8 of many scripts, JSON; headers with Unicode, empty, 4 KiB and punctuated values, 40 headers, repeated names, case-insensitive lookup; binary keys, an empty key apart from none | kafka_conforms
+Messaging contract | Volume: 3 producers at once, 1,200 keyed messages, two members — every message exactly once, intact, a key's messages in order | kafka_conforms
+Messaging contract | Payload, key and headers unchanged after a nack and on the dead-letter topic | kafka_conforms
+
+Protocol | Primitives: varints (zigzag), classic and compact strings / arrays, tagged fields; request and response headers; hostile input refused | protocol::tests::varints_and_compact_values_round_trip, protocol::tests::hostile_input_is_an_error, protocol::tests::request_and_response_headers
+Protocol | ApiVersions checked at connect: every API at the version the client speaks (Kafka 3.0+ / 4.x) | handshake_and_metadata
+Protocol | Record batches v2: CRC-32C checked, headers, null keys / values, a truncated trailing batch skipped | records::tests::crc32c_known_values, records::tests::batches_round_trip_and_are_checked
+Protocol | Compressed batches written by the Java client: gzip and snappy (xerial framing) read; keys partitioned as the Java client does (murmur2) | records::tests::compressed_batches_decode, reads_what_the_java_client_writes, client::tests::murmur2_matches_the_java_client
+Protocol | lz4 and zstd batches | GAP: refused with a clear error (reads_what_the_java_client_writes checks the error)
+Protocol | Producing compressed batches | GAP: batches are written uncompressed
+Protocol | Metadata, leader routing, topic create / delete, ListOffsets, Fetch, Produce | produce_fetch_offsets
+Protocol | Idempotent producer: one producer id, per-partition sequences kept across retries; the broker drops a repeated batch and refuses a gap | the_broker_drops_duplicate_batches
+Protocol | Transactions (exactly-once across partitions, read_committed) | GAP: not implemented (aborted transactions are not filtered: read_uncommitted)
+Protocol | Consumer groups: join / sync with client-side round-robin assignment, heartbeats, leave, offset fetch / commit | client::tests::consumer_protocol_round_trips, kafka_conforms
+Protocol | The new consumer group protocol (KIP-848, ConsumerGroupHeartbeat) | GAP: the classic protocol only
+
+Connection & security | URLs: several brokers, IPv6, percent-decoded credentials, every option validated | options::tests::urls
+Connection & security | SASL PLAIN, SCRAM-SHA-256, SCRAM-SHA-512 (SCRAM shared with PostgreSQL / MongoDB); wrong passwords refused | sasl_plain_and_scram
+Connection & security | TLS (CA and host name checked), mutual TLS | tls_server_check_and_client_certificate
+Connection & security | SASL OAUTHBEARER, GSSAPI (Kerberos), AWS MSK IAM | GAP: not implemented
+
+Resilience | Producers and consumers survive a broker restart (publish retried, the consumer heals; what was acknowledged is not redelivered) | producers_and_consumers_survive_a_broker_restart
+Resilience | A member that dies without leaving: after its session the others take its partitions and messages | a_crashed_member_hands_its_partitions_over
+Resilience | Long waits (joins, fetch long-polls) on connections of their own, never holding up other requests | kafka_conforms, a_crashed_member_hands_its_partitions_over
+Resilience | A multi-broker cluster (leader moves, replicated topics) | GAP: routing follows leaders and refreshes on NOT_LEADER, verified on one broker only
+
+Reliability | Fully async on kernway's reactor: DNS and file reads on the blocking pool; no blocking call on a shard (source scan) | no_blocking_call_runs_on_the_reactor
+Reliability | Linux and macOS (CI on each, against a real broker); Windows builds and passes the tests that need no broker | ci::kafka_ubuntu_latest, ci::kafka_macos_latest, ci::kafka_windows_latest
+Reliability | Live tests on Windows | GAP: the Kafka broker cannot delete a topic on Windows (KAFKA-1194: renaming the log dir is denied, the broker shuts down — seen in CI); the client code is the same on every OS

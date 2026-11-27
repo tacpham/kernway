@@ -900,6 +900,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernway-kafka"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "kernway-messaging",
+ "kernway-tls",
+ "kernway-wire",
+ "rt-core",
+]
+
+[[package]]
 name = "kernway-log"
 version = "0.1.0"
 

@@ -13,13 +13,14 @@
 #   acceptance/run.sh nats     (nats-server natively: plain, auth, TLS / mTLS, a JetStream cluster)
 #   acceptance/run.sh rabbitmq (RabbitMQ 4.1 with TLS and EXTERNAL auth, in Docker)
 #   acceptance/run.sh meilisearch (the official Meilisearch binary, natively)
+#   acceptance/run.sh kafka    (Kafka 3.9 KRaft with SASL PLAIN / SCRAM and TLS, in Docker)
 #
 # Containers (created if missing; existing ones and their data are reused):
 #   kernway-mysql   mysql:8.0                  host port 3307, root password "secret"
 #   kernway-oracle  gvenzl/oracle-free:23-slim host ports 1521 / 2484 (TCPS)
 # Oracle TCPS needs a wallet once: crates/kernway-orm-oracle/tests/support/oracle-tcps-setup.sh
 set -euo pipefail
-DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb|mssql|nats|rabbitmq|meilisearch}"
+DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb|mssql|nats|rabbitmq|meilisearch|kafka}"
 # CI workflow whose jobs for this commit are the cross-OS evidence.
 WORKFLOW=drivers.yml; IMAGE=""; EXTRA=()
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -203,7 +204,18 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     # Its live tests are #[ignore]d for plain `cargo test`: run them here.
     EXTRA=(--include-ignored)
     ;;
-  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql | nats | rabbitmq | meilisearch)" >&2; exit 2 ;;
+  kafka)
+    # Recreated each run (test data only): one KRaft node with PLAINTEXT,
+    # SASL (PLAIN, SCRAM-SHA-256/512) and TLS listeners.
+    C=kernway-kafka
+    log "Kafka (${KAFKA_IMAGE:-apache/kafka:3.9.1}): KRaft, SASL, TLS"
+    "$ROOT/crates/kernway-kafka/tests/support/kafka-setup.sh" "$ROOT/target/kafka" > "$WORK/kafka.env"
+    sed -i.bak 's/^\(KERNWAY_KAFKA_[A-Z_]*=\)\(.*\)$/\1"\2"/' "$WORK/kafka.env"
+    set -a; . "$WORK/kafka.env"; set +a
+    VERSION="Kafka $KERNWAY_KAFKA_VERSION (KRaft)"
+    CRATE=kernway-kafka; FEATURES=(); TITLE=Kafka; SKIP=()
+    ;;
+  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql | nats | rabbitmq | meilisearch | kafka)" >&2; exit 2 ;;
 esac
 
 CMD="cargo test -p $CRATE ${FEATURES[*]+${FEATURES[*]}} --lib --tests -- --test-threads=1 --nocapture ${EXTRA[*]+${EXTRA[*]}} ${SKIP[*]+${SKIP[*]}}"

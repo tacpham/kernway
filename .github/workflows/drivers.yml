@@ -395,6 +395,76 @@ jobs:
             grep -q "^test $t " meili.log || { echo "did not run: $t"; exit 1; }
           done
 
+  # Kafka: Docker on Linux, the official release natively on macOS (Java
+  # from setup-java), configured by the same setup script. Windows runs the
+  # client's build and its tests that need no broker: the broker cannot
+  # delete a topic there (KAFKA-1194 — renaming the log dir is denied and it
+  # shuts down; seen in this job's own log), and every scenario deletes its
+  # topics.
+  kafka:
+    name: kafka (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      KAFKA_VERSION: 3.9.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-java@v4
+        if: runner.os == 'macOS'
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Kafka (Linux, Docker)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: crates/kernway-kafka/tests/support/kafka-setup.sh "$RUNNER_TEMP/kafka" >> "$GITHUB_ENV"
+
+      - name: Kafka (macOS, official release)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          T="$RUNNER_TEMP"
+          curl -fsSL "https://archive.apache.org/dist/kafka/$KAFKA_VERSION/kafka_2.13-$KAFKA_VERSION.tgz" | tar xz -C "$T"
+          KAFKA_HOME="$T/kafka_2.13-$KAFKA_VERSION" crates/kernway-kafka/tests/support/kafka-setup.sh "$T/kafka" >> "$GITHUB_ENV"
+
+      - name: Kafka client — all tests, live
+        if: runner.os != 'Windows'
+        shell: bash
+        run: cargo test -p kernway-kafka -- --test-threads=1 --nocapture 2>&1 | tee kafka.log
+
+      - name: Kafka client — builds; tests without a broker (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cargo test -p kernway-kafka --lib --test no_blocking -- --test-threads=1
+
+      - name: Broker log (on failure)
+        if: failure() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          D="$KERNWAY_KAFKA_DIR"
+          tail -40 "$D/server.out" 2>/dev/null || true
+          grep -hE "ERROR|FATAL|Shutdown|failed" "$D"/logs/*.log 2>/dev/null | tail -40 || true
+
+      - name: Every scenario ran (nothing skipped or n/a)
+        if: runner.os != 'Windows'
+        shell: bash
+        # A failing test already failed the step above (pipefail).
+        run: |
+          ! grep -q "skip:" kafka.log
+          ! grep -q "^n/a" kafka.log
+          for t in kafka_conforms sasl_plain_and_scram tls_server_check_and_client_certificate reads_what_the_java_client_writes producers_and_consumers_survive_a_broker_restart; do
+            grep -q "^test $t " kafka.log || { echo "did not run: $t"; exit 1; }
+          done
+
   # SQL Server runs on Linux in Docker (Microsoft ships no macOS build, and a
   # Windows runner has no TCP-enabled instance); the client code is the same
   # on every OS — it builds and its unit tests pass in the drivers job above.

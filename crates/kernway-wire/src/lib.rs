@@ -23,6 +23,7 @@
 pub mod offload;
 #[cfg(feature = "scram")]
 pub mod scram;
+pub mod snappy;
 mod pool;
 mod stmt_cache;
 mod stream;

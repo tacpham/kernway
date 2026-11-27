@@ -1,6 +1,7 @@
 //! SCRAM client (RFC 5802; SHA-256 per RFC 7677), shared by the drivers
 //! that authenticate with it — PostgreSQL (SCRAM-SHA-256, `-PLUS` channel
-//! binding) and MongoDB (SCRAM-SHA-1 and SCRAM-SHA-256). Each driver frames
+//! binding), MongoDB (SCRAM-SHA-1 and SCRAM-SHA-256) and Kafka
+//! (SCRAM-SHA-256 and SCRAM-SHA-512). Each driver frames
 //! the messages its own way; the exchange and its arithmetic live here.
 //!
 //! HMAC, PBKDF2 (`Hi`) and base64 are written out (a few lines each); the
@@ -13,6 +14,8 @@ pub enum Hash {
     Sha1,
     /// SHA-256 (SCRAM-SHA-256).
     Sha256,
+    /// SHA-512 (SCRAM-SHA-512, Kafka).
+    Sha512,
 }
 
 impl Hash {
@@ -34,21 +37,39 @@ impl Hash {
                 }
                 h.finalize().to_vec()
             }
+            Hash::Sha512 => {
+                use sha2::Digest;
+                let mut h = sha2::Sha512::new();
+                for p in parts {
+                    h.update(p);
+                }
+                h.finalize().to_vec()
+            }
         }
     }
 
-    /// HMAC (RFC 2104) with this hash (64-byte block for both).
+    /// The hash's block size (HMAC pads the key to it).
+    fn block(self) -> usize {
+        match self {
+            Hash::Sha1 | Hash::Sha256 => 64,
+            Hash::Sha512 => 128,
+        }
+    }
+
+    /// HMAC (RFC 2104) with this hash.
     pub fn hmac(self, key: &[u8], data: &[u8]) -> Vec<u8> {
-        const BLOCK: usize = 64;
-        let mut k = [0u8; BLOCK];
-        if key.len() > BLOCK {
+        let block = self.block();
+        let mut k = vec![0u8; block];
+        if key.len() > block {
             let d = self.digest(&[key]);
             k[..d.len()].copy_from_slice(&d);
         } else {
             k[..key.len()].copy_from_slice(key);
         }
-        let inner = self.digest(&[&k.map(|b| b ^ 0x36), data]);
-        self.digest(&[&k.map(|b| b ^ 0x5c), &inner])
+        let ipad: Vec<u8> = k.iter().map(|b| b ^ 0x36).collect();
+        let opad: Vec<u8> = k.iter().map(|b| b ^ 0x5c).collect();
+        let inner = self.digest(&[&ipad, data]);
+        self.digest(&[&opad, &inner])
     }
 
     /// PBKDF2-HMAC with one output block (SCRAM's `Hi`).
@@ -336,6 +357,25 @@ mod tests {
         let b = Scram::new(Hash::Sha256, "", b"pw", "n".into(), Binding::Bind(vec![1, 2]));
         assert!(b.is_bound());
         assert!(b.client_first().starts_with("p=tls-server-end-point,,"));
+    }
+
+    #[test]
+    fn hmac_matches_rfc_4231() {
+        // Test cases 1 and 6 (a key longer than the block).
+        let hex = |v: Vec<u8>| v.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let key = [0x0b; 20];
+        assert_eq!(hex(Hash::Sha256.hmac(&key, b"Hi There")), "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+        assert_eq!(
+            hex(Hash::Sha512.hmac(&key, b"Hi There")),
+            "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854"
+        );
+        let long = [0xaa; 131];
+        let data = b"Test Using Larger Than Block-Size Key - Hash Key First";
+        assert_eq!(hex(Hash::Sha256.hmac(&long, data)), "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
+        assert_eq!(
+            hex(Hash::Sha512.hmac(&long, data)),
+            "80b24263c7c1a3ebb71493c1dd7be8b49b46d1f41b4aeec1121b013783f8f3526b56d037e05f2598bd0fd2215d6a1e5295e64f73f63f0aec8b915a985d786598"
+        );
     }
 
     #[test]

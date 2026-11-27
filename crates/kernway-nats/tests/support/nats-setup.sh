@@ -142,6 +142,17 @@ for i in 0 1 2; do
   done
   [ -n "$ok" ] || { echo "cluster node $i: JetStream not healthy; logs in $DIR" >&2; exit 1; }
 done
+# Healthy nodes are not yet a full meta group: wait until every node sees
+# a leader and all three peers (R3 streams need them — "no suitable peers").
+for i in 0 1 2; do
+  ok=""
+  for _ in $(seq 1 120); do
+    j="$(curl -fs "http://127.0.0.1:$((8230 + i))/jsz" 2>/dev/null || true)"
+    if printf '%s' "$j" | grep -q '"cluster_size": *3' && printf '%s' "$j" | grep -Eq '"leader": *"kw-n[0-2]"'; then ok=1; break; fi
+    sleep 0.5
+  done
+  [ -n "$ok" ] || { echo "cluster node $i: no JetStream meta leader with 3 peers; logs in $DIR" >&2; exit 1; }
+done
 
 echo "KERNWAY_NATS_URL=nats://127.0.0.1:4222"
 echo "KERNWAY_NATS_DIR=$(native_path "$DIR")"

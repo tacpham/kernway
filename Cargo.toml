@@ -32,6 +32,7 @@ members = [
     "crates/kernway-messaging",
     "crates/kernway-nats",
     "crates/kernway-rabbitmq",
+    "crates/kernway-kafka",
     "crates/kernway-openapi",
     "crates/kernway-sse",
     "crates/kernway-multipart",
@@ -160,6 +161,7 @@ kernway-redis        = { path = "crates/kernway-redis" }
 kernway-messaging    = { path = "crates/kernway-messaging" }
 kernway-nats         = { path = "crates/kernway-nats" }
 kernway-rabbitmq     = { path = "crates/kernway-rabbitmq" }
+kernway-kafka        = { path = "crates/kernway-kafka" }
 kernway-orm-mongodb  = { path = "crates/kernway-orm-mongodb" }
 kernway-openapi      = { path = "crates/kernway-openapi" }
 kernway-sse          = { path = "crates/kernway-sse" }

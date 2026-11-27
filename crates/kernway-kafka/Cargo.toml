@@ -1,0 +1,21 @@
+[package]
+name        = "kernway-kafka"
+description = "A self-written async Kafka client for Kernway — the binary protocol (flexible versions), record batches, an idempotent producer, consumer groups with client-side assignment and committed offsets, SASL / TLS — and the kernway-messaging broker backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kernway-messaging = { workspace = true }
+kernway-tls       = { workspace = true }
+kernway-wire      = { workspace = true, features = ["scram"] }
+rt-core           = { workspace = true }
+# gzip record batches (pure Rust, miniz_oxide — as the other drivers).
+flate2            = { workspace = true }
+
+[dev-dependencies]
+kernway-messaging = { workspace = true, features = ["conformance"] }
+rt-core           = { workspace = true }
+
+[lints]
+workspace = true
