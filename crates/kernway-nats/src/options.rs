@@ -109,9 +109,10 @@ fn decode(s: &str) -> Result<String, MsgError> {
 impl Options {
     /// Parse `nats://[user:pass@|token@]host[:port][,host2…][?options]` or
     /// `tls://…` (TLS required). Options: `name`, `tls_ca`, `tls_cert`,
-    /// `tls_key`, `tls_insecure`, `tls_first`, `nkey` (seed), `creds`
-    /// (file — read with [`Options::load_creds`]), `connect_timeout` /
-    /// `request_timeout` (seconds), `js_domain`.
+    /// `tls_key`, `tls_insecure`, `tls_first`, `nkey` (seed),
+    /// `connect_timeout` / `request_timeout` (seconds), `js_domain`. A
+    /// `.creds` file is not a URL option: pass its content to
+    /// [`Options::with_creds`].
     pub fn parse(url: &str) -> Result<Self, MsgError> {
         let (tls, rest) = if let Some(r) = url.strip_prefix("tls://") {
             (true, r)

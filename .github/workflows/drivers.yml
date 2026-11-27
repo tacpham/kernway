@@ -287,7 +287,7 @@ jobs:
           ! grep -q "skip:" nats.log
           # The one capability JetStream lacks (a GAP in the acceptance report).
           ! grep "^n/a" nats.log | grep -v "^n/a: key order across members$"
-          grep -q "^test the_memory_broker_conforms ... ok" nats.log
+          grep -q "^test conformance::tests::the_memory_broker_conforms ... ok" nats.log
           grep -q "^test nats_jetstream_conforms ... ok" nats.log
           grep -q "^test the_cluster_runs_the_conformance_scenarios_too ... ok" nats.log
           grep -q "^test cluster_urls_are_learned_and_used_for_failover ... ok" nats.log
