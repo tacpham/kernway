@@ -5,20 +5,20 @@
 
 | | |
 |---|---|
-| generated | 2026-11-27 15:41 UTC |
-| server | MariaDB 11.4.13-MariaDB-ubu2404 |
-| image | mariadb:11.4 |
+| generated | 2026-11-27 22:47 UTC |
+| server | MariaDB 11.8.9-MariaDB-ubu2404 |
+| image | mariadb:11.8 |
 | container | kernway-mariadb |
-| driver commit | 0170340 on docs/acceptance-orm-reuse |
+| driver commit | fd0aa33 on docs/acceptance-after-gaps |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
-| command | `cargo test -p kernway-orm-mysql --features mysql --lib --tests -- --test-threads=1 --nocapture  --skip local_socket_ --skip caching_sha2; local_socket_connects* / local_socket_refuses* inside kernway-mariadb; CI run 46025359144 (Linux / macOS / Windows)` |
+| command | `cargo test -p kernway-orm-mysql --features mysql --lib --tests -- --test-threads=1 --nocapture  --skip local_socket_ --skip caching_sha2; local_socket_connects* / local_socket_refuses* inside kernway-mariadb; CI run 46078100294 (Linux / macOS / Windows)` |
 
-## Verdict: implemented features **PASSED** · completeness **43/45** — NOT complete
+## Verdict: implemented features **PASSED** · completeness **44/45** — NOT complete
 
 - *Implemented features* passes only if every test ran and passed (no skips) in this run.
 - *Completeness* counts 🚧 gaps (listed below) against the full feature catalog.
-- Features verified: **43 / 45** (2 not implemented yet, 0 failing; 5 not applicable to MariaDB (MySQL driver)).
-- Tests run: 85 — 85 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
+- Features verified: **44 / 45** (1 not implemented yet, 0 failing; 5 not applicable to MariaDB (MySQL driver)).
+- Tests run: 90 — 90 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
 - A feature is ✅ only when every test listed as its evidence ran and passed in this run.
 
 ## Connection & security
@@ -30,7 +30,7 @@
 | caching_sha2_password full auth without TLS (RSA-OAEP with the server key, file or opt-in fetch) | ➖ N/A | MariaDB has no caching_sha2_password (mysql_native_password, ed25519, parsec) |
 | TLS ssl-mode disabled / preferred / required / verify_ca / verify_identity | ✅ PASS | `protocol::tests::ssl_modes_against_a_live_server`<br>`protocol::tests::url_options_set_the_ssl_mode_and_ca` |
 | Mutual TLS (client certificate, REQUIRE X509) | ✅ PASS | `mutual_tls_presents_the_client_certificate` |
-| MariaDB ed25519 and PARSEC authentication | 🚧 GAP | not implemented (mysql_native_password, MariaDB's default, is) |
+| MariaDB ed25519 and PARSEC authentication (Ed25519 signatures, PBKDF2-SHA512 key derivation; RFC 8032 vectors) | ✅ PASS | `ed25519::tests::rfc8032_test_vectors`<br>`ed25519::tests::pbkdf2_hmac_sha512_vectors`<br>`mariadb_ed25519_logs_in_and_refuses_a_wrong_password`<br>`mariadb_parsec_logs_in_and_refuses_a_wrong_password` |
 | Connection URL parsing | ✅ PASS | `protocol::tests::url_parsing` |
 | Host names resolved off the reactor (blocking pool); IP literals skip DNS | ✅ PASS | `host_names_resolve_without_blocking_and_ip_literals_skip_dns` |
 | Auth scramble (native SHA-1) matches the reference construction | ✅ PASS | `protocol::tests::native_scramble_shape` |
@@ -107,7 +107,7 @@
 | Feature | Status | Evidence / note |
 |---|---|---|
 | Fully async on kernway's reactor: no blocking call on a shard (DNS, files, sockets, sleeps only on the blocking pool; large zlib frames too) — enforced by a source scan | ✅ PASS | `no_blocking_call_runs_on_the_reactor`<br>`host_names_resolve_without_blocking_and_ip_literals_skip_dns` |
-| Runs on Linux: whole driver suite against MariaDB 11.4 (CI) | ✅ PASS | `ci::mariadb_ubuntu_latest` |
+| Runs on Linux: whole driver suite against MariaDB 11.8 (CI) | ✅ PASS | `ci::mariadb_ubuntu_latest` |
 | The client on macOS / Windows: the same code, run there against MySQL | ✅ PASS | `ci::drivers_macos_latest`<br>`ci::drivers_windows_latest` |
 | Live against MariaDB on macOS / Windows | 🚧 GAP | MariaDB runs in Docker on Linux only here |
 
@@ -116,6 +116,9 @@
 | Test | Result | Mapped to a feature |
 |---|---|---|
 | `backend::tests::delimiter_scripts_split_like_the_mysql_client` | PASS | yes |
+| `ed25519::tests::pbkdf2_hmac_sha512_vectors` | PASS | yes |
+| `ed25519::tests::rfc8032_test_vectors` | PASS | yes |
+| `ed25519::tests::scalars_reduce_mod_l` | PASS | no |
 | `protocol::tests::a_cached_statement_runs_in_one_round_trip_and_survives_a_server_reset` | PASS | yes |
 | `protocol::tests::a_full_statement_cache_evicts_and_closes_the_oldest` | PASS | yes |
 | `protocol::tests::a_large_packet_grows_the_read_buffer_then_it_shrinks_back` | PASS | yes |
@@ -138,6 +141,8 @@
 | `rsa::tests::oaep_layout_is_reversible_with_the_masks` | PASS | no |
 | `value::tests::create_table_is_mysql_flavoured` | PASS | yes |
 | `value::tests::row_roundtrips_into_entity` | PASS | yes |
+| `mariadb_ed25519_logs_in_and_refuses_a_wrong_password` | PASS | yes |
+| `mariadb_parsec_logs_in_and_refuses_a_wrong_password` | PASS | yes |
 | `mutual_tls_presents_the_client_certificate` | PASS | yes |
 | `mysql_conforms` | PASS | yes |
 | `compressed_protocol_is_negotiated_and_carries_every_kind_of_traffic` | PASS | yes |
@@ -169,35 +174,35 @@
 | `scripts_run_several_statements_but_ordinary_calls_never_stack` | PASS | yes |
 | `local_socket_connects_over_the_servers_local_channel` | PASS | yes |
 | `local_socket_refuses_an_ssl_mode_that_requires_tls` | PASS | yes |
-| `ci::mongodb_ubuntu_latest` | PASS | no |
-| `ci::oracle_live_ubuntu_latest` | PASS | no |
-| `ci::mongodb_windows_latest` | PASS | no |
-| `ci::nats_macos_latest` | PASS | no |
-| `ci::drivers_windows_latest` | PASS | yes |
-| `ci::meilisearch_macos_latest` | PASS | no |
-| `ci::s3_windows_latest` | PASS | no |
-| `ci::kafka_macos_latest` | PASS | no |
-| `ci::s3_macos_latest` | PASS | no |
-| `ci::meilisearch_windows_latest` | PASS | no |
-| `ci::nats_windows_latest` | PASS | no |
-| `ci::valkey_ubuntu_latest` | PASS | no |
-| `ci::redis_macos_latest` | PASS | no |
-| `ci::postgres_ubuntu_latest` | PASS | no |
-| `ci::meilisearch_ubuntu_latest` | PASS | no |
-| `ci::rabbitmq_macos_latest` | PASS | no |
-| `ci::nats_ubuntu_latest` | PASS | no |
-| `ci::s3_ubuntu_latest` | PASS | no |
-| `ci::drivers_ubuntu_latest` | PASS | no |
-| `ci::kafka_windows_latest` | PASS | no |
-| `ci::mongodb_macos_latest` | PASS | no |
-| `ci::rabbitmq_ubuntu_latest` | PASS | no |
-| `ci::redis_ubuntu_latest` | PASS | no |
-| `ci::mssql_live_ubuntu_latest` | PASS | no |
-| `ci::redis_windows_latest` | PASS | no |
-| `ci::mariadb_ubuntu_latest` | PASS | yes |
-| `ci::postgres_macos_latest` | PASS | no |
-| `ci::rabbitmq_windows_latest` | PASS | no |
-| `ci::drivers_macos_latest` | PASS | yes |
 | `ci::postgres_windows_latest` | PASS | no |
+| `ci::meilisearch_windows_latest` | PASS | no |
+| `ci::drivers_macos_latest` | PASS | yes |
+| `ci::kafka_windows_latest` | PASS | no |
+| `ci::kafka_macos_latest` | PASS | no |
+| `ci::meilisearch_ubuntu_latest` | PASS | no |
 | `ci::kafka_ubuntu_latest` | PASS | no |
+| `ci::postgres_ubuntu_latest` | PASS | no |
+| `ci::drivers_ubuntu_latest` | PASS | no |
+| `ci::mongodb_windows_latest` | PASS | no |
+| `ci::meilisearch_macos_latest` | PASS | no |
+| `ci::postgres_macos_latest` | PASS | no |
+| `ci::drivers_windows_latest` | PASS | yes |
+| `ci::mssql_live_ubuntu_latest` | PASS | no |
+| `ci::nats_windows_latest` | PASS | no |
+| `ci::nats_ubuntu_latest` | PASS | no |
+| `ci::mariadb_ubuntu_latest` | PASS | yes |
+| `ci::nats_macos_latest` | PASS | no |
+| `ci::s3_macos_latest` | PASS | no |
+| `ci::s3_ubuntu_latest` | PASS | no |
+| `ci::oracle_live_ubuntu_latest` | PASS | no |
+| `ci::valkey_ubuntu_latest` | PASS | no |
+| `ci::rabbitmq_ubuntu_latest` | PASS | no |
+| `ci::rabbitmq_windows_latest` | PASS | no |
+| `ci::s3_windows_latest` | PASS | no |
+| `ci::redis_windows_latest` | PASS | no |
+| `ci::rabbitmq_macos_latest` | PASS | no |
+| `ci::mongodb_ubuntu_latest` | PASS | no |
+| `ci::mongodb_macos_latest` | PASS | no |
+| `ci::redis_ubuntu_latest` | PASS | no |
+| `ci::redis_macos_latest` | PASS | no |
 

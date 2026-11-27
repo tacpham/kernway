@@ -5,20 +5,20 @@
 
 | | |
 |---|---|
-| generated | 2026-11-27 15:41 UTC |
+| generated | 2026-11-27 22:47 UTC |
 | server | postgres (PostgreSQL) 18.7 |
 | image | postgres:18-alpine |
 | container | kernway-postgres |
-| driver commit | 0170340 on docs/acceptance-orm-reuse |
+| driver commit | fd0aa33 on docs/acceptance-after-gaps |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
-| command | `cargo test -p kernway-orm-postgres --features postgres --lib --tests -- --test-threads=1 --nocapture  --skip unix_domain_socket; unix_domain_socket inside kernway-postgres; CI run 46025359144 (Linux / macOS / Windows)` |
+| command | `cargo test -p kernway-orm-postgres --features postgres --lib --tests -- --test-threads=1 --nocapture  --skip unix_domain_socket; unix_domain_socket inside kernway-postgres; CI run 46078100294 (Linux / macOS / Windows)` |
 
-## Verdict: implemented features **PASSED** · completeness **31/37** — NOT complete
+## Verdict: implemented features **PASSED** · completeness **32/37** — NOT complete
 
 - *Implemented features* passes only if every test ran and passed (no skips) in this run.
 - *Completeness* counts 🚧 gaps (listed below) against the full feature catalog.
-- Features verified: **31 / 37** (6 not implemented yet, 0 failing; 1 not applicable to PostgreSQL).
-- Tests run: 57 — 57 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
+- Features verified: **32 / 37** (5 not implemented yet, 0 failing; 1 not applicable to PostgreSQL).
+- Tests run: 58 — 58 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
 - A feature is ✅ only when every test listed as its evidence ran and passed in this run.
 
 ## Connection & security
@@ -35,7 +35,7 @@
 | Several hosts tried in turn (a refused one first), every address of a name, target_session_attrs (primary / standby / read-write / read-only / prefer-standby), connect timeout against an address that never answers | ✅ PASS | `hosts_tried_in_turn_and_session_attrs` |
 | Start-up settings (application_name, search_path, statement_timeout), server parameters, version, backend pid | ✅ PASS | `hosts_tried_in_turn_and_session_attrs` |
 | GSSAPI / Kerberos / SSPI authentication | 🚧 GAP | refused with a clear error; only password, SCRAM, trust and certificate methods are spoken |
-| SASLprep of non-ASCII passwords | 🚧 GAP | passwords are sent as given (the server falls back to the raw bytes for passwords SASLprep would reject; a password SASLprep would change does not match) |
+| SASLprep of non-ASCII passwords (RFC 4013: mapped, NFKC, prohibited and bidi checks; a password with no SASLprep form is used as given, as libpq and the server do) | ✅ PASS | `scram_passwords_are_saslprepped` |
 | libpq environment / files: PGHOST, PGPASSWORD, ~/.pgpass, pg_service.conf, sslnegotiation=direct | 🚧 GAP | configuration comes from the URL or PgConfig only |
 | Unix-domain sockets on Windows | 🚧 GAP | rt-net has no AF_UNIX on Windows; TCP there |
 
@@ -115,39 +115,40 @@
 | `pipelined_batches_cursors_and_copy` | PASS | yes |
 | `procedures_and_functions` | PASS | yes |
 | `scram_channel_binding` | PASS | yes |
+| `scram_passwords_are_saslprepped` | PASS | yes |
 | `statement_cache_is_bounded_and_survives_schema_changes` | PASS | yes |
 | `tls_modes_check_what_they_promise` | PASS | yes |
 | `values_of_every_common_type` | PASS | yes |
 | `unix_domain_socket` | PASS | yes |
-| `ci::mongodb_ubuntu_latest` | PASS | no |
-| `ci::oracle_live_ubuntu_latest` | PASS | no |
-| `ci::mongodb_windows_latest` | PASS | no |
-| `ci::nats_macos_latest` | PASS | no |
-| `ci::drivers_windows_latest` | PASS | no |
-| `ci::meilisearch_macos_latest` | PASS | no |
-| `ci::s3_windows_latest` | PASS | no |
-| `ci::kafka_macos_latest` | PASS | no |
-| `ci::s3_macos_latest` | PASS | no |
-| `ci::meilisearch_windows_latest` | PASS | no |
-| `ci::nats_windows_latest` | PASS | no |
-| `ci::valkey_ubuntu_latest` | PASS | no |
-| `ci::redis_macos_latest` | PASS | no |
-| `ci::postgres_ubuntu_latest` | PASS | yes |
-| `ci::meilisearch_ubuntu_latest` | PASS | no |
-| `ci::rabbitmq_macos_latest` | PASS | no |
-| `ci::nats_ubuntu_latest` | PASS | no |
-| `ci::s3_ubuntu_latest` | PASS | no |
-| `ci::drivers_ubuntu_latest` | PASS | no |
-| `ci::kafka_windows_latest` | PASS | no |
-| `ci::mongodb_macos_latest` | PASS | no |
-| `ci::rabbitmq_ubuntu_latest` | PASS | no |
-| `ci::redis_ubuntu_latest` | PASS | no |
-| `ci::mssql_live_ubuntu_latest` | PASS | no |
-| `ci::redis_windows_latest` | PASS | no |
-| `ci::mariadb_ubuntu_latest` | PASS | no |
-| `ci::postgres_macos_latest` | PASS | yes |
-| `ci::rabbitmq_windows_latest` | PASS | no |
-| `ci::drivers_macos_latest` | PASS | no |
 | `ci::postgres_windows_latest` | PASS | yes |
+| `ci::meilisearch_windows_latest` | PASS | no |
+| `ci::drivers_macos_latest` | PASS | no |
+| `ci::kafka_windows_latest` | PASS | no |
+| `ci::kafka_macos_latest` | PASS | no |
+| `ci::meilisearch_ubuntu_latest` | PASS | no |
 | `ci::kafka_ubuntu_latest` | PASS | no |
+| `ci::postgres_ubuntu_latest` | PASS | yes |
+| `ci::drivers_ubuntu_latest` | PASS | no |
+| `ci::mongodb_windows_latest` | PASS | no |
+| `ci::meilisearch_macos_latest` | PASS | no |
+| `ci::postgres_macos_latest` | PASS | yes |
+| `ci::drivers_windows_latest` | PASS | no |
+| `ci::mssql_live_ubuntu_latest` | PASS | no |
+| `ci::nats_windows_latest` | PASS | no |
+| `ci::nats_ubuntu_latest` | PASS | no |
+| `ci::mariadb_ubuntu_latest` | PASS | no |
+| `ci::nats_macos_latest` | PASS | no |
+| `ci::s3_macos_latest` | PASS | no |
+| `ci::s3_ubuntu_latest` | PASS | no |
+| `ci::oracle_live_ubuntu_latest` | PASS | no |
+| `ci::valkey_ubuntu_latest` | PASS | no |
+| `ci::rabbitmq_ubuntu_latest` | PASS | no |
+| `ci::rabbitmq_windows_latest` | PASS | no |
+| `ci::s3_windows_latest` | PASS | no |
+| `ci::redis_windows_latest` | PASS | no |
+| `ci::rabbitmq_macos_latest` | PASS | no |
+| `ci::mongodb_ubuntu_latest` | PASS | no |
+| `ci::mongodb_macos_latest` | PASS | no |
+| `ci::redis_ubuntu_latest` | PASS | no |
+| `ci::redis_macos_latest` | PASS | no |
 

@@ -5,20 +5,20 @@
 
 | | |
 |---|---|
-| generated | 2026-11-27 15:52 UTC |
+| generated | 2026-11-27 22:49 UTC |
 | server | MongoDB 8.0.38 |
 | image | mongo:8.0 |
 | container | kernway-mongo |
-| driver commit | 31efd48 on docs/acceptance-orm-reuse |
+| driver commit | fd0aa33 on docs/acceptance-after-gaps |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
-| command | `cargo test -p kernway-orm-mongodb  --lib --tests -- --test-threads=1 --nocapture  --skip unix_domain_socket; unix_domain_socket inside kernway-mongo; CI run 46027569836 (Linux / macOS / Windows)` |
+| command | `cargo test -p kernway-orm-mongodb  --lib --tests -- --test-threads=1 --nocapture  --skip unix_domain_socket; unix_domain_socket inside kernway-mongo; CI run 46078100294 (Linux / macOS / Windows)` |
 
-## Verdict: implemented features **PASSED** · completeness **37/46** — NOT complete
+## Verdict: implemented features **PASSED** · completeness **38/46** — NOT complete
 
 - *Implemented features* passes only if every test ran and passed (no skips) in this run.
 - *Completeness* counts 🚧 gaps (listed below) against the full feature catalog.
-- Features verified: **37 / 46** (9 not implemented yet, 0 failing; 0 not applicable to MongoDB).
-- Tests run: 70 — 70 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
+- Features verified: **38 / 46** (8 not implemented yet, 0 failing; 0 not applicable to MongoDB).
+- Tests run: 71 — 71 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
 - A feature is ✅ only when every test listed as its evidence ran and passed in this run.
 
 ## BSON
@@ -44,7 +44,7 @@
 | Connect and server-selection timeouts bounded, errors naming each server and why | ✅ PASS | `timeouts_and_selection_errors_are_bounded` |
 | PLAIN (LDAP) | 🚧 GAP | implemented, but only MongoDB Enterprise speaks it — not verified against a server |
 | GSSAPI / Kerberos, MONGODB-AWS, MONGODB-OIDC | 🚧 GAP | refused with a clear error |
-| SASLprep of non-ASCII SCRAM-SHA-256 passwords | 🚧 GAP | passwords are sent as given |
+| SASLprep of non-ASCII SCRAM-SHA-256 passwords (RFC 4013; a password with no SASLprep form is refused before anything is sent) | ✅ PASS | `scram_sha256_passwords_are_saslprepped` |
 | Encrypted client keys (tlsCertificateKeyFilePassword), OCSP | 🚧 GAP | refused with a clear error / not checked |
 | Unix-domain sockets on Windows | 🚧 GAP | rt-net has no AF_UNIX on Windows; TCP there |
 
@@ -130,6 +130,7 @@
 | `compression_is_negotiated_and_used` | PASS | yes |
 | `host_names_resolve_off_the_reactor` | PASS | yes |
 | `scram_mechanisms_and_wrong_passwords` | PASS | yes |
+| `scram_sha256_passwords_are_saslprepped` | PASS | yes |
 | `srv_connection_strings` | PASS | yes |
 | `timeouts_and_selection_errors_are_bounded` | PASS | yes |
 | `tls_certificates_and_x509` | PASS | yes |
@@ -150,35 +151,35 @@
 | `documents_keep_field_order` | PASS | yes |
 | `transactions_and_no_lost_update` | PASS | yes |
 | `unix_domain_socket` | PASS | yes |
+| `ci::postgres_windows_latest` | PASS | no |
+| `ci::meilisearch_windows_latest` | PASS | no |
 | `ci::drivers_macos_latest` | PASS | no |
+| `ci::kafka_windows_latest` | PASS | no |
+| `ci::kafka_macos_latest` | PASS | no |
+| `ci::meilisearch_ubuntu_latest` | PASS | no |
+| `ci::kafka_ubuntu_latest` | PASS | no |
+| `ci::postgres_ubuntu_latest` | PASS | no |
+| `ci::drivers_ubuntu_latest` | PASS | no |
+| `ci::mongodb_windows_latest` | PASS | yes |
+| `ci::meilisearch_macos_latest` | PASS | no |
+| `ci::postgres_macos_latest` | PASS | no |
+| `ci::drivers_windows_latest` | PASS | no |
+| `ci::mssql_live_ubuntu_latest` | PASS | no |
 | `ci::nats_windows_latest` | PASS | no |
-| `ci::mongodb_macos_latest` | PASS | yes |
+| `ci::nats_ubuntu_latest` | PASS | no |
+| `ci::mariadb_ubuntu_latest` | PASS | no |
+| `ci::nats_macos_latest` | PASS | no |
+| `ci::s3_macos_latest` | PASS | no |
+| `ci::s3_ubuntu_latest` | PASS | no |
+| `ci::oracle_live_ubuntu_latest` | PASS | no |
+| `ci::valkey_ubuntu_latest` | PASS | no |
+| `ci::rabbitmq_ubuntu_latest` | PASS | no |
+| `ci::rabbitmq_windows_latest` | PASS | no |
+| `ci::s3_windows_latest` | PASS | no |
 | `ci::redis_windows_latest` | PASS | no |
 | `ci::rabbitmq_macos_latest` | PASS | no |
-| `ci::redis_macos_latest` | PASS | no |
-| `ci::postgres_macos_latest` | PASS | no |
-| `ci::drivers_ubuntu_latest` | PASS | no |
-| `ci::nats_macos_latest` | PASS | no |
-| `ci::meilisearch_windows_latest` | PASS | no |
-| `ci::meilisearch_ubuntu_latest` | PASS | no |
-| `ci::postgres_windows_latest` | PASS | no |
 | `ci::mongodb_ubuntu_latest` | PASS | yes |
-| `ci::kafka_windows_latest` | PASS | no |
-| `ci::mongodb_windows_latest` | PASS | yes |
-| `ci::drivers_windows_latest` | PASS | no |
-| `ci::s3_windows_latest` | PASS | no |
-| `ci::oracle_live_ubuntu_latest` | PASS | no |
-| `ci::rabbitmq_windows_latest` | PASS | no |
-| `ci::nats_ubuntu_latest` | PASS | no |
+| `ci::mongodb_macos_latest` | PASS | yes |
 | `ci::redis_ubuntu_latest` | PASS | no |
-| `ci::mariadb_ubuntu_latest` | PASS | no |
-| `ci::valkey_ubuntu_latest` | PASS | no |
-| `ci::meilisearch_macos_latest` | PASS | no |
-| `ci::rabbitmq_ubuntu_latest` | PASS | no |
-| `ci::postgres_ubuntu_latest` | PASS | no |
-| `ci::s3_ubuntu_latest` | PASS | no |
-| `ci::mssql_live_ubuntu_latest` | PASS | no |
-| `ci::kafka_ubuntu_latest` | PASS | no |
-| `ci::kafka_macos_latest` | PASS | no |
-| `ci::s3_macos_latest` | PASS | no |
+| `ci::redis_macos_latest` | PASS | no |
 
