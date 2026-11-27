@@ -22,6 +22,22 @@ CLI="${REDIS_CLI:-redis-cli}"
 COMMON=(--save "" --appendonly no --daemonize yes)
 ENV_LINES=()
 
+# Newer Redis 8 refuses a cluster whose bus port has no TLS unless told the
+# (loopback-only, test) bus is fine. Older versions do not know the option:
+# Redis 7 exits on it, Redis 8.0 daemonizes and then aborts — so probe once
+# in the foreground whether this server keeps running with it.
+BUS_OPTION=""
+bus_protection_option() {
+  if [ -z "$BUS_OPTION" ]; then
+    "$SERVER" --port 0 --save "" --cluster-bus-port-protected-mode no --logfile "$DIR/probe.log" --daemonize no &
+    local pid=$!
+    sleep 1
+    if kill -0 "$pid" 2>/dev/null; then BUS_OPTION=yes; kill "$pid"; else BUS_OPTION=no; fi
+    wait "$pid" 2>/dev/null || true
+  fi
+  [ "$BUS_OPTION" = yes ]
+}
+
 wait_ping() { # args for redis-cli…
   for _ in $(seq 1 50); do
     if "$CLI" "$@" PING 2>/dev/null | grep -q PONG; then return; fi
@@ -82,9 +98,8 @@ for mode in $MODES; do
         mkdir -p "$C/$p"
         node=(--port "$p" --cluster-enabled yes --cluster-config-file "$C/$p/nodes.conf" --cluster-node-timeout 2000
               --cluster-announce-ip 127.0.0.1 --dir "$C/$p" --logfile "$DIR/cluster-$p.log" "${COMMON[@]}")
-        # Redis 8 refuses a cluster whose bus port has no TLS unless told the
-        # (loopback-only, test) bus is fine; Redis 7 does not know the option.
-        "$SERVER" "${node[@]}" --cluster-bus-port-protected-mode no 2>/dev/null || "$SERVER" "${node[@]}"
+        if bus_protection_option; then node+=(--cluster-bus-port-protected-mode no); fi
+        "$SERVER" "${node[@]}"
         wait_ping -p "$p"
       done
       "$CLI" --cluster create 127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 127.0.0.1:7003 127.0.0.1:7004 127.0.0.1:7005 \

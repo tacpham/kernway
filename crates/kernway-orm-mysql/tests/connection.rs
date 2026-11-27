@@ -397,7 +397,12 @@ fn host_names_resolve_without_blocking_and_ip_literals_skip_dns() {
             }
         });
         let _ = Conn::connect(&by_name).await;
-        rt_core::sleep(std::time::Duration::from_millis(50)).await;
+        // All five ticks arrive (Windows timers tick every ~15.6 ms, so five
+        // 1 ms sleeps take ~80 ms there: wait for them rather than guess).
+        let started = std::time::Instant::now();
+        while ticks.get() < 5 && started.elapsed() < std::time::Duration::from_secs(2) {
+            rt_core::sleep(std::time::Duration::from_millis(10)).await;
+        }
         assert_eq!(ticks.get(), 5);
     });
 }
