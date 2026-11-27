@@ -397,6 +397,8 @@ Progress follows the [walking-skeleton milestones](docs/design/MILESTONES.md) �
 | **M5** — hot reload | ⏳ | Template/static reload without restart; Rust changes via zero-downtime socket handover |
 | **M6** — production build | ⏳ | `kernway build` → one static binary, assets embedded, allocator decision |
 
+Every database and message-bus driver is accepted against a real server ([`acceptance/`](acceptance/README.md), reports in [`docs/acceptance/`](docs/acceptance/)). What the drivers do not do yet is listed in **[`docs/GAPS.md`](docs/GAPS.md)**, with how to request it.
+
 ---
 
 ## License

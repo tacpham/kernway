@@ -11,7 +11,7 @@
 #   acceptance/run.sh mongodb  (MongoDB 8.0: standalone, TLS / X.509, replica set, sharded — in Docker)
 #   acceptance/run.sh mssql    (SQL Server 2022 with a test CA, in Docker)
 #   acceptance/run.sh s3       (the Versity S3 Gateway, natively — S3-compatible object storage)
-#   acceptance/run.sh mariadb  (MariaDB 11.4 LTS through the MySQL driver, in Docker)
+#   acceptance/run.sh mariadb  (MariaDB 11.8 LTS through the MySQL driver, in Docker)
 #   acceptance/run.sh valkey   (Valkey 8.1 through the Redis client: single, TLS, Sentinel, Cluster — in Docker)
 #   acceptance/run.sh nats     (nats-server natively: plain, auth, TLS / mTLS, a JetStream cluster)
 #   acceptance/run.sh rabbitmq (RabbitMQ 4.1 with TLS and EXTERNAL auth, in Docker)
@@ -82,7 +82,7 @@ SQL
     CRATE=kernway-orm-mysql; FEATURES=(--features mysql); TITLE=MySQL
     # Local-channel tests need the server's socket file: they run inside the
     # MySQL container (see in_container_tests), not on the host.
-    SKIP=(--skip local_socket_)
+    SKIP=(--skip local_socket_ --skip mariadb_)
     ;;
   oracle)
     C="${ORACLE_CONTAINER:-kernway-oracle}"
@@ -229,7 +229,7 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     # Recreated each run (test data only): MariaDB with a test CA, the MySQL
     # driver's accounts and database.
     C=kernway-mariadb
-    log "MariaDB (${MARIADB_IMAGE:-mariadb:11.4}) through the MySQL driver"
+    log "MariaDB (${MARIADB_IMAGE:-mariadb:11.8}) through the MySQL driver"
     "$ROOT/crates/kernway-orm-mysql/tests/support/mariadb-setup.sh" "$ROOT/target/mariadb" > "$WORK/mariadb.env"
     set -a; . "$WORK/mariadb.env"; set +a
     VERSION="MariaDB $KERNWAY_MARIADB_VERSION"
@@ -346,6 +346,8 @@ set +e
 python3 "$ROOT/acceptance/report.py" "$TITLE" "$ROOT/acceptance/$DB.features" "$WORK/test.log" "$WORK/meta.json" > "$OUT/$DB.md"
 STATUS=$?
 set -e
+# The cross-driver list of gaps follows the catalogs.
+python3 "$ROOT/acceptance/gaps.py"
 grep -m3 -E '^## Verdict|^- Features|^- Tests' "$OUT/$DB.md" >&2
 log "report: docs/acceptance/$DB.md"
 exit $STATUS

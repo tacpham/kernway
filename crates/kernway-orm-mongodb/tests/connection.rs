@@ -47,6 +47,44 @@ fn scram_mechanisms_and_wrong_passwords() {
     });
 }
 
+/// Percent-encode a URL user-info component.
+fn pct(s: &str) -> String {
+    s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+#[test]
+fn scram_sha256_passwords_are_saslprepped() {
+    let Some(url) = env("KERNWAY_MONGO_URL") else { return };
+    block(async move {
+        // The server stores the SASLprep form: the soft hyphen vanishes,
+        // U+2168 is "IX", the Vietnamese letter may come composed or not.
+        let admin = Client::connect(&url).await.unwrap();
+        let _ = admin.run_command("admin", doc! { "dropUser" => "kw_prep" }).await;
+        admin
+            .run_command(
+                "admin",
+                doc! { "createUser" => "kw_prep", "pwd" => "pw\u{AD}\u{2168}-kh\u{1EA9}u", "roles" => Vec::<Bson>::new(), "mechanisms" => vec![Bson::from("SCRAM-SHA-256")] },
+            )
+            .await
+            .unwrap();
+        for pw in ["pw\u{AD}\u{2168}-kh\u{1EA9}u", "pwIX-kh\u{1EA9}u", "pw\u{2168}-kha\u{302}\u{309}u"] {
+            let o = ClientOptions::parse(&with_creds(&url, &format!("kw_prep:{}", pct(pw)))).unwrap();
+            Connection::connect_for_test(&o).await.unwrap_or_else(|err| panic!("{pw:?}: {err}"));
+        }
+        for pw in ["pwIX-khau", "pw-\u{1F600}"] {
+            let o = ClientOptions::parse(&with_creds(&url, &format!("kw_prep:{}", pct(pw)))).unwrap();
+            let err = Connection::connect_for_test(&o).await.err().unwrap_or_else(|| panic!("{pw:?} accepted"));
+            assert_eq!(err.kind, ErrorKind::Auth, "{pw:?}: {err}");
+        }
+        // No SASLprep form (an emoji is unassigned in Unicode 3.2): refused
+        // before anything is sent.
+        let o = ClientOptions::parse(&with_creds(&url, &format!("kw_prep:{}", pct("pw-\u{1F600}")))).unwrap();
+        let err = Connection::connect_for_test(&o).await.err().unwrap();
+        assert!(err.to_string().contains("SASLprep"), "{err}");
+        admin.run_command("admin", doc! { "dropUser" => "kw_prep" }).await.unwrap();
+    });
+}
+
 #[test]
 fn compression_is_negotiated_and_used() {
     let Some(url) = env("KERNWAY_MONGO_URL") else { return };

@@ -26,7 +26,7 @@ Connection & security | mongodb+srv://: SRV seed list and TXT options from a sel
 Connection & security | Connect and server-selection timeouts bounded, errors naming each server and why | timeouts_and_selection_errors_are_bounded
 Connection & security | PLAIN (LDAP) | GAP: implemented, but only MongoDB Enterprise speaks it — not verified against a server
 Connection & security | GSSAPI / Kerberos, MONGODB-AWS, MONGODB-OIDC | GAP: refused with a clear error
-Connection & security | SASLprep of non-ASCII SCRAM-SHA-256 passwords | GAP: passwords are sent as given
+Connection & security | SASLprep of non-ASCII SCRAM-SHA-256 passwords (RFC 4013; a password with no SASLprep form is refused before anything is sent) | scram_sha256_passwords_are_saslprepped
 Connection & security | Encrypted client keys (tlsCertificateKeyFilePassword), OCSP | GAP: refused with a clear error / not checked
 Connection & security | Unix-domain sockets on Windows | GAP: rt-net has no AF_UNIX on Windows; TCP there
 

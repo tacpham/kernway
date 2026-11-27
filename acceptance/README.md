@@ -29,6 +29,13 @@ from `acceptance/<db>.features`.
 - Every test of the run is listed at the end with whether it backs a feature.
 - The script exits non-zero unless everything that ran passed.
 
+## The list of gaps
+
+[`docs/GAPS.md`](../docs/GAPS.md) collects every `GAP:` row of every catalog
+in one page, for users to see what is missing and how to request it. It is
+generated (`acceptance/gaps.py`, also run by `run.sh`); CI fails when it no
+longer matches the catalogs.
+
 ## Catalog format (`<db>.features`)
 
 ```

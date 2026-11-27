@@ -560,6 +560,10 @@ impl Conn {
                             }
                             bound = matches!(binding, Binding::Bind(_));
                             let pw = self.password(cfg)?;
+                            // SASLprep, as libpq and the server do; a password
+                            // with no SASLprep form is used as given (so does the
+                            // server when it stores the verifier).
+                            let pw = kernway_wire::saslprep::saslprep(&pw).unwrap_or(std::borrow::Cow::Borrowed(&pw));
                             // The user name travels in the start-up message; SCRAM's stays empty.
                             let s = Scram::new(Hash::Sha256, "", pw.as_bytes(), scram::new_nonce().map_err(io_err)?, binding);
                             let first = s.client_first();

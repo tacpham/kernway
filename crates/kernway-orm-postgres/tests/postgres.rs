@@ -120,6 +120,41 @@ fn every_authentication_method() {
     });
 }
 
+/// Percent-encode a URL user-info component.
+fn pct(s: &str) -> String {
+    s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+#[test]
+fn scram_passwords_are_saslprepped() {
+    let Some(e) = env() else { return };
+    block(async move {
+        let mut admin = e.conn().await;
+        // The server stores the SCRAM verifier of the SASLprep form: a soft
+        // hyphen vanishes, U+2168 (ROMAN NUMERAL NINE) is "IX", and the
+        // Vietnamese letter may come composed or not. An emoji (unassigned in
+        // Unicode 3.2) has no SASLprep form: both sides use it as given.
+        for sql in [
+            "DROP ROLE IF EXISTS kw_prep",
+            "CREATE ROLE kw_prep LOGIN PASSWORD 'pw\u{AD}\u{2168}-kh\u{1EA9}u'",
+            "DROP ROLE IF EXISTS kw_raw",
+            "CREATE ROLE kw_raw LOGIN PASSWORD 'pw-\u{1F600}'",
+        ] {
+            admin.simple(sql).await.unwrap_or_else(|err| panic!("{sql}: {err}"));
+        }
+        let url = |user: &str, pw: &str| format!("postgres://{user}:{}@{}:{}/kernway_test?sslmode=disable", pct(pw), e.host, e.port);
+        for pw in ["pw\u{AD}\u{2168}-kh\u{1EA9}u", "pwIX-kh\u{1EA9}u", "pw\u{2168}-kha\u{302}\u{309}u"] {
+            let mut c = connect(&url("kw_prep", pw)).await.unwrap_or_else(|err| panic!("{pw:?}: {err}"));
+            assert_eq!(current_user(&mut c).await, "kw_prep");
+        }
+        let err = connect(&url("kw_prep", "pwIX-khau")).await.err().expect("another password");
+        assert!(err.to_string().contains("28P01"), "{err}");
+        let mut c = connect(&url("kw_raw", "pw-\u{1F600}")).await.unwrap();
+        assert_eq!(current_user(&mut c).await, "kw_raw");
+        assert!(connect(&url("kw_raw", "pw-")).await.is_err());
+    });
+}
+
 #[test]
 fn scram_channel_binding() {
     let Some(e) = env() else { return };

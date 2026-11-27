@@ -20,7 +20,7 @@ Connection & security | Unix-domain socket (inside the PostgreSQL container, and
 Connection & security | Several hosts tried in turn (a refused one first), every address of a name, target_session_attrs (primary / standby / read-write / read-only / prefer-standby), connect timeout against an address that never answers | hosts_tried_in_turn_and_session_attrs
 Connection & security | Start-up settings (application_name, search_path, statement_timeout), server parameters, version, backend pid | hosts_tried_in_turn_and_session_attrs
 Connection & security | GSSAPI / Kerberos / SSPI authentication | GAP: refused with a clear error; only password, SCRAM, trust and certificate methods are spoken
-Connection & security | SASLprep of non-ASCII passwords | GAP: passwords are sent as given (the server falls back to the raw bytes for passwords SASLprep would reject; a password SASLprep would change does not match)
+Connection & security | SASLprep of non-ASCII passwords (RFC 4013: mapped, NFKC, prohibited and bidi checks; a password with no SASLprep form is used as given, as libpq and the server do) | scram_passwords_are_saslprepped
 Connection & security | libpq environment / files: PGHOST, PGPASSWORD, ~/.pgpass, pg_service.conf, sslnegotiation=direct | GAP: configuration comes from the URL or PgConfig only
 Connection & security | Unix-domain sockets on Windows | GAP: rt-net has no AF_UNIX on Windows; TCP there
 

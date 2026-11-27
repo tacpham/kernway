@@ -2,9 +2,10 @@
 # MariaDB for the MySQL driver's tests (the driver speaks to MariaDB as to
 # MySQL; this proves it against the real server):
 #
-#   127.0.0.1:3308   MariaDB (MARIADB_IMAGE, default mariadb:11.4 — the LTS)
+#   127.0.0.1:3308   MariaDB (MARIADB_IMAGE, default mariadb:11.8 — the LTS)
 #                    root / secret; kernway / kernway_pw owning kernway_test
-#                    (mysql_native_password, MariaDB's default)
+#                    (mysql_native_password, MariaDB's default); the
+#                    auth_ed25519 and auth_parsec plugins installed
 #                    max_allowed_packet 64M (MySQL 8's default; MariaDB's is 16M)
 #   TLS              server certificate from this directory's test CA
 #                    (ca.pem); client-cert.pem / client-key.pem for X509 users
@@ -14,7 +15,7 @@
 # Prints the test environment (KERNWAY_MYSQL_*) as KEY=VALUE lines.
 set -euo pipefail
 DIR="${1:-$(cd "$(dirname "$0")/../../../.." && pwd)/target/mariadb}"
-IMAGE="${MARIADB_IMAGE:-mariadb:11.4}"
+IMAGE="${MARIADB_IMAGE:-mariadb:11.8}"
 C="${MARIADB_CONTAINER:-kernway-mariadb}"
 PORT="${MARIADB_PORT:-3308}"
 mkdir -p "$DIR"
@@ -47,6 +48,11 @@ CREATE USER IF NOT EXISTS 'kernway'@'%' IDENTIFIED BY 'kernway_pw';
 GRANT ALL ON kernway_test.* TO 'kernway'@'%';
 GRANT ALL ON *.* TO 'root'@'%';
 SQL
+# The Ed25519 plugins (the tests create their accounts).
+for p in auth_ed25519 auth_parsec; do
+  docker exec "$C" mariadb -uroot -psecret -N -e "SELECT 1 FROM information_schema.plugins WHERE plugin_library LIKE '$p%'" | grep -q 1 \
+    || docker exec "$C" mariadb -uroot -psecret -e "INSTALL SONAME '$p'"
+done
 
 echo "KERNWAY_MYSQL_URL=mysql://kernway:kernway_pw@127.0.0.1:$PORT/kernway_test"
 echo "KERNWAY_MYSQL_ROOT_URL=mysql://root:secret@127.0.0.1:$PORT/kernway_test"

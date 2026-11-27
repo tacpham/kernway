@@ -5,7 +5,7 @@
 #            GAP: <why>  (not implemented / not verified — counted against completeness)
 #            N/A: <why>  (MariaDB has no such feature)
 #
-# Every live test runs against MariaDB 11.4 (LTS) in Docker, set up by
+# Every live test runs against MariaDB 11.8 (LTS) in Docker, set up by
 # crates/kernway-orm-mysql/tests/support/mariadb-setup.sh (TLS from a test CA,
 # max_allowed_packet 64M as MySQL 8). The local-channel tests run inside the
 # MariaDB container.
@@ -15,7 +15,7 @@ Connection & security | caching_sha2_password: fast auth, and full auth over TLS
 Connection & security | caching_sha2_password full auth without TLS (RSA-OAEP with the server key, file or opt-in fetch) | N/A: MariaDB has no caching_sha2_password (mysql_native_password, ed25519, parsec)
 Connection & security | TLS ssl-mode disabled / preferred / required / verify_ca / verify_identity | protocol::tests::ssl_modes_against_a_live_server, protocol::tests::url_options_set_the_ssl_mode_and_ca
 Connection & security | Mutual TLS (client certificate, REQUIRE X509) | mutual_tls_presents_the_client_certificate
-Connection & security | MariaDB ed25519 and PARSEC authentication | GAP: not implemented (mysql_native_password, MariaDB's default, is)
+Connection & security | MariaDB ed25519 and PARSEC authentication (Ed25519 signatures, PBKDF2-SHA512 key derivation; RFC 8032 vectors) | ed25519::tests::rfc8032_test_vectors, ed25519::tests::pbkdf2_hmac_sha512_vectors, mariadb_ed25519_logs_in_and_refuses_a_wrong_password, mariadb_parsec_logs_in_and_refuses_a_wrong_password
 Connection & security | Connection URL parsing | protocol::tests::url_parsing
 Connection & security | Host names resolved off the reactor (blocking pool); IP literals skip DNS | host_names_resolve_without_blocking_and_ip_literals_skip_dns
 Connection & security | Auth scramble (native SHA-1) matches the reference construction | protocol::tests::native_scramble_shape
@@ -57,6 +57,6 @@ Stored programs | Scripts with DELIMITER (mysqldump / mysql client style), trigg
 Stored programs | LOAD DATA LOCAL INFILE from caller bytes only | load_data_local_infile_sends_only_the_given_bytes
 Performance | Smoke benchmark (prepared, cached, decoded in place) | perf_smoke
 Platform & runtime | Fully async on kernway's reactor: no blocking call on a shard (DNS, files, sockets, sleeps only on the blocking pool; large zlib frames too) — enforced by a source scan | no_blocking_call_runs_on_the_reactor, host_names_resolve_without_blocking_and_ip_literals_skip_dns
-Platform & runtime | Runs on Linux: whole driver suite against MariaDB 11.4 (CI) | ci::mariadb_ubuntu_latest
+Platform & runtime | Runs on Linux: whole driver suite against MariaDB 11.8 (CI) | ci::mariadb_ubuntu_latest
 Platform & runtime | The client on macOS / Windows: the same code, run there against MySQL | ci::drivers_macos_latest, ci::drivers_windows_latest
 Platform & runtime | Live against MariaDB on macOS / Windows | GAP: MariaDB runs in Docker on Linux only here

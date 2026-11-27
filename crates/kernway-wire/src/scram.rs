@@ -158,7 +158,7 @@ impl Scram {
     /// Start an exchange as `user` (empty for PostgreSQL, which takes the
     /// user from the start-up message) with the already-prepared password
     /// bytes (MongoDB SCRAM-SHA-1 hashes the password first; SCRAM-SHA-256
-    /// uses it as given — SASLprep only changes non-ASCII passwords).
+    /// takes its [`saslprep`](crate::saslprep::saslprep) form).
     /// `nonce`: printable client nonce without commas ([`new_nonce`]).
     pub fn new(hash: Hash, user: &str, password: &[u8], nonce: String, binding: Binding) -> Self {
         let (gs2, binding) = match binding {

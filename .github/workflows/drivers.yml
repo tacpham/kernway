@@ -53,7 +53,7 @@ jobs:
         shell: bash
         run: >
           cargo test -p rt-core -p rt-net -p kernway-wire -p kernway-orm-sql -p kernway-orm-mysql
-          --features kernway-orm-mysql/mysql -- --test-threads=1
+          --features kernway-orm-mysql/mysql -- --test-threads=1 --skip mariadb_
 
       - name: The local-channel tests ran (not skipped)
         shell: bash
@@ -488,7 +488,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: MariaDB 11.4 (LTS)
+      - name: MariaDB 11.8 (LTS)
         shell: bash
         run: crates/kernway-orm-mysql/tests/support/mariadb-setup.sh "$RUNNER_TEMP/mariadb" >> "$GITHUB_ENV"
 
@@ -502,6 +502,8 @@ jobs:
         run: |
           ! grep -q "skip:" mariadb.log
           grep -q "^test mysql_conforms " mariadb.log
+          grep -q "^test mariadb_ed25519_logs_in_and_refuses_a_wrong_password ... ok" mariadb.log
+          grep -q "^test mariadb_parsec_logs_in_and_refuses_a_wrong_password ... ok" mariadb.log
 
   # Valkey (the BSD fork of Redis 7.2) through the Redis client: the same
   # single / TLS / Sentinel / Cluster deployments as the acceptance run, on

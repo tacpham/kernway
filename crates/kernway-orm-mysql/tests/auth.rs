@@ -120,3 +120,56 @@ fn mutual_tls_presents_the_client_certificate() {
         assert!(MySqlDriver::connect(&format!("{base}&ssl-cert={}", c("client-cert.pem"))).await.is_err());
     });
 }
+
+/// MariaDB only (`KERNWAY_MARIADB_VERSION`, from `mariadb-setup.sh`, which
+/// installs the `auth_ed25519` and `auth_parsec` plugins).
+fn mariadb() -> Option<Env> {
+    std::env::var("KERNWAY_MARIADB_VERSION").ok()?;
+    env()
+}
+
+const ED25519_ACCOUNT: &str = "DROP USER IF EXISTS 'kw_ed'@'%'; CREATE USER 'kw_ed'@'%' IDENTIFIED VIA ed25519 USING PASSWORD('ed-pw-0123456789-a-longer-password');
+     GRANT SELECT ON kernway_test.* TO 'kw_ed'@'%';";
+const PARSEC_ACCOUNT: &str = "DROP USER IF EXISTS 'kw_parsec'@'%'; CREATE USER 'kw_parsec'@'%' IDENTIFIED VIA parsec USING PASSWORD('parsec-pw');
+     GRANT SELECT ON kernway_test.* TO 'kw_parsec'@'%';";
+
+/// Log in as `user` with plaintext and with TLS, run a query on each, and
+/// check that a wrong password is the server's "access denied".
+async fn logs_in(e: &Env, user: &str, pw: &str) {
+    let ca = e.certs.join("ca.pem").display().to_string();
+    for mode in ["ssl-mode=disabled".to_string(), format!("ssl-mode=verify_ca&ssl-ca={ca}")] {
+        for _ in 0..3 {
+            // Fresh scrambles each time: the signature changes, the login holds.
+            let db = MySqlDriver::connect(&format!("mysql://{user}:{pw}@{}/kernway_test?{mode}", e.host)).await.unwrap_or_else(|err| panic!("{user} ({mode}): {err}"));
+            assert_eq!(db.query_scalar("SELECT CURRENT_USER()", &[]).await.unwrap(), Value::Text(format!("{user}@%")));
+            assert_eq!(db.query_scalar("SELECT ?", params![42]).await.unwrap(), Value::Int(42));
+        }
+        let bad = format!("mysql://{user}:not-{pw}@{}/kernway_test?{mode}", e.host);
+        let err = MySqlDriver::connect(&bad).await.err().expect("a wrong password must fail").to_string();
+        assert!(err.contains("1045"), "{user} ({mode}): {err}");
+    }
+}
+
+#[test]
+fn mariadb_ed25519_logs_in_and_refuses_a_wrong_password() {
+    let Some(e) = mariadb() else { return eprintln!("skip: KERNWAY_MARIADB_VERSION not set (mariadb-setup.sh)") };
+    run(async move {
+        let admin = MySqlDriver::connect(&e.root).await.unwrap();
+        setup(&admin, ED25519_ACCOUNT).await;
+        let plugin = admin.query_scalar("SELECT plugin FROM mysql.user WHERE user = 'kw_ed'", &[]).await.unwrap();
+        assert_eq!(plugin, Value::Text("ed25519".into()), "the account really uses ed25519");
+        logs_in(&e, "kw_ed", "ed-pw-0123456789-a-longer-password").await;
+    });
+}
+
+#[test]
+fn mariadb_parsec_logs_in_and_refuses_a_wrong_password() {
+    let Some(e) = mariadb() else { return eprintln!("skip: KERNWAY_MARIADB_VERSION not set (mariadb-setup.sh)") };
+    run(async move {
+        let admin = MySqlDriver::connect(&e.root).await.unwrap();
+        setup(&admin, PARSEC_ACCOUNT).await;
+        let plugin = admin.query_scalar("SELECT plugin FROM mysql.user WHERE user = 'kw_parsec'", &[]).await.unwrap();
+        assert_eq!(plugin, Value::Text("parsec".into()), "the account really uses parsec");
+        logs_in(&e, "kw_parsec", "parsec-pw").await;
+    });
+}

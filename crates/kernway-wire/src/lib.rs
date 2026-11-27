@@ -16,11 +16,16 @@
 //!   reading certificate files — run on the blocking pool and awaited.
 //!
 //! - [`scram`] (feature `scram`): the SCRAM-SHA-1 / -SHA-256 client exchange,
-//!   with channel binding — PostgreSQL and MongoDB authenticate with it.
+//!   with channel binding — PostgreSQL and MongoDB authenticate with it; and
+//!   [`saslprep`], the password preparation SCRAM asks for (RFC 4013).
 //!
 //! All of it is single-shard, like the rest of the thread-per-core stack.
 
 pub mod offload;
+#[cfg(feature = "scram")]
+pub mod saslprep;
+#[cfg(feature = "scram")]
+mod saslprep_tables;
 #[cfg(feature = "scram")]
 pub mod scram;
 pub mod snappy;

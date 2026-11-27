@@ -400,7 +400,11 @@ fn new_scram(c: &Credential, mech: AuthMechanism) -> Result<Scram> {
             let d = md5::Md5::digest(format!("{user}:mongo:{password}").as_bytes());
             (Hash::Sha1, d.iter().map(|b| format!("{b:02x}")).collect::<String>().into_bytes())
         }
-        _ => (Hash::Sha256, password.into_bytes()),
+        // SCRAM-SHA-256 SASLprep's the password (the server did when it stored it).
+        _ => {
+            let prepped = kernway_wire::saslprep::saslprep(&password).map_err(|e| Error::auth(format!("the password: {e}")))?;
+            (Hash::Sha256, prepped.into_owned().into_bytes())
+        }
     };
     let nonce = scram::new_nonce().map_err(|e| Error::auth(e.to_string()))?;
     Ok(Scram::new(hash, &user, &pw, nonce, scram::Binding::None))

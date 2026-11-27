@@ -38,6 +38,8 @@ pub use dialect::MySqlDialect;
 #[cfg(feature = "mysql")]
 pub mod protocol;
 #[cfg(feature = "mysql")]
+mod ed25519;
+#[cfg(feature = "mysql")]
 mod rsa;
 #[cfg(feature = "mysql")]
 pub mod pool;

@@ -8,7 +8,9 @@
 //!
 //! - Handshake v10; auth with `mysql_native_password` (SHA-1 scramble) or
 //!   `caching_sha2_password` (MySQL 8's default: SHA-256 fast auth, and full auth
-//!   over TLS), including server-requested auth switches.
+//!   over TLS), including server-requested auth switches; MariaDB's
+//!   `ed25519` and `parsec` (PBKDF2-SHA512 + Ed25519) when the server
+//!   switches to them.
 //! - TLS via `SSLRequest` + rustls, per [`SslMode`] (mirrors the official
 //!   client's `--ssl-mode`).
 //! - `COM_QUERY` (text protocol) and prepared statements (binary protocol, cached
@@ -716,16 +718,32 @@ impl Conn {
                 Some(0xFF) => return Err(parse_err_packet(&reply)),
                 Some(0xFE) => {
                     // AuthSwitchRequest: plugin name (NUL-terminated), then its data.
-                    let (name, data) = parse_auth_switch(&reply);
+                    let (name, raw) = parse_auth_switch(&reply);
                     plugin = match name.as_str() {
                         "mysql_native_password" => "mysql_native_password",
                         "caching_sha2_password" => "caching_sha2_password",
+                        // MariaDB: the data is a bare 32-byte scramble (no NUL).
+                        "client_ed25519" => {
+                            let nonce = mariadb_scramble(&raw)?;
+                            self.write_packet(&crate::ed25519::sign(cfg.password.as_bytes(), nonce)).await?;
+                            continue;
+                        }
+                        "parsec" => {
+                            let nonce = mariadb_scramble(&raw)?.to_vec();
+                            self.parsec(cfg, &nonce).await?;
+                            continue;
+                        }
                         other => {
                             return Err(conn_err(format!(
                                 "server asked to switch to unsupported auth plugin '{other}'"
                             )))
                         }
                     };
+                    // MySQL's nonces end in a NUL that is not part of them.
+                    let mut data = raw;
+                    if data.last() == Some(&0) {
+                        data.pop();
+                    }
                     let auth = auth_response(plugin, cfg.password.as_bytes(), &data);
                     self.write_packet(&auth).await?;
                     scramble = data;
@@ -793,6 +811,33 @@ impl Conn {
             }
         }
         Err(conn_err("authentication did not complete"))
+    }
+
+    /// MariaDB's `parsec` after its 32-byte server scramble: ask for the salt
+    /// (an empty packet), get `'P'`, the iteration exponent and an 18-byte
+    /// salt, derive the Ed25519 seed with PBKDF2-HMAC-SHA512 (1024 << exponent
+    /// rounds) and answer with a fresh client scramble and the signature of
+    /// both scrambles. The server's OK (or error) is read by the caller.
+    async fn parsec(&mut self, cfg: &MysqlConfig, server: &[u8]) -> Result<(), OrmError> {
+        self.write_packet(&[]).await?;
+        let reply = self.read_packet().await?;
+        let params = match reply.first() {
+            Some(0xFF) => return Err(parse_err_packet(&reply)),
+            // MariaDB escapes plugin data starting with 1, 254 or 255 with a 1.
+            Some(0x01) => &reply[1..],
+            _ => &reply[..],
+        };
+        let [b'P', exponent, salt @ ..] = params else {
+            return Err(conn_err(format!("parsec: unexpected salt packet of {} bytes", params.len())));
+        };
+        if salt.len() != 18 || *exponent > 3 {
+            return Err(conn_err(format!("parsec: unsupported parameters (salt {} bytes, exponent {exponent})", salt.len())));
+        }
+        let seed = crate::ed25519::pbkdf2_sha512(cfg.password.as_bytes(), salt, 1024 << exponent, 32);
+        let mut client = [0u8; 32];
+        kernway_tls::fill_random(&mut client).map_err(|e| conn_err(format!("RNG: {e}")))?;
+        let sig = crate::ed25519::sign(&seed, &[server, &client[..]].concat());
+        self.write_packet(&[&client[..], &sig[..]].concat()).await
     }
 
     // --- Command phase ----------------------------------------------------
@@ -1777,16 +1822,18 @@ fn build_handshake_response(
 }
 
 /// AuthSwitchRequest (`0xFE`, plugin name NUL-terminated, auth data) → the
-/// plugin name and its auth data (the new nonce, trailing NUL dropped).
+/// plugin name and its auth data as sent (MySQL's nonces carry a trailing
+/// NUL; MariaDB's Ed25519 scrambles are 32 raw bytes, which may end in 0).
 fn parse_auth_switch(packet: &[u8]) -> (String, Vec<u8>) {
     let body = packet.get(1..).unwrap_or(&[]);
     let name_end = body.iter().position(|&b| b == 0).unwrap_or(body.len());
     let name = String::from_utf8_lossy(&body[..name_end]).to_string();
-    let mut data = body.get(name_end + 1..).unwrap_or(&[]).to_vec();
-    if data.last() == Some(&0) {
-        data.pop();
-    }
-    (name, data)
+    (name, body.get(name_end + 1..).unwrap_or(&[]).to_vec())
+}
+
+/// The 32-byte server scramble of MariaDB's `client_ed25519` and `parsec`.
+fn mariadb_scramble(data: &[u8]) -> Result<&[u8], OrmError> {
+    data.get(..32).ok_or_else(|| conn_err(format!("Ed25519 auth: a {}-byte server scramble, 32 expected", data.len())))
 }
 
 /// The scrambled password for `plugin` against the server nonce `salt`.

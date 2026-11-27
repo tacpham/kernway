@@ -4,6 +4,7 @@
 #   1. every public item is documented        (missing_docs)
 #   2. every doc link still resolves          (broken_intra_doc_links)
 #   3. every example in the docs still runs   (doctests)
+# and docs/GAPS.md (generated from acceptance/*.features) is up to date.
 #
 # (3) is the one that catches real rot: an example that stops compiling is a
 # document that has started lying. Warnings are promoted to errors here — the
@@ -36,3 +37,6 @@ jobs:
 
       - name: Run doctests
         run: cargo test --workspace --doc --all-features
+
+      - name: docs/GAPS.md matches the acceptance catalogs
+        run: python3 acceptance/gaps.py --check
