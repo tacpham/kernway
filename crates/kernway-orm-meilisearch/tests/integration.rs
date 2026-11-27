@@ -707,7 +707,7 @@ fn test_errors_are_reported() {
         // A wrong key.
         let bad = MeilisearchDriver::connect(meili_url(), "not-the-key");
         let repo: Box<dyn Repository<Product>> = bad.repository();
-        let e = repo.find_all().await.err().expect("a wrong key fails");
+        let e = repo.find_all().await.expect_err("a wrong key fails");
         assert!(e.to_string().contains("403") || e.to_string().contains("401") || e.to_string().contains("invalid_api_key"), "{e}");
         // Nothing listening.
         let gone = MeilisearchDriver::connect("http://127.0.0.1:9", meili_key());
