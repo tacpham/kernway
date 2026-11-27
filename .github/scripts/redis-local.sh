@@ -29,7 +29,8 @@ ENV_LINES=()
 BUS_OPTION=""
 bus_protection_option() {
   if [ -z "$BUS_OPTION" ]; then
-    "$SERVER" --port 0 --save "" --cluster-bus-port-protected-mode no --logfile "$DIR/probe.log" --daemonize no &
+    # It must listen somewhere (a server with nothing to listen on exits at once).
+    "$SERVER" --port 0 --unixsocket "$DIR/probe.sock" --save "" --cluster-bus-port-protected-mode no --logfile "$DIR/probe.log" --daemonize no &
     local pid=$!
     sleep 1
     if kill -0 "$pid" 2>/dev/null; then BUS_OPTION=yes; kill "$pid"; else BUS_OPTION=no; fi
