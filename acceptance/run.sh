@@ -187,7 +187,7 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     log "RabbitMQ (${RABBITMQ_IMAGE:-rabbitmq:4.1-management}) with TLS and EXTERNAL auth"
     "$ROOT/crates/kernway-rabbitmq/tests/support/rabbitmq-setup.sh" "$ROOT/target/rabbitmq" > "$WORK/rabbitmq.env"
     # The rabbitmqctl command holds spaces: quote it for sourcing.
-    sed -i.bak 's/^\(KERNWAY_RABBITMQ_CTL=\)\(.*\)$/\1"\2"/' "$WORK/rabbitmq.env"
+    sed -i.bak 's/^\(KERNWAY_RABBITMQ_[A-Z]*=\)\(.*\)$/\1"\2"/' "$WORK/rabbitmq.env"
     set -a; . "$WORK/rabbitmq.env"; set +a
     VERSION="RabbitMQ $KERNWAY_RABBITMQ_VERSION"
     CRATE=kernway-rabbitmq; FEATURES=(); TITLE=RabbitMQ; SKIP=()

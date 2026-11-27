@@ -109,4 +109,6 @@ echo "KERNWAY_RABBITMQ_URL=amqp://kw:kw_pw@127.0.0.1:5672/%2F"
 echo "KERNWAY_RABBITMQ_DIR=$(native_path "$DIR")"
 # A shell command prefix the tests run (bash -c) to drive the broker.
 echo "KERNWAY_RABBITMQ_CTL=$CTL_CMD"
+# The shell that runs it — on Windows, Git Bash (a bare `bash` there may be WSL's).
+echo "KERNWAY_RABBITMQ_SHELL=$(native_path "$BASH")"
 echo "KERNWAY_RABBITMQ_VERSION=$(ctl version | tr -d '\r' | tail -1)"

@@ -40,8 +40,15 @@ fn dir() -> PathBuf {
 /// Run `rabbitmqctl <args>` against the test broker.
 fn ctl(args: &str) -> String {
     let cmd = std::env::var("KERNWAY_RABBITMQ_CTL").expect("KERNWAY_RABBITMQ_CTL");
-    let out = std::process::Command::new("bash").arg("-c").arg(format!("{cmd} {args}")).output().expect("run rabbitmqctl");
-    assert!(out.status.success(), "rabbitmqctl {args}: {}", String::from_utf8_lossy(&out.stderr));
+    let shell = std::env::var("KERNWAY_RABBITMQ_SHELL").unwrap_or_else(|_| "bash".into());
+    let out = std::process::Command::new(&shell).arg("-c").arg(format!("{cmd} {args}")).output().expect("run rabbitmqctl");
+    assert!(
+        out.status.success(),
+        "rabbitmqctl {args} (via {shell}): {}\nstdout: {}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
