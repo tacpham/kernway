@@ -17,6 +17,10 @@ rt-net  = { workspace = true }
 rt-core = { workspace = true }
 # The backend-agnostic pub/sub contract this crate implements for Redis.
 kernway-cache-core = { path = "../kernway-cache-core" }
+# TLS (rediss://) on the same async socket, and the blocking-pool helpers
+# that keep DNS and certificate reads off the reactor.
+kernway-tls  = { workspace = true }
+kernway-wire = { workspace = true }
 
 [lints]
 workspace = true

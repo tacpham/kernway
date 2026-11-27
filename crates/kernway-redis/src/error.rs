@@ -15,8 +15,16 @@ pub enum RedisError {
     /// A reply was well-formed but not the shape the command expected (e.g. an
     /// array where an integer was due).
     Unexpected(String),
-    /// The connection was closed mid-reply (peer sent EOF).
+    /// The connection was closed mid-reply (peer sent EOF), or is unusable
+    /// after an earlier failure.
     Closed,
+    /// A bad URL or option, or a setup step (resolve, read a certificate) failed.
+    Config(String),
+    /// The TLS handshake failed.
+    Tls(String),
+    /// No reply (or no connection) within the configured time; the
+    /// connection is dropped.
+    Timeout(String),
 }
 
 impl RedisError {
@@ -35,6 +43,9 @@ impl fmt::Display for RedisError {
             RedisError::Protocol(m) => write!(f, "redis protocol error: {m}"),
             RedisError::Unexpected(m) => write!(f, "redis unexpected reply: {m}"),
             RedisError::Closed => write!(f, "redis connection closed"),
+            RedisError::Config(m) => write!(f, "redis config: {m}"),
+            RedisError::Tls(m) => write!(f, "redis tls: {m}"),
+            RedisError::Timeout(m) => write!(f, "redis timeout: {m}"),
         }
     }
 }

@@ -111,6 +111,11 @@ pub fn parse_read_reply(v: &Value) -> Result<Vec<StreamEntries>, RedisError> {
     const CMD: &str = "XREADGROUP";
     match v {
         Value::Nil => Ok(Vec::new()),
+        // RESP3: a map of stream key → entries.
+        Value::Map(streams) => streams
+            .iter()
+            .map(|(key, entries)| Ok(StreamEntries { key: bulk_string(CMD, key)?, entries: parse_entries(CMD, entries)? }))
+            .collect(),
         Value::Array(streams) => streams
             .iter()
             .map(|s| match s {

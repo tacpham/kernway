@@ -1219,6 +1219,8 @@ name = "kernway-redis"
 version = "0.1.0"
 dependencies = [
  "kernway-cache-core",
+ "kernway-tls",
+ "kernway-wire",
  "rt-core",
  "rt-net",
 ]
