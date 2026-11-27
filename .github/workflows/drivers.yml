@@ -337,12 +337,15 @@ jobs:
             if [ -d "$d/bin" ]; then ERLANG_HOME="$d"; break; fi
           done
           [ -n "${ERLANG_HOME:-}" ] || { echo "Erlang not found"; ls "/c/Program Files"; exit 1; }
-          export ERLANG_HOME="$(cygpath -w "$ERLANG_HOME")"
+          # Short (8.3) names: cmd.exe, which runs the .bat scripts, splits
+          # quoted paths with spaces (C:\Program Files) however they are quoted.
+          export ERLANG_HOME="$(cygpath -d "$ERLANG_HOME")"
           echo "ERLANG_HOME=$ERLANG_HOME" >> "$GITHUB_ENV"
           for d in "/c/Program Files/RabbitMQ Server"/rabbitmq_server-*/sbin; do
             if [ -d "$d" ]; then SBIN="$d"; fi
           done
           [ -n "${SBIN:-}" ] || { echo "RabbitMQ not found"; ls "/c/Program Files"; exit 1; }
+          SBIN="$(cygpath -u "$(cygpath -d "$SBIN")")"
           echo "Erlang: $ERLANG_HOME, RabbitMQ: $SBIN"
           RABBITMQ_SBIN="$SBIN" crates/kernway-rabbitmq/tests/support/rabbitmq-setup.sh "$(cygpath -u "$RUNNER_TEMP")/rabbitmq" >> "$GITHUB_ENV"
 

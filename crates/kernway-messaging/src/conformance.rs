@@ -15,7 +15,7 @@ use std::time::Duration;
 /// How the suite reaches one backend.
 pub trait Harness: Clone + 'static {
     /// The broker under test.
-    type Broker: Broker;
+    type Broker: Broker + Clone + 'static;
     /// Connect (on the current executor).
     fn broker(&self) -> impl Future<Output = Self::Broker>;
 }
@@ -65,6 +65,9 @@ pub fn run_all<H: Harness>(h: H) {
         ("start_earliest_or_latest", start_earliest_or_latest::<H>),
         ("ack_timeout_redelivers", ack_timeout_redelivers::<H>),
         ("rejects_go_to_the_dead_letter_topic", rejects_go_to_the_dead_letter_topic::<H>),
+        ("data_round_trips_byte_exact", data_round_trips_byte_exact::<H>),
+        ("volume_without_loss_or_duplicates", volume_without_loss_or_duplicates::<H>),
+        ("data_survives_redelivery_and_dead_lettering", data_survives_redelivery_and_dead_lettering::<H>),
     ] {
         eprintln!("conformance: {name}");
         scenario(h.clone());
@@ -96,12 +99,17 @@ fn publish_confirm_and_consume<H: Harness>(h: H) {
         for m in &msgs {
             p.publish(&topic, m.clone()).await.unwrap_or_else(|e| panic!("publish: {e}"));
         }
-        for (i, want) in msgs.iter().enumerate() {
+        // Without keys there is no order to keep (partitioned backends
+        // spread them): match each delivery to the message it is.
+        let mut left: Vec<&OutMessage> = msgs.iter().collect();
+        for i in 0..msgs.len() {
             let d = recv(&mut c, &format!("message {i}")).await;
-            assert_eq!(d.payload, want.payload, "message {i}");
+            let at = left.iter().position(|m| m.payload == d.payload).unwrap_or_else(|| panic!("unexpected or repeated payload of {} bytes", d.payload.len()));
+            let want = left.remove(at);
             for (k, v) in &want.headers {
-                assert_eq!(d.header(k), Some(v.as_str()), "message {i} header {k}");
+                assert_eq!(d.header(k), Some(v.as_str()), "header {k}");
             }
+            assert_eq!(d.key, want.key, "the key travels with the message");
             assert!(!d.redelivered, "first delivery");
             c.ack(&d).await.unwrap();
         }
@@ -211,20 +219,23 @@ fn acks_are_durable<H: Harness>(h: H) {
         for i in 0..10 {
             p.publish(&topic, OutMessage::new(format!("d{i}"))).await.unwrap();
         }
+        let mut acked = HashSet::new();
         for _ in 0..6 {
             let d = recv(&mut c, "first six").await;
+            acked.insert(text(&d));
             c.ack(&d).await.unwrap();
         }
         c.close().await.unwrap();
         let mut c = b.subscribe(Subscription::new(&topic, "g").from_earliest()).await.unwrap();
-        let mut rest = Vec::new();
+        let mut rest = HashSet::new();
         for _ in 0..4 {
             let d = recv(&mut c, "the rest").await;
-            rest.push(text(&d));
+            assert!(!acked.contains(&text(&d)), "{} was acknowledged, yet came again", text(&d));
+            rest.insert(text(&d));
             c.ack(&d).await.unwrap();
         }
-        rest.sort();
-        assert_eq!(rest, ["d6", "d7", "d8", "d9"]);
+        let all: HashSet<String> = (0..10).map(|i| format!("d{i}")).collect();
+        assert_eq!(rest, &all - &acked);
         nothing_more(&mut c, "after the rest").await;
         c.close().await.unwrap();
         b.delete_topic(&topic).await.unwrap();
@@ -332,8 +343,9 @@ fn start_earliest_or_latest<H: Harness>(h: H) {
         let _ = late.next_timeout(Duration::from_millis(500)).await.map(|d| panic!("late saw {:?}", text(&d)));
         p.publish(&topic, OutMessage::new("new")).await.unwrap();
         if let Some(early) = early.as_mut() {
-            assert_eq!(text(&recv(early, "earliest: old").await), "old");
-            assert_eq!(text(&recv(early, "earliest: new").await), "new");
+            let mut got = [text(&recv(early, "earliest").await), text(&recv(early, "earliest").await)];
+            got.sort();
+            assert_eq!(got, ["new", "old"]);
         } else {
             eprintln!("n/a: no replay for a new group (the latest half ran)");
         }
@@ -341,11 +353,14 @@ fn start_earliest_or_latest<H: Harness>(h: H) {
         assert_eq!(text(&d), "new", "latest skips what was published before");
         late.ack(&d).await.unwrap();
         let mut keeper = b.subscribe(Subscription::new(&topic, "keeper")).await.unwrap();
-        for want in ["old", "new"] {
+        let mut kept = Vec::new();
+        for _ in 0..2 {
             let d = recv(&mut keeper, "kept while away").await;
-            assert_eq!(text(&d), want);
+            kept.push(text(&d));
             keeper.ack(&d).await.unwrap();
         }
+        kept.sort();
+        assert_eq!(kept, ["new", "old"]);
         for c in [Some(late), Some(keeper), early].into_iter().flatten() {
             c.close().await.unwrap();
         }
@@ -394,8 +409,9 @@ fn rejects_go_to_the_dead_letter_topic<H: Harness>(h: H) {
         let mut dl = b.subscribe(Subscription::new(&dead, "inspect").from_earliest()).await.unwrap();
         let mut c = b.subscribe(Subscription::new(&topic, "g").from_earliest().dead_letter(&dead)).await.unwrap();
         let p = b.producer().await.unwrap();
-        p.publish(&topic, OutMessage::new("poison").header("x-id", "7")).await.unwrap();
-        p.publish(&topic, OutMessage::new("fine")).await.unwrap();
+        // One key: "poison" comes first on every backend.
+        p.publish(&topic, OutMessage::new("poison").header("x-id", "7").key("order")).await.unwrap();
+        p.publish(&topic, OutMessage::new("fine").key("order")).await.unwrap();
         let d = recv(&mut c, "poison").await;
         assert_eq!(text(&d), "poison");
         c.nack(&d, false).await.unwrap();
@@ -412,6 +428,178 @@ fn rejects_go_to_the_dead_letter_topic<H: Harness>(h: H) {
         }
         b.delete_topic(&topic).await.unwrap();
         b.delete_topic(&dead).await.unwrap();
+    });
+}
+
+/// The data a message carries arrives exactly as sent: every byte value,
+/// empty and large payloads, every script of UTF-8; headers with Unicode,
+/// empty, long and punctuated values, many headers, repeated names,
+/// case-insensitive lookup; binary keys, and an empty key apart from none.
+fn data_round_trips_byte_exact<H: Harness>(h: H) {
+    block(async move {
+        let b = h.broker().await;
+        let topic = unique("data");
+        b.ensure_topic(&topic).await.unwrap();
+        let mut c = b.subscribe(Subscription::new(&topic, "g").from_earliest()).await.unwrap();
+        let p = b.producer().await.unwrap();
+        let every_byte: Vec<u8> = (0..=255u8).cycle().take(256 * 4).collect();
+        let long_value = "v".repeat(4096);
+        let mut many = OutMessage::new("forty headers");
+        for i in 0..40 {
+            many = many.header(format!("h-{i:02}"), format!("value {i}"));
+        }
+        let msgs = vec![
+            OutMessage::new(every_byte.clone()).key("bytes"),
+            OutMessage::new(Vec::<u8>::new()).key("bytes"),
+            OutMessage::new(vec![0u8]).key("bytes"),
+            OutMessage::new("Tiếng Việt có dấu: ắ ằ ẳ ẵ ặ · 中文 · 日本語 · 한국어 · العربية · עברית · 😀👍🏽 · \u{0}"),
+            OutMessage::new(r#"{"ticket":42,"items":[{"name":"Gel \"French\"","cents":3500}],"note":null}"#).header("content-type", "application/json"),
+            OutMessage::new((0..900 * 1024).map(|i| (i * 7 % 256) as u8).collect::<Vec<u8>>()),
+            OutMessage::new("headers")
+                .header("x-unicode", "Chào chị chủ tiệm 💅")
+                .header("x-empty", "")
+                .header("x-long", long_value.as_str())
+                .header("x-punct", "a: b = c; d, e  f")
+                .header("X-Mixed-Case", "kept")
+                .header("x-repeat", "one")
+                .header("x-repeat", "two"),
+            many,
+            OutMessage::new("binary key").key(vec![0u8, 1, 0xfe, 0xff, b'\n']),
+            OutMessage::new("empty key").key(Vec::<u8>::new()),
+            OutMessage::new("no key"),
+        ];
+        for m in &msgs {
+            p.publish(&topic, m.clone()).await.unwrap_or_else(|e| panic!("publish: {e}"));
+        }
+        let mut left: Vec<&OutMessage> = msgs.iter().collect();
+        for i in 0..msgs.len() {
+            let d = recv(&mut c, &format!("data {i}")).await;
+            let at = left
+                .iter()
+                .position(|m| m.payload == d.payload && m.key == d.key)
+                .unwrap_or_else(|| panic!("a delivery matching no sent message: {} bytes, key {:?}", d.payload.len(), d.key));
+            let want = left.remove(at);
+            for (k, v) in &want.headers {
+                let got: Vec<&str> = d.headers.iter().filter(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.as_str()).collect();
+                assert!(got.contains(&v.as_str()), "header {k}: want {v:?}, got {got:?}");
+            }
+            if want.payload == b"headers" {
+                assert_eq!(d.header("x-mixed-case"), Some("kept"), "names are looked up case-insensitively");
+                let repeats: Vec<&str> = d.headers.iter().filter(|(n, _)| n.eq_ignore_ascii_case("x-repeat")).map(|(_, v)| v.as_str()).collect();
+                assert_eq!(repeats, ["one", "two"], "repeated names keep every value, in order");
+                assert_eq!(d.header("x-empty"), Some(""), "an empty value is not dropped");
+            }
+            c.ack(&d).await.unwrap();
+        }
+        // Keyed messages of one key arrive in order (the three "bytes" ones).
+        nothing_more(&mut c, "after all data").await;
+        c.close().await.unwrap();
+        b.delete_topic(&topic).await.unwrap();
+    });
+}
+
+/// Several producers at once, many messages, two members: every confirmed
+/// message arrives exactly once (nothing fails here, so nothing is
+/// redelivered), each member sees a key's messages in publish order.
+fn volume_without_loss_or_duplicates<H: Harness>(h: H) {
+    block(async move {
+        let b = h.broker().await;
+        let topic = unique("volume");
+        b.ensure_topic(&topic).await.unwrap();
+        let mut m1 = b.subscribe(Subscription::new(&topic, "g").from_earliest().max_in_flight(32)).await.unwrap();
+        let mut m2 = b.subscribe(Subscription::new(&topic, "g").from_earliest().max_in_flight(32)).await.unwrap();
+        const PRODUCERS: usize = 3;
+        const EACH: usize = 400;
+        let done = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        for pi in 0..PRODUCERS {
+            let (b, topic, done) = (b.clone(), topic.clone(), done.clone());
+            rt_core::spawn(async move {
+                let p = b.producer().await.unwrap();
+                for i in 0..EACH {
+                    // Key per producer and lane: order is per producer within a key.
+                    let key = format!("p{pi}-k{}", i % 10);
+                    let body = format!("{pi}:{i}:{}", "x".repeat(i % 300));
+                    p.publish(&topic, OutMessage::new(body).key(key).header("seq", i.to_string())).await.unwrap();
+                }
+                done.set(done.get() + 1);
+            });
+        }
+        let total = PRODUCERS * EACH;
+        let mut seen: HashSet<(usize, usize)> = HashSet::new();
+        let mut last: [HashMap<String, usize>; 2] = [HashMap::new(), HashMap::new()];
+        let until = std::time::Instant::now() + Duration::from_secs(120);
+        while seen.len() < total {
+            assert!(std::time::Instant::now() < until, "{} of {total} arrived (producers done: {})", seen.len(), done.get());
+            for (who, c) in [&mut m1, &mut m2].into_iter().enumerate() {
+                let Ok(d) = c.next_timeout(Duration::from_millis(100)).await else { continue };
+                let t = text(&d);
+                let mut parts = t.splitn(3, ':');
+                let (pi, i): (usize, usize) = (parts.next().unwrap().parse().unwrap(), parts.next().unwrap().parse().unwrap());
+                assert_eq!(parts.next().unwrap().len(), i % 300, "payload intact");
+                assert_eq!(d.header("seq"), Some(i.to_string().as_str()));
+                assert!(seen.insert((pi, i)), "duplicate {pi}:{i}");
+                let key = String::from_utf8(d.key.clone().unwrap()).unwrap();
+                if let Some(prev) = last[who].insert(key.clone(), i) {
+                    assert!(i > prev, "key {key}: {i} after {prev} at one member");
+                }
+                c.ack(&d).await.unwrap();
+            }
+        }
+        assert_eq!(done.get(), PRODUCERS, "every publish was confirmed");
+        nothing_more(&mut m1, "after the volume").await;
+        nothing_more(&mut m2, "after the volume").await;
+        for c in [m1, m2] {
+            c.close().await.unwrap();
+        }
+        b.delete_topic(&topic).await.unwrap();
+    });
+}
+
+/// A message's payload, headers and key are unchanged when it comes again
+/// after a nack and when it is dead-lettered.
+fn data_survives_redelivery_and_dead_lettering<H: Harness>(h: H) {
+    block(async move {
+        let b = h.broker().await;
+        let topic = unique("intact");
+        let dead = format!("{topic}-dead");
+        b.ensure_topic(&topic).await.unwrap();
+        let dl_capable = caps_of(&b).dead_letter;
+        let mut sub = Subscription::new(&topic, "g").from_earliest();
+        let mut dl = None;
+        if dl_capable {
+            b.ensure_topic(&dead).await.unwrap();
+            dl = Some(b.subscribe(Subscription::new(&dead, "inspect").from_earliest()).await.unwrap());
+            sub = sub.dead_letter(&dead);
+        }
+        let mut c = b.subscribe(sub).await.unwrap();
+        let payload: Vec<u8> = (0..=255u8).rev().cycle().take(5000).collect();
+        let sent = OutMessage::new(payload.clone()).key(vec![0u8, 0xff, b'k']).header("x-unicode", "Đơn hàng #42 ✓").header("x-empty", "");
+        b.producer().await.unwrap().publish(&topic, sent.clone()).await.unwrap();
+        let same = |d: &Delivery, what: &str| {
+            assert_eq!(d.payload, sent.payload, "{what}: payload");
+            assert_eq!(d.key, sent.key, "{what}: key");
+            assert_eq!(d.header("x-unicode"), Some("Đơn hàng #42 ✓"), "{what}: header");
+            assert_eq!(d.header("x-empty"), Some(""), "{what}: empty header");
+        };
+        let first = recv(&mut c, "first").await;
+        same(&first, "first delivery");
+        c.nack(&first, true).await.unwrap();
+        let again = recv(&mut c, "again").await;
+        same(&again, "redelivery");
+        assert!(again.redelivered);
+        if let Some(mut dl) = dl {
+            c.nack(&again, false).await.unwrap();
+            let x = recv(&mut dl, "dead letter").await;
+            same(&x, "dead letter");
+            dl.ack(&x).await.unwrap();
+            dl.close().await.unwrap();
+            b.delete_topic(&dead).await.unwrap();
+        } else {
+            c.ack(&again).await.unwrap();
+            eprintln!("n/a: no dead-letter topics (the redelivery half ran)");
+        }
+        c.close().await.unwrap();
+        b.delete_topic(&topic).await.unwrap();
     });
 }
 
