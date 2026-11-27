@@ -28,6 +28,26 @@ pub async fn resolve(host: &str, port: u16) -> io::Result<SocketAddr> {
     .ok_or_else(|| panicked("resolve"))?
 }
 
+/// Every address of `host:port`, in the resolver's order (a name can map to
+/// IPv6 and IPv4 — on Windows `localhost` gives `::1` first — and a server
+/// may listen on one family only, so a client tries them in turn).
+pub async fn resolve_all(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+    let literal = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+    if let Ok(ip) = literal.parse::<IpAddr>() {
+        return Ok(vec![SocketAddr::new(ip, port)]);
+    }
+    let name = host.to_string();
+    rt_core::spawn_blocking(move || {
+        let all: Vec<SocketAddr> = (name.as_str(), port).to_socket_addrs()?.collect();
+        if all.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::NotFound, format!("no address for {name}:{port}")));
+        }
+        Ok(all)
+    })
+    .await
+    .ok_or_else(|| panicked("resolve"))?
+}
+
 /// Read a file (a CA bundle, certificate, key) on the blocking pool.
 pub async fn read_file(path: &Path) -> io::Result<Vec<u8>> {
     let p = path.to_path_buf();

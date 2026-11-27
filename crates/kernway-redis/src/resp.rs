@@ -10,7 +10,7 @@
 //! failed command inside `EXEC`) must not stop the rest of the array from
 //! being read, and a top-level one must still be consumed whole so the
 //! connection stays in step. The connection turns a top-level error into
-//! [`RedisError::Server`](crate::RedisError::Server).
+//! [`RedisError::Server`].
 
 use crate::error::RedisError;
 
