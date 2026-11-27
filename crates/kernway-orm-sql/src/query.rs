@@ -17,6 +17,9 @@ pub(crate) enum Frag {
     Raw(&'static str),
     Ident(&'static str),
     Param(Param),
+    /// `[qual]col IN (values)`, split and/or inlined to fit the backend's
+    /// limits when rendered.
+    In { qual: &'static str, col: &'static str, values: Vec<Param> },
 }
 
 /// Render a [`Spec`] over entity `U`'s fields into fragments, each column
@@ -41,18 +44,12 @@ pub(crate) fn spec_frags<U: Entity>(spec: &Spec, qual: &'static str, out: &mut V
             }
         }
         Spec::In(_, vs) if vs.is_empty() => out.push(Frag::Raw("1 = 0")),
-        Spec::In(f, vs) => {
-            if qcol::<U>(f, qual, out, error) {
-                out.push(Frag::Raw(" IN ("));
-                for (i, v) in vs.iter().enumerate() {
-                    if i > 0 {
-                        out.push(Frag::Raw(", "));
-                    }
-                    out.push(Frag::Param(filter_param::<U>(f, v)));
-                }
-                out.push(Frag::Raw(")"));
+        Spec::In(f, vs) => match column_for_field::<U>(f) {
+            Some(c) => out.push(Frag::In { qual, col: c.name, values: vs.iter().map(|v| filter_param::<U>(f, v)).collect() }),
+            None => {
+                qcol::<U>(f, qual, out, error);
             }
-        }
+        },
         Spec::Between(f, lo, hi) => {
             if qcol::<U>(f, qual, out, error) {
                 out.extend([
@@ -121,7 +118,40 @@ pub(crate) fn push_frags(q: &mut Sql, frags: &[Frag]) {
             Frag::Param(p) => {
                 q.param(p.clone());
             }
+            Frag::In { qual, col, values } => push_in(q, qual, col, values),
         }
+    }
+}
+
+/// `col IN (…)` within the backend's limits: lists longer than its `IN`
+/// limit become `(col IN (…) OR col IN (…))`; integer lists too long to bind
+/// are written as literals (numbers formatted here, never caller text).
+fn push_in(q: &mut Sql, qual: &str, col: &'static str, values: &[Param]) {
+    let d = q.dialect();
+    let inline = values.len() > d.max_bind_params() / 2 && values.iter().all(|v| matches!(v, Param::Int(_) | Param::UInt(_)));
+    let chunks: Vec<&[Param]> = values.chunks(d.max_in_list().max(1)).collect();
+    if chunks.len() > 1 {
+        q.push("(");
+    }
+    for (k, chunk) in chunks.iter().enumerate() {
+        if k > 0 {
+            q.push(" OR ");
+        }
+        q.push(qual).ident(col).push(" IN (");
+        for (i, v) in chunk.iter().enumerate() {
+            if i > 0 {
+                q.push(", ");
+            }
+            match v {
+                Param::Int(n) if inline => q.push(&n.to_string()),
+                Param::UInt(n) if inline => q.push(&n.to_string()),
+                _ => q.param(v.clone()),
+            };
+        }
+        q.push(")");
+    }
+    if chunks.len() > 1 {
+        q.push(")");
     }
 }
 

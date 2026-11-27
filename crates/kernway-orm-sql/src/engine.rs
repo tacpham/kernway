@@ -32,6 +32,10 @@ impl Sql {
         self.text.push_str(&q);
         self
     }
+    /// The dialect the statement is written in.
+    pub fn dialect(&self) -> &'static dyn SqlDialect {
+        self.dialect
+    }
     /// Append a placeholder bound to `p`.
     pub fn param(&mut self, p: Param) -> &mut Self {
         self.params.push(p);
@@ -252,17 +256,23 @@ where
             }
         }
     }
-    if all_new_auto && entities.len() > 1 {
+    let mut out = Vec::with_capacity(entities.len());
+    let mut rest = entities;
+    if all_new_auto && rest.len() > 1 {
         let d = dialect::<C>();
         let cols = insert_cols::<T>();
-        let mut q = insert_head::<T>(d);
-        for (i, e) in entities.iter().enumerate() {
-            if i > 0 {
-                q.push(", ");
+        // As many rows per INSERT as the backend's parameter limit allows.
+        let per = (d.max_bind_params() / cols.len().max(1)).max(1);
+        while rest.len() > 1 {
+            let n = rest.len().min(per);
+            let mut q = insert_head::<T>(d);
+            for (i, e) in rest[..n].iter().enumerate() {
+                if i > 0 {
+                    q.push(", ");
+                }
+                q.push("(").param_list(row_params(e, &cols)?).push(")");
             }
-            q.push("(").param_list(row_params(e, &cols)?).push(")");
-        }
-        if let Some(first) = c.insert_batch_first_id(&q.text, &q.params, entities.len()).await? {
+            let Some(first) = c.insert_batch_first_id(&q.text, &q.params, n).await? else { break };
             let pk = pk_cols::<T>()[0];
             let mut sel = select_from::<T>(d);
             sel.push(" WHERE ")
@@ -270,18 +280,23 @@ where
                 .push(" BETWEEN ")
                 .param(Param::UInt(first))
                 .push(" AND ")
-                .param(Param::UInt(first + entities.len() as u64 - 1))
+                .param(Param::UInt(first + n as u64 - 1))
                 .push(" ORDER BY ")
                 .ident(pk)
                 .push(" ASC");
-            return c.select::<T>(&sel.text, &sel.params).await;
+            out.extend(c.select::<T>(&sel.text, &sel.params).await?);
+            rest.drain(..n);
         }
     }
-    let mut out = Vec::with_capacity(entities.len());
-    for e in entities {
+    for e in rest {
         out.push(save(c, e).await?);
     }
     Ok(out)
+}
+
+/// How many keys one `IN (…)` statement may carry on this backend.
+fn in_chunk(d: &dyn SqlDialect) -> usize {
+    d.max_in_list().min(d.max_bind_params()).max(1)
 }
 
 /// Load many rows by key (one `IN (…)` for a single-column key).
@@ -307,9 +322,14 @@ where
         .iter()
         .map(|id| id_to_params(id).map(|mut v| v.remove(0)))
         .collect::<Result<_, _>>()?;
-    let mut q = select_from::<T>(dialect::<C>());
-    q.push(" WHERE ").ident(pk_cols::<T>()[0]).push(" IN (").param_list(params).push(")");
-    c.select::<T>(&q.text, &q.params).await
+    let d = dialect::<C>();
+    let mut out = Vec::with_capacity(params.len());
+    for chunk in params.chunks(in_chunk(d)) {
+        let mut q = select_from::<T>(d);
+        q.push(" WHERE ").ident(pk_cols::<T>()[0]).push(" IN (").param_list(chunk.iter().cloned()).push(")");
+        out.extend(c.select::<T>(&q.text, &q.params).await?);
+    }
+    Ok(out)
 }
 
 /// Delete many rows by key (one `IN (…)` for a single-column key).
@@ -332,7 +352,11 @@ where
         .iter()
         .map(|id| id_to_params(id).map(|mut v| v.remove(0)))
         .collect::<Result<_, _>>()?;
-    let mut q = Sql::new(dialect::<C>());
-    q.push("DELETE FROM ").ident(T::table_name()).push(" WHERE ").ident(pk_cols::<T>()[0]).push(" IN (").param_list(params).push(")");
-    c.execute(&q.text, &q.params).await.map(|_| ())
+    let d = dialect::<C>();
+    for chunk in params.chunks(in_chunk(d)) {
+        let mut q = Sql::new(d);
+        q.push("DELETE FROM ").ident(T::table_name()).push(" WHERE ").ident(pk_cols::<T>()[0]).push(" IN (").param_list(chunk.iter().cloned()).push(")");
+        c.execute(&q.text, &q.params).await?;
+    }
+    Ok(())
 }

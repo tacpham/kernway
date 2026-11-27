@@ -103,6 +103,18 @@ pub trait SqlDialect: Send + Sync + 'static {
         false
     }
 
+    /// The most bind parameters one statement may carry. Batch calls split
+    /// their work to stay under it. Default: SQLite's 32,766.
+    fn max_bind_params(&self) -> usize {
+        32_766
+    }
+
+    /// The most values one `IN (…)` list may hold (Oracle: 1,000). Longer
+    /// lists are split into `(c IN (…) OR c IN (…))`.
+    fn max_in_list(&self) -> usize {
+        usize::MAX
+    }
+
     /// The row-window clause appended to a `SELECT` (empty when neither is
     /// set). Default: `LIMIT n` / `OFFSET m` as MySQL, PostgreSQL and SQLite
     /// write it; Oracle overrides with `OFFSET m ROWS FETCH NEXT n ROWS ONLY`.

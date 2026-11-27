@@ -33,6 +33,12 @@ impl SqlDialect for SqlServerDialect {
         false
     }
 
+    /// Error 8003: at most 2,100 parameters per request, `sp_executesql`'s
+    /// own statement and declaration among them; a margin below that.
+    fn max_bind_params(&self) -> usize {
+        2_000
+    }
+
     fn quote_identifier(&self, name: &str) -> String {
         format!("[{}]", name.replace(']', "]]"))
     }

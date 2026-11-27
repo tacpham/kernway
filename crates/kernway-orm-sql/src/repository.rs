@@ -4,7 +4,7 @@ use crate::engine;
 use crate::query::SqlQueryBuilder;
 use crate::SqlConnect;
 use kernway_orm_core::{entity::Entity, error::OrmError, query::QueryBuilder, repository::Repository, BoxFuture};
-use kernway_wire::{Pool, Pooled};
+use kernway_wire::Pool;
 use serde::{de::DeserializeOwned, Serialize};
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -23,13 +23,6 @@ impl<T, C: SqlConnect> SqlRepository<T, C> {
     }
 }
 
-/// Discard the checked-out connection if the error was connection-level.
-fn settle<R, C: SqlConnect>(guard: &mut Pooled<C>, result: Result<R, OrmError>) -> Result<R, OrmError> {
-    if matches!(result, Err(OrmError::Connection(_))) {
-        guard.poison();
-    }
-    result
-}
 
 macro_rules! pooled {
     ($pool:expr, |$c:ident| $body:expr) => {{
@@ -38,7 +31,7 @@ macro_rules! pooled {
             let mut g = crate::db::checkout(&pool).await?;
             let $c = &mut *g;
             let r = $body.await;
-            settle(&mut g, r)
+            crate::db::settle(&mut g, r)
         })
     }};
 }

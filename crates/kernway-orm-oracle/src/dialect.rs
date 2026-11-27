@@ -69,6 +69,15 @@ impl SqlDialect for OracleDialect {
         true
     }
 
+    fn max_bind_params(&self) -> usize {
+        65_535
+    }
+
+    /// ORA-01795: at most 1,000 expressions in a list.
+    fn max_in_list(&self) -> usize {
+        1_000
+    }
+
     fn limit_offset(&self, limit: Option<u64>, offset: u64) -> String {
         let mut s = String::new();
         if offset > 0 || limit.is_some() {

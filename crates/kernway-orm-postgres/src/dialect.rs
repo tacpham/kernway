@@ -27,6 +27,11 @@ impl SqlDialect for PostgresDialect {
         ""
     }
 
+    /// The protocol counts parameters in 16 bits.
+    fn max_bind_params(&self) -> usize {
+        65_535
+    }
+
     fn supports_returning(&self) -> bool {
         true
     }

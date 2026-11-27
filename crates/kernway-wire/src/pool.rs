@@ -6,6 +6,10 @@
 //! released). Each in-flight operation owns its connection exclusively, so there
 //! is no shared-mutable-connection hazard across await points. A connection the
 //! driver marks broken ([`Pooled::poison`]) is dropped instead of reused.
+//!
+//! When the server refuses an *extra* connection (too many sessions, a
+//! listener throttling a burst) while others are open, callers wait for one of
+//! those instead of failing; growth is retried after [`GROWTH_BACKOFF`].
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -14,6 +18,11 @@ use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant};
+
+/// How long the pool stops growing after the server refused a connection
+/// while others were open.
+pub const GROWTH_BACKOFF: Duration = Duration::from_secs(5);
 
 /// How a driver opens one connection for the [`Pool`].
 pub trait Connect {
@@ -31,7 +40,13 @@ pub struct Pool<C: Connect> {
     idle: RefCell<Vec<C::Conn>>,
     waiters: RefCell<VecDeque<Waker>>,
     open: Cell<usize>,
+    /// Connections still being opened (counted in `open`).
+    connecting: Cell<usize>,
+    /// Connections opened over the pool's life.
+    opened: Cell<u64>,
     max: usize,
+    /// Growth limited to the connections open when a connect failed, until then.
+    held: Cell<Option<(usize, Instant)>>,
 }
 
 impl<C: Connect> Pool<C> {
@@ -43,8 +58,24 @@ impl<C: Connect> Pool<C> {
             idle: RefCell::new(Vec::new()),
             waiters: RefCell::new(VecDeque::new()),
             open: Cell::new(0),
+            connecting: Cell::new(0),
+            opened: Cell::new(0),
             max: max.max(1),
+            held: Cell::new(None),
         })
+    }
+
+    /// The current growth limit: `max`, or less for a while after the server
+    /// refused a connection.
+    fn limit(&self) -> usize {
+        match self.held.get() {
+            Some((n, until)) if Instant::now() < until => n.max(1),
+            Some(_) => {
+                self.held.set(None);
+                self.max
+            }
+            None => self.max,
+        }
     }
 
     /// The connector this pool opens connections with.
@@ -59,6 +90,12 @@ impl<C: Connect> Pool<C> {
         Ok(())
     }
 
+    /// Connections opened over the pool's life: stays flat while connections
+    /// are reused.
+    pub fn connections_opened(&self) -> u64 {
+        self.opened.get()
+    }
+
     /// Connections currently open (idle or checked out).
     pub fn open_connections(&self) -> usize {
         self.open.get()
@@ -71,14 +108,29 @@ impl<C: Connect> Pool<C> {
             if let Some(conn) = self.idle.borrow_mut().pop() {
                 return Ok(Pooled::new(conn, self));
             }
-            if self.open.get() < self.max {
+            if self.open.get() < self.limit() {
                 self.open.set(self.open.get() + 1);
-                match self.connector.connect().await {
-                    Ok(conn) => return Ok(Pooled::new(conn, self)),
+                self.connecting.set(self.connecting.get() + 1);
+                let r = self.connector.connect().await;
+                self.connecting.set(self.connecting.get() - 1);
+                match r {
+                    Ok(conn) => {
+                        self.opened.set(self.opened.get() + 1);
+                        return Ok(Pooled::new(conn, self));
+                    }
                     Err(e) => {
                         self.open.set(self.open.get() - 1);
-                        self.wake_one(); // free the grow slot for a waiter to retry
-                        return Err(e);
+                        // Established connections only: others still being
+                        // opened may be refused too.
+                        let others = self.open.get() - self.connecting.get();
+                        if others == 0 {
+                            self.wake_one(); // free the grow slot for a waiter to retry
+                            return Err(e);
+                        }
+                        // Others are open: wait for one of them, and stop
+                        // growing for a while.
+                        self.held.set(Some((others, Instant::now() + GROWTH_BACKOFF)));
+                        continue;
                     }
                 }
             }
@@ -157,7 +209,7 @@ impl<C: Connect> Future for WaitForSlot<C> {
     type Output = ();
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let pool = &self.pool;
-        if !pool.idle.borrow().is_empty() || pool.open.get() < pool.max {
+        if !pool.idle.borrow().is_empty() || pool.open.get() < pool.limit() {
             Poll::Ready(())
         } else {
             pool.waiters.borrow_mut().push_back(cx.waker().clone());
@@ -194,6 +246,31 @@ mod tests {
 
     fn block<F: Future<Output = ()>>(f: F) {
         rt_core::Executor::new().unwrap().block_on(f).unwrap();
+    }
+
+    #[test]
+    fn a_refused_extra_connection_waits_for_an_open_one() {
+        block(async {
+            let p = pool(4);
+            let first = p.acquire().await.unwrap();
+            assert_eq!(*first, 1);
+            p.connector().fail.set(true); // the server takes no more sessions
+            let p2 = Rc::clone(&p);
+            let got = Rc::new(Cell::new(0));
+            let g = Rc::clone(&got);
+            rt_core::spawn(async move { g.set(*p2.acquire().await.expect("waits, does not fail")) });
+            rt_core::sleep(Duration::from_millis(20)).await;
+            assert_eq!(got.get(), 0, "still waiting");
+            drop(first);
+            rt_core::sleep(Duration::from_millis(20)).await;
+            assert_eq!(got.get(), 1, "handed the released connection");
+            assert_eq!(p.open_connections(), 1);
+            assert_eq!(p.connections_opened(), 1);
+            // With nothing open there is nothing to wait for: the error surfaces.
+            let empty = pool(2);
+            empty.connector().fail.set(true);
+            assert!(empty.acquire().await.is_err());
+        });
     }
 
     #[test]

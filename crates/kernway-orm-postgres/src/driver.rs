@@ -53,9 +53,11 @@ impl PostgresDriver {
 
     async fn with_conn<R>(&self, f: impl AsyncFnOnce(&mut Conn) -> Result<R, OrmError>) -> Result<R, OrmError> {
         let mut g = self.db.pool().acquire().await?;
+        // Discarded if this future is dropped half-way (a COPY mid-stream).
+        g.poison();
         let r = f(&mut g).await;
-        if g.is_broken() || g.in_transaction() {
-            g.poison();
+        if !(g.is_broken() || g.in_transaction()) {
+            g.mark_healthy();
         }
         r
     }

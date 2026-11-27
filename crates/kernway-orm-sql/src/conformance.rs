@@ -93,6 +93,20 @@ pub struct Tag {
     pub label: String,
 }
 
+/// Optional and narrow numeric columns (`Option<i64>` once decoded as text).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[entity(table = "conf_optionals")]
+pub struct Optionals {
+    #[id(strategy = "auto")]
+    pub id: i64,
+    pub small: i32,
+    pub maybe_i64: Option<i64>,
+    pub maybe_i32: Option<i32>,
+    pub maybe_f64: Option<f64>,
+    pub maybe_bool: Option<bool>,
+    pub maybe_text: Option<String>,
+}
+
 fn block<F: Future<Output = ()>>(f: F) {
     rt_core::Executor::new().expect("executor").block_on(f).expect("executor run");
 }
@@ -125,6 +139,11 @@ pub fn run_all<H: Harness>(h: H) {
         ("execute_many_failure_semantics", execute_many_failure_semantics::<H>),
         ("server_cursors", server_cursors::<H>),
         ("cancelled_transactions_leave_the_pool_clean", cancelled_transactions_leave_the_pool_clean::<H>),
+        ("connections_are_reused", connections_are_reused::<H>),
+        ("optional_and_narrow_columns", optional_and_narrow_columns::<H>),
+        ("many_parameters", many_parameters::<H>),
+        ("failed_statements_leave_connections_usable", failed_statements_leave_connections_usable::<H>),
+        ("one_pool_many_concurrent_tasks", one_pool_many_concurrent_tasks::<H>),
     ] {
         eprintln!("conformance: {name}");
         scenario(h.clone());
@@ -789,5 +808,206 @@ fn cancelled_transactions_leave_the_pool_clean<H: Harness>(h: H) {
         let all = repo.find_all().await.unwrap();
         assert_eq!(all.len(), 12, "nothing of the abandoned transactions was committed");
         assert!(all.iter().all(|i| i.name.starts_with("after")));
+    });
+}
+
+/// `Option<number>` and `i32` columns: NULL and values at the edges round
+/// trip, can be filtered on, and change between NULL and a value.
+fn optional_and_narrow_columns<H: Harness>(h: H) {
+    block(async move {
+        let db = h.connect().await;
+        fresh_table::<Optionals, H>(&h, &db).await;
+        let repo = db.repository::<Optionals>();
+        let none = Optionals { id: 0, small: 0, maybe_i64: None, maybe_i32: None, maybe_f64: None, maybe_bool: None, maybe_text: None };
+        let cases = [
+            none.clone(),
+            Optionals {
+                small: i32::MAX,
+                maybe_i64: Some(i64::MAX),
+                maybe_i32: Some(i32::MIN),
+                maybe_f64: Some(-1.5),
+                maybe_bool: Some(false),
+                maybe_text: Some("x".into()),
+                ..none.clone()
+            },
+            Optionals { small: i32::MIN, maybe_i64: Some(0), maybe_i32: Some(0), maybe_f64: Some(0.0), maybe_bool: Some(true), ..none.clone() },
+            Optionals { small: -7, maybe_i64: Some(i64::MIN), maybe_i32: Some(i32::MAX), ..none.clone() },
+        ];
+        let mut ids = Vec::new();
+        for c in cases {
+            let saved = repo.save(c.clone()).await.unwrap_or_else(|e| panic!("save {c:?}: {e}"));
+            let got = repo.find_by_id(&saved.id).await.unwrap().unwrap();
+            assert_eq!(got, Optionals { id: saved.id, ..c }, "round trip");
+            ids.push(saved.id);
+        }
+        let n = |f: Box<dyn kernway_orm_core::query::QueryBuilder<Optionals>>| async move { f.fetch_count().await.unwrap() };
+        assert_eq!(n(repo.query().filter_is_null("maybe_i64")).await, 1);
+        assert_eq!(n(repo.query().filter_is_null("maybe_bool")).await, 2);
+        assert_eq!(n(repo.query().filter_eq("maybe_bool", "false")).await, 1);
+        assert_eq!(n(repo.query().filter_gt("maybe_i32", "-1")).await, 2);
+        assert_eq!(n(repo.query().filter_lt("small", "0")).await, 2);
+        // A value becomes NULL and back.
+        let mut row = repo.find_by_id(&ids[1]).await.unwrap().unwrap();
+        row.maybe_i64 = None;
+        row.maybe_bool = None;
+        repo.save(row.clone()).await.unwrap();
+        assert_eq!(repo.find_by_id(&ids[1]).await.unwrap().unwrap(), row);
+        row.maybe_i64 = Some(42);
+        repo.save(row.clone()).await.unwrap();
+        assert_eq!(repo.find_by_id(&ids[1]).await.unwrap().unwrap(), row);
+        // Mapped from hand-written SQL too.
+        let d = h.dialect();
+        let all: Vec<Optionals> = db.query_as(&format!("SELECT * FROM {}", d.quote_identifier("conf_optionals")), &[]).await.unwrap();
+        assert_eq!(all.len(), 4);
+        assert!(all.iter().any(|o| o.maybe_i64.is_none() && o.maybe_f64.is_none()));
+    });
+}
+
+/// Batch calls with more values than one statement can bind on some
+/// backends (SQL Server: 2,100 parameters; Oracle: 1,000 expressions in an
+/// `IN` list) are split, not refused.
+fn many_parameters<H: Harness>(h: H) {
+    block(async move {
+        let db = h.connect().await;
+        fresh_table::<Item, H>(&h, &db).await;
+        let repo = db.repository::<Item>();
+        const N: usize = 2500;
+        let rows: Vec<Item> = (0..N).map(|i| item(&format!("p{i:04}"), i as i64, 0.5, i % 3 == 0, None)).collect();
+        let saved = repo.save_all(rows).await.unwrap_or_else(|e| panic!("save_all {N} rows: {e}"));
+        assert_eq!(saved.len(), N);
+        assert!(saved.iter().enumerate().all(|(i, s)| s.qty == i as i64), "in input order");
+        let ids: Vec<i64> = saved.iter().map(|s| s.id).collect();
+        let found = repo.find_all_by_ids(&ids).await.unwrap_or_else(|e| panic!("find_all_by_ids {N}: {e}"));
+        assert_eq!(found.len(), N);
+        let values: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+        assert_eq!(repo.query().filter_in("id", values).fetch_count().await.unwrap_or_else(|e| panic!("filter_in {N}: {e}")), N as u64);
+        // A text list longer than Oracle's 1,000 (bound, split with OR).
+        let names: Vec<String> = (0..1500).map(|i| format!("p{i:04}")).collect();
+        assert_eq!(repo.query().filter_in("name", names).fetch_count().await.unwrap_or_else(|e| panic!("filter_in 1500 names: {e}")), 1500);
+        let page = repo.query().filter_in("id", ids.iter().map(|i| i.to_string()).collect()).order_by_desc("qty").fetch_page(0, 3).await.unwrap();
+        assert_eq!((page.total, page.items.iter().map(|i| i.qty).collect::<Vec<_>>()), (N as u64, vec![2499, 2498, 2497]));
+        repo.delete_all_by_ids(&ids[..2000]).await.unwrap_or_else(|e| panic!("delete_all_by_ids 2000: {e}"));
+        assert_eq!(repo.count().await.unwrap(), (N - 2000) as u64);
+        assert_eq!(repo.find_all().await.unwrap().iter().map(|i| i.qty).min(), Some(2000));
+    });
+}
+
+/// A statement that fails — before any row, or after rows were already sent
+/// — leaves its connection in sync: later statements get their own answers.
+fn failed_statements_leave_connections_usable<H: Harness>(h: H) {
+    block(async move {
+        let db = h.connect().await;
+        fresh_table::<Item, H>(&h, &db).await;
+        let repo = db.repository::<Item>();
+        for i in 1..=6i64 {
+            repo.save(item(&format!("e{i}"), i, 0.0, false, None)).await.unwrap();
+        }
+        let d = h.dialect();
+        let q = |s: &str| d.quote_identifier(s);
+        let (t, name, qty) = (q("conf_items"), q("name"), q("qty"));
+        let check = |round: usize| {
+            let db = db.deref().clone();
+            let (t, name, qty) = (t.clone(), name.clone(), qty.clone());
+            async move {
+                for i in 1..=6i64 {
+                    let got = db
+                        .query_scalar(&format!("SELECT {name} FROM {t} WHERE {qty} = {}", d.placeholder(1)), params![i])
+                        .await
+                        .unwrap_or_else(|e| panic!("round {round}: query {i}: {e}"));
+                    assert_eq!(got.as_str(), Some(format!("e{i}").as_str()), "round {round}: answer {i} out of step");
+                }
+            }
+        };
+        for round in 0..3 {
+            // Refused before execution.
+            assert!(db.query("SELECT * FROM kw_no_such_table", &[]).await.is_err());
+            assert!(db.execute("THIS IS NOT SQL").await.is_err());
+            // Fails while rows stream: the third row divides by zero where the
+            // backend raises it (some return NULL instead — also fine).
+            let _ = db.query(&format!("SELECT {qty}, 10 / ({qty} - 3) FROM {t} ORDER BY {qty}"), &[]).await;
+            let _ = db.cursor(&format!("SELECT {qty}, 10 / ({qty} - 3) FROM {t} ORDER BY {qty}"), &[]).await;
+            check(round).await;
+        }
+        assert_eq!(repo.query().filter_like("name", "e%").fetch_count().await.unwrap(), 6);
+    });
+}
+
+/// Many tasks on one executor share one pool: every task gets its own
+/// answers, none waits forever.
+fn one_pool_many_concurrent_tasks<H: Harness>(h: H) {
+    block(async move {
+        let db = h.connect().await;
+        fresh_table::<Item, H>(&h, &db).await;
+        const TASKS: i64 = 24;
+        const ROUNDS: i64 = 5;
+        let done = std::rc::Rc::new(std::cell::Cell::new(0));
+        for t in 0..TASKS {
+            let (db, done) = (db.deref().clone(), done.clone());
+            rt_core::spawn(async move {
+                let repo = db.repository::<Item>();
+                for r in 0..ROUNDS {
+                    let name = format!("t{t}-r{r}");
+                    let saved = repo.save(item(&name, t * 100 + r, 0.0, t % 2 == 0, Some(&name))).await.unwrap();
+                    let got = repo.find_by_id(&saved.id).await.unwrap().unwrap();
+                    assert_eq!(got.name, name, "task {t} got another task's row");
+                    let mine = repo.query().filter_like("name", &format!("t{t}-%")).fetch_count().await.unwrap();
+                    assert_eq!(mine, (r + 1) as u64, "task {t} round {r}");
+                    if r % 2 == 1 {
+                        rt_core::sleep(std::time::Duration::from_millis(1)).await;
+                    }
+                }
+                done.set(done.get() + 1);
+            });
+        }
+        let by = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while done.get() < TASKS && std::time::Instant::now() < by {
+            rt_core::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(done.get(), TASKS, "every task finished");
+        assert_eq!(db.repository::<Item>().count().await.unwrap(), (TASKS * ROUNDS) as u64);
+    });
+}
+
+/// Every kind of call — repository, query builder, hand-written SQL,
+/// transactions, cursors, failed statements — hands its connection back to
+/// the pool: run one after another, they never open a second connection.
+fn connections_are_reused<H: Harness>(h: H) {
+    block(async move {
+        let db = h.connect().await;
+        fresh_table::<Item, H>(&h, &db).await;
+        let repo = db.repository::<Item>();
+        let d = h.dialect();
+        let t = d.quote_identifier("conf_items");
+        let before = db.pool().connections_opened();
+        for i in 0..5i64 {
+            let saved = repo.save(item(&format!("u{i}"), i, 0.0, true, None)).await.unwrap();
+            repo.find_by_id(&saved.id).await.unwrap().unwrap();
+            repo.save_all(vec![item("a", 1, 0.0, false, None), item("b", 2, 0.0, false, None)]).await.unwrap();
+            repo.find_all_by_ids(&[saved.id]).await.unwrap();
+            repo.count().await.unwrap();
+            repo.exists_by_id(&saved.id).await.unwrap();
+            repo.find_all().await.unwrap();
+            repo.query().filter_gt("qty", "0").fetch_all().await.unwrap();
+            repo.query().filter_gt("qty", "0").fetch_count().await.unwrap();
+            repo.query().order_by_asc("qty").fetch_page(0, 2).await.unwrap();
+            db.query(&format!("SELECT COUNT(*) FROM {t}"), &[]).await.unwrap();
+            db.query_scalar(&format!("SELECT COUNT(*) FROM {t}"), &[]).await.unwrap();
+            db.execute_with(&format!("UPDATE {t} SET {} = {}", d.quote_identifier("price"), d.placeholder(1)), params![1.5]).await.unwrap();
+            let mut cur = db.cursor(&format!("SELECT {} FROM {t}", d.quote_identifier("qty")), &[]).await.unwrap();
+            while cur.next_batch(3).await.unwrap().is_some() {}
+            db.transaction(move |tx| {
+                Box::pin(async move {
+                    tx.repository::<Item>().save(item("tx", 9, 0.0, false, None)).await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+            let _: Result<(), OrmError> = db.transaction(|_tx| Box::pin(async { Err(OrmError::Query("rolled back".into())) })).await;
+            assert!(db.query("SELECT * FROM kw_no_such_table", &[]).await.is_err());
+            repo.delete_by_id(&saved.id).await.unwrap();
+        }
+        let opened = db.pool().connections_opened() - before;
+        assert_eq!(opened, 0, "{opened} connections opened for calls made one after another: some call discards its connection");
     });
 }

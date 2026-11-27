@@ -58,9 +58,11 @@ impl MySqlDriver {
     /// ```
     pub async fn load_local_infile(&self, sql: &str, data: &[u8]) -> Result<u64, OrmError> {
         let mut g = self.db.pool().acquire().await?;
+        // Discarded if this future is dropped half-way (data mid-upload).
+        g.poison();
         let r = g.load_local_infile(sql, data).await;
-        if matches!(r, Err(OrmError::Connection(_))) {
-            g.poison();
+        if !matches!(r, Err(OrmError::Connection(_))) {
+            g.mark_healthy();
         }
         r
     }
