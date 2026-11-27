@@ -101,7 +101,10 @@ mod tests {
         // not a just-freed ephemeral port: Windows hands ephemeral ports out
         // in order, so connecting to one just closed can pick it as the
         // source port and connect the socket to itself.
-        let e = run(connect_tcp("localhost", 1)).err().expect("nothing listens on port 1");
+        let e = match run(connect_tcp("localhost", 1)) {
+            Err(e) => e,
+            Ok(s) => panic!("nothing listens on port 1, yet connected: peer {:?}, local {:?}", s.peer_addr(), s.local_addr()),
+        };
         assert!(e.to_string().contains("127.0.0.1:1"), "{e}");
         let e = run(connect_tcp("kernway-no-such-host.invalid", 1)).err().unwrap();
         assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e}");

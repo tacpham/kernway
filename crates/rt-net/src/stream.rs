@@ -408,6 +408,24 @@ mod split_tests {
     use std::rc::Rc;
     use std::time::Duration;
 
+    /// Connecting where nothing listens is an error on every OS — over IPv4
+    /// and IPv6 loopback — not a stream that fails later.
+    #[test]
+    fn connecting_to_a_closed_port_is_refused() {
+        let ex = Executor::new().unwrap();
+        for addr in ["127.0.0.1:1", "[::1]:1"] {
+            let addr: SocketAddr = addr.parse().unwrap();
+            let r = ex.block_on(async move { AsyncTcpStream::connect(addr).await }).unwrap();
+            match r {
+                Err(e) => assert!(
+                    matches!(e.kind(), io::ErrorKind::ConnectionRefused | io::ErrorKind::AddrNotAvailable | io::ErrorKind::NetworkUnreachable),
+                    "{addr}: {e:?}"
+                ),
+                Ok(s) => panic!("{addr}: nothing listens, yet connected: peer {:?}, local {:?}", s.peer_addr(), s.local_addr()),
+            }
+        }
+    }
+
     /// A reader task parked on `read` must not block a writer task on the same
     /// socket: the server greets the client while its reader is already waiting.
     #[test]
