@@ -85,6 +85,10 @@ impl AsyncTcpStream {
                 return Err(err);
             }
             match stream.inner.peer_addr() {
+                // Windows reports the peer of a socket that is still
+                // connecting; a connected socket always has a concrete local
+                // address, an unfinished one 0.0.0.0 / ::. Keep waiting.
+                Ok(_) if stream.inner.local_addr().map_or(true, |a| a.ip().is_unspecified()) => continue,
                 Ok(_) => return Ok(stream),
                 // Still in progress — wait for the next writable edge.
                 Err(e) if e.kind() == io::ErrorKind::NotConnected => continue,
@@ -423,6 +427,28 @@ mod split_tests {
                 ),
                 Ok(s) => panic!("{addr}: nothing listens, yet connected: peer {:?}, local {:?}", s.peer_addr(), s.local_addr()),
             }
+        }
+    }
+
+    /// Several refused connects in a row on one task — what a client trying
+    /// each address of a name does. On Windows the second one was taken for
+    /// connected: a wake came early and `peer_addr` answers for a socket
+    /// still connecting.
+    #[test]
+    fn refused_connects_in_a_row_are_each_refused() {
+        let ex = Executor::new().unwrap();
+        let results = ex
+            .block_on(async {
+                let mut out = Vec::new();
+                for addr in ["[::1]:1", "127.0.0.1:1", "[::1]:1", "127.0.0.1:1"] {
+                    let addr: SocketAddr = addr.parse().unwrap();
+                    out.push((addr, AsyncTcpStream::connect(addr).await.map(|s| (s.peer_addr().ok(), s.local_addr().ok()))));
+                }
+                out
+            })
+            .unwrap();
+        for (addr, r) in results {
+            assert!(r.is_err(), "{addr}: nothing listens, yet connected (peer, local) = {r:?}");
         }
     }
 
