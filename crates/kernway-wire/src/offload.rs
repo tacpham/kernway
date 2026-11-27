@@ -48,6 +48,31 @@ pub async fn resolve_all(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
     .ok_or_else(|| panicked("resolve"))?
 }
 
+/// Connect to `host:port`, trying every address the name resolves to in
+/// order until one accepts. A name often maps to both `::1` and
+/// `127.0.0.1` (`localhost`; Windows lists IPv6 first) while a server
+/// listens on one family only — taking just the first address would fail
+/// there. When every address refuses, the error names each attempt.
+pub async fn connect_tcp(host: &str, port: u16) -> io::Result<rt_net::AsyncTcpStream> {
+    // A name that does not resolve is `NotFound`, whatever the OS reports,
+    // so callers can tell it from a refused connection.
+    let addrs = resolve_all(host, port)
+        .await
+        .map_err(|e| io::Error::new(io::ErrorKind::NotFound, format!("resolve {host}:{port}: {e}")))?;
+    let mut failures = Vec::new();
+    let mut kind = io::ErrorKind::ConnectionRefused;
+    for addr in &addrs {
+        match rt_net::AsyncTcpStream::connect(*addr).await {
+            Ok(s) => return Ok(s),
+            Err(e) => {
+                kind = e.kind();
+                failures.push(format!("{addr}: {e}"));
+            }
+        }
+    }
+    Err(io::Error::new(kind, failures.join("; ")))
+}
+
 /// Read a file (a CA bundle, certificate, key) on the blocking pool.
 pub async fn read_file(path: &Path) -> io::Result<Vec<u8>> {
     let p = path.to_path_buf();
@@ -60,6 +85,24 @@ mod tests {
 
     fn run<T>(f: impl std::future::Future<Output = T>) -> T {
         rt_core::Executor::new().unwrap().block_on(f).unwrap()
+    }
+
+    #[test]
+    fn connect_tcp_tries_every_address_of_a_name() {
+        // A server on IPv4 loopback only, reached by the name `localhost`
+        // (which resolves to ::1 first on macOS and Windows).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = std::thread::spawn(move || listener.accept().map(|_| ()));
+        let s = run(connect_tcp("localhost", port)).expect("connects over IPv4 after ::1 refuses");
+        assert_eq!(s.peer_addr().unwrap(), format!("127.0.0.1:{port}").parse().unwrap());
+        accepted.join().unwrap().unwrap();
+        // Nothing listening: the error names every address tried.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let e = run(connect_tcp("localhost", closed)).err().unwrap();
+        assert!(e.to_string().contains(&format!("127.0.0.1:{closed}")), "{e}");
+        let e = run(connect_tcp("kernway-no-such-host.invalid", 1)).err().unwrap();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e}");
     }
 
     #[test]

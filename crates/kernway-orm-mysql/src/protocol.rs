@@ -32,7 +32,6 @@ pub use kernway_orm_core::decode::Cell;
 use kernway_orm_core::decode::recycle;
 use kernway_tls::CertCheck;
 use kernway_wire::{BufStream, StmtCache, READ_RETAIN};
-use rt_net::AsyncTcpStream;
 
 // --- Capability flags (only the ones we assert) ---
 const CLIENT_LONG_PASSWORD: u32 = 0x0000_0001;
@@ -400,8 +399,8 @@ impl Conn {
         if let Some(local) = &cfg.socket {
             return Self::connect_local(cfg, local).await;
         }
-        let addr = resolve(&cfg.host, cfg.port).await?;
-        let stream = AsyncTcpStream::connect(addr)
+        // Every address of the name in turn (off the shard: DNS on the blocking pool).
+        let stream = kernway_wire::offload::connect_tcp(&cfg.host, cfg.port)
             .await
             .map_err(|e| conn_err(format!("connect {}:{} failed: {e}", cfg.host, cfg.port)))?;
         let mut conn = Self::over(BufStream::new(stream));
@@ -1281,10 +1280,6 @@ async fn read_file(path: &std::path::Path, what: &'static str) -> Result<Vec<u8>
     kernway_wire::offload::read_file(path).await.map_err(|e| conn_err(format!("read {what} {}: {e}", path.display())))
 }
 
-/// The address of `host:port`, resolved off the shard.
-async fn resolve(host: &str, port: u16) -> Result<std::net::SocketAddr, OrmError> {
-    kernway_wire::offload::resolve(host, port).await.map_err(|e| conn_err(format!("resolve {host}:{port} failed: {e}")))
-}
 
 /// Open the server's local channel.
 #[cfg(unix)]

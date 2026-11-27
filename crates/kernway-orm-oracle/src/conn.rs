@@ -5,7 +5,6 @@ use std::collections::HashMap;
 
 use kernway_orm_core::error::OrmError;
 use kernway_wire::BufStream;
-use rt_net::AsyncTcpStream;
 
 use crate::auth_crypto::{self, ServerChallenge};
 use crate::buf::{ParseError, PResult, Reader, Writer};
@@ -264,10 +263,9 @@ impl Conn {
     /// Open a session: TCP connect, TNS connect, negotiate, authenticate.
     pub async fn connect(cfg: &OracleConfig) -> Result<Self, OrmError> {
         // Nothing blocks the shard: a host name resolves on the blocking pool.
-        let addr = kernway_wire::offload::resolve(&cfg.host, cfg.port)
-            .await
-            .map_err(|e| conn_err(format!("resolve {}:{}: {e}", cfg.host, cfg.port)))?;
-        let tcp = AsyncTcpStream::connect(addr)
+        // Every address of the name in turn (a name can resolve to IPv6 first
+        // while the listener is IPv4 only).
+        let tcp = kernway_wire::offload::connect_tcp(&cfg.host, cfg.port)
             .await
             .map_err(|e| conn_err(format!("connect {}:{}: {e}", cfg.host, cfg.port)))?;
         let mut io = BufStream::new(tcp);

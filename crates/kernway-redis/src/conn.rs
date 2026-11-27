@@ -127,26 +127,12 @@ impl Connection {
         }
         let io = match &opts.endpoint {
             Endpoint::Tcp { host, port } => {
-                let addrs = kernway_wire::offload::resolve_all(host, *port)
-                    .await
-                    .map_err(|e| RedisError::Config(format!("resolve {host}:{port}: {e}")))?;
-                // Each address in turn: the server may listen on IPv4 only
-                // while the name resolves to IPv6 first.
-                let mut last = None;
-                let mut tcp = None;
-                for a in addrs {
-                    match AsyncTcpStream::connect(a).await {
-                        Ok(s) => {
-                            tcp = Some(s);
-                            break;
-                        }
-                        Err(e) => last = Some(e),
-                    }
-                }
-                let tcp = match tcp {
-                    Some(t) => t,
-                    None => return Err(RedisError::Io(last.unwrap_or_else(|| std::io::Error::other("no address")))),
-                };
+                // Every address of the name in turn: the server may listen on
+                // IPv4 only while the name resolves to IPv6 first.
+                let tcp = kernway_wire::offload::connect_tcp(host, *port).await.map_err(|e| match e.kind() {
+                    std::io::ErrorKind::NotFound => RedisError::Config(e.to_string()),
+                    _ => RedisError::Io(e),
+                })?;
                 tcp.set_nodelay(true).ok();
                 match &opts.tls {
                     None => Transport::Tcp(tcp),
