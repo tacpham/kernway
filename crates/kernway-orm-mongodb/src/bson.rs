@@ -5,6 +5,7 @@
 //! first key). Decoding checks every length against the input and bounds
 //! nesting, so hostile input is an error, never a panic or a huge allocation.
 
+use crate::ordered_json::OJ;
 use std::fmt;
 
 /// Nesting deeper than this is refused (the server's own limit is 100).
@@ -558,6 +559,11 @@ impl Document {
     pub fn to_relaxed_json(&self) -> serde_json::Value {
         Bson::Document(self.clone()).to_relaxed_json()
     }
+
+    /// Relaxed Extended JSON text, keys in the document's order.
+    pub fn to_relaxed_json_string(&self) -> String {
+        Bson::Document(self.clone()).to_relaxed_json_string()
+    }
 }
 
 impl IntoIterator for Document {
@@ -766,8 +772,37 @@ impl Bson {
 
     /// Parse Extended JSON (relaxed or canonical; plain JSON too). JSON
     /// integers become Int32 when they fit, else Int64; other numbers Double.
+    ///
+    /// Document keys come in the order the `serde_json::Value` keeps them —
+    /// sorted, unless serde_json's `preserve_order` feature is on. Parse
+    /// text with [`Bson::parse_extended_json`] to keep the order as written.
     pub fn from_extended_json(v: &serde_json::Value) -> Result<Bson, BsonError> {
-        use serde_json::Value as J;
+        Bson::from_ordered(&OJ::from_value(v))
+    }
+
+    /// Parse Extended JSON text, keeping every document's keys in the order
+    /// they are written (a command's name first, a sort's priorities).
+    pub fn parse_extended_json(text: &str) -> Result<Bson, BsonError> {
+        let v: OJ = serde_json::from_str(text).map_err(|e| BsonError(format!("Extended JSON: {e}")))?;
+        Bson::from_ordered(&v)
+    }
+
+    /// Relaxed Extended JSON text, documents in their own key order.
+    pub fn to_relaxed_json_string(&self) -> String {
+        let mut out = String::new();
+        crate::ordered_json::write(self, false, &mut out);
+        out
+    }
+
+    /// Canonical Extended JSON text, documents in their own key order.
+    pub fn to_canonical_json_string(&self) -> String {
+        let mut out = String::new();
+        crate::ordered_json::write(self, true, &mut out);
+        out
+    }
+
+    pub(crate) fn from_ordered(v: &OJ) -> Result<Bson, BsonError> {
+        use OJ as J;
         let bad = |m: &str| BsonError(format!("Extended JSON: {m}"));
         Ok(match v {
             J::Null => Bson::Null,
@@ -783,7 +818,7 @@ impl Bson {
                 }
             }
             J::String(s) => Bson::String(s.clone()),
-            J::Array(a) => Bson::Array(a.iter().map(Bson::from_extended_json).collect::<Result<_, _>>()?),
+            J::Array(a) => Bson::Array(a.iter().map(Bson::from_ordered).collect::<Result<_, _>>()?),
             J::Object(m) => {
                 let key = |k: &str| m.get(k);
                 let only = |k: &str| m.len() == 1 && m.contains_key(k);
@@ -870,20 +905,20 @@ impl Bson {
                 }
                 if m.len() == 2 && m.contains_key("$code") && m.contains_key("$scope") {
                     let code = key("$code").and_then(J::as_str).ok_or_else(|| bad("bad $code"))?.to_string();
-                    let Bson::Document(scope) = Bson::from_extended_json(&m["$scope"])? else { return Err(bad("bad $scope")) };
+                    let Bson::Document(scope) = Bson::from_ordered(&m["$scope"])? else { return Err(bad("bad $scope")) };
                     return Ok(Bson::JavaScriptCodeWithScope(code, scope));
                 }
                 if only("$dbPointer") {
                     let p = key("$dbPointer").and_then(J::as_object).ok_or_else(|| bad("bad $dbPointer"))?;
                     let ns = p.get("$ref").and_then(J::as_str).ok_or_else(|| bad("bad $dbPointer"))?.to_string();
-                    let Bson::ObjectId(id) = Bson::from_extended_json(p.get("$id").ok_or_else(|| bad("bad $dbPointer"))?)? else {
+                    let Bson::ObjectId(id) = Bson::from_ordered(p.get("$id").ok_or_else(|| bad("bad $dbPointer"))?)? else {
                         return Err(bad("bad $dbPointer.$id"));
                     };
                     return Ok(Bson::DbPointer(ns, id));
                 }
                 let mut d = Document::new();
                 for (k, v) in m {
-                    d.insert(k.clone(), Bson::from_extended_json(v)?);
+                    d.insert(k.clone(), Bson::from_ordered(v)?);
                 }
                 Bson::Document(d)
             }
@@ -1166,36 +1201,39 @@ fn decode_value(t: u8, c: &mut Cur<'_>, depth: usize) -> Result<Bson, BsonError>
 
 /// A serde value as a BSON document, through relaxed Extended JSON
 /// (`ObjectId`, `DateTime`, `Decimal128`, `Binary` serialize to their
-/// `$`-wrappers and come back typed).
+/// `$`-wrappers and come back typed). Fields keep their declaration order:
+/// the value is written as JSON text (in order) and read back ordered —
+/// never through `serde_json::Map`, which sorts.
 pub fn to_document<T: serde::Serialize + ?Sized>(value: &T) -> Result<Document, BsonError> {
-    let j = serde_json::to_value(value).map_err(|e| err(e.to_string()))?;
-    match Bson::from_extended_json(&j)? {
+    let text = serde_json::to_string(value).map_err(|e| err(e.to_string()))?;
+    match Bson::parse_extended_json(&text)? {
         Bson::Document(d) => Ok(d),
         other => Err(err(format!("expected a struct or map, got {other:?}"))),
     }
 }
 
-/// A BSON value as a serde type, through relaxed Extended JSON.
+/// A BSON value as a serde type, through relaxed Extended JSON text (in
+/// document order: a `Document` field comes back in the stored order).
 pub fn from_bson<T: serde::de::DeserializeOwned>(b: &Bson) -> Result<T, BsonError> {
-    serde_json::from_value(b.to_relaxed_json()).map_err(|e| err(e.to_string()))
+    serde_json::from_str(&b.to_relaxed_json_string()).map_err(|e| err(e.to_string()))
 }
 
 /// A BSON document as a serde type.
 pub fn from_document<T: serde::de::DeserializeOwned>(d: &Document) -> Result<T, BsonError> {
-    serde_json::from_value(d.to_relaxed_json()).map_err(|e| err(e.to_string()))
+    serde_json::from_str(&d.to_relaxed_json_string()).map_err(|e| err(e.to_string()))
 }
 
 macro_rules! via_json {
     ($t:ty, $variant:ident) => {
         impl serde::Serialize for $t {
             fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-                Bson::$variant(self.clone()).to_relaxed_json().serialize(s)
+                Bson::$variant(self.clone()).serialize(s)
             }
         }
         impl<'de> serde::Deserialize<'de> for $t {
             fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-                let j = serde_json::Value::deserialize(d)?;
-                match Bson::from_extended_json(&j).map_err(serde::de::Error::custom)? {
+                let j = OJ::deserialize(d)?;
+                match Bson::from_ordered(&j).map_err(serde::de::Error::custom)? {
                     Bson::$variant(v) => Ok(v),
                     other => Err(serde::de::Error::custom(format!(concat!("expected ", stringify!($variant), ", got {:?}"), other))),
                 }
@@ -1210,16 +1248,34 @@ via_json!(Binary, Binary);
 via_json!(Timestamp, Timestamp);
 via_json!(Document, Document);
 
+/// Relaxed Extended JSON; documents as maps in their own key order.
 impl serde::Serialize for Bson {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        self.to_relaxed_json().serialize(s)
+        use serde::ser::{SerializeMap, SerializeSeq};
+        match self {
+            Bson::Document(d) => {
+                let mut m = s.serialize_map(Some(d.len()))?;
+                for (k, v) in d.iter() {
+                    m.serialize_entry(k, v)?;
+                }
+                m.end()
+            }
+            Bson::Array(a) => {
+                let mut q = s.serialize_seq(Some(a.len()))?;
+                for v in a {
+                    q.serialize_element(v)?;
+                }
+                q.end()
+            }
+            other => other.to_relaxed_json().serialize(s),
+        }
     }
 }
 
 impl<'de> serde::Deserialize<'de> for Bson {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let j = serde_json::Value::deserialize(d)?;
-        Bson::from_extended_json(&j).map_err(serde::de::Error::custom)
+        let j = OJ::deserialize(d)?;
+        Bson::from_ordered(&j).map_err(serde::de::Error::custom)
     }
 }
 
@@ -1352,4 +1408,52 @@ mod tests {
         let back: Item = from_document(&Document::from_bytes(&d.to_bytes()).unwrap()).unwrap();
         assert_eq!(back, it);
     }
+
+    #[test]
+    fn key_order_is_kept_through_json_and_serde() {
+        let keys = |b: &Bson| match b {
+            Bson::Document(d) => d.iter().map(|(k, _)| k.to_string()).collect::<Vec<String>>(),
+            other => panic!("not a document: {other:?}"),
+        };
+        // Text in, order kept (serde_json::Map would sort: a, m, z).
+        let b = Bson::parse_extended_json(r#"{"z": 1, "a": {"y": 1, "b": 2}, "m": {"$oid": "5f0c2b8e9d1e8a3c4b5a6978"}}"#).unwrap();
+        assert_eq!(keys(&b), ["z", "a", "m"]);
+        let Bson::Document(d) = &b else { unreachable!() };
+        assert_eq!(keys(d.get("a").unwrap()), ["y", "b"], "nested documents too");
+        assert!(matches!(d.get("m"), Some(Bson::ObjectId(_))), "Extended JSON wrappers still typed");
+        // Text out, order kept.
+        assert_eq!(b.to_relaxed_json_string(), r#"{"z":1,"a":{"y":1,"b":2},"m":{"$oid":"5f0c2b8e9d1e8a3c4b5a6978"}}"#);
+        assert_eq!(serde_json::to_string(&b).unwrap(), b.to_relaxed_json_string(), "Serialize keeps the order");
+        assert_eq!(Bson::Int32(1).to_canonical_json_string(), r#"{"$numberInt":"1"}"#);
+        // A struct: fields in declaration order, a Document field in its own order.
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Ticket {
+            zone: String,
+            amount: i64,
+            meta: Document,
+            items: Vec<Item>,
+        }
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Item {
+            sku: String,
+            cents: i64,
+        }
+        let mut meta = Document::new();
+        meta.insert("tip", Bson::Int32(5));
+        meta.insert("cash", Bson::Boolean(true));
+        let t = Ticket { zone: "A".into(), amount: 10, meta, items: vec![Item { sku: "gel".into(), cents: 3500 }] };
+        let d = to_document(&t).unwrap();
+        assert_eq!(keys(&Bson::Document(d.clone())), ["zone", "amount", "meta", "items"]);
+        assert_eq!(keys(d.get("meta").unwrap()), ["tip", "cash"]);
+        let Some(Bson::Array(items)) = d.get("items") else { panic!() };
+        assert_eq!(keys(&items[0]), ["sku", "cents"]);
+        // And back: a Document field deserializes in its order.
+        let back: Ticket = from_document(&d).unwrap();
+        assert_eq!(keys(&Bson::Document(back.meta)), ["tip", "cash"]);
+        // Duplicate keys: the last value, in the first position.
+        let b = Bson::parse_extended_json(r#"{"a": 1, "b": 2, "a": 3}"#).unwrap();
+        assert_eq!(b.to_relaxed_json_string(), r#"{"a":3,"b":2}"#);
+        assert!(Bson::parse_extended_json("{").is_err());
+    }
+
 }

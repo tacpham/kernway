@@ -30,6 +30,7 @@ mod dns;
 pub mod error;
 mod gridfs;
 pub mod options;
+mod ordered_json;
 pub mod orm;
 pub mod topology;
 mod wire;

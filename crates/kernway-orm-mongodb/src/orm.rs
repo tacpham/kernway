@@ -18,6 +18,7 @@
 //!   conflict instead of losing an update; [`MongoDriver::transaction_retrying`]
 //!   re-runs the work on such transient errors.
 
+use crate::ordered_json::OJ;
 use crate::bson::{Binary, Bson, Document, ObjectId};
 use crate::client::{Client, Session, TransactionOptions};
 use crate::collection::{Collection, Database, FindOneAndModifyOptions, FindOptions, IndexModel, UpdateOptions};
@@ -98,14 +99,23 @@ fn to_json(b: &Bson, c: &ColumnDef) -> J {
 }
 
 fn entity_to_doc<T: Entity + Serialize>(e: &T) -> Result<Document, OrmError> {
-    let j = serde_json::to_value(e).map_err(conv)?;
+    // Through JSON text, read back order-keeping: an object inside a field
+    // (a JSON column) keeps its keys' order (serde_json::Map would sort them).
+    let text = serde_json::to_string(e).map_err(conv)?;
+    let j: OJ = serde_json::from_str(&text).map_err(conv)?;
     let obj = j.as_object().ok_or_else(|| conv("an entity serializes as a JSON object"))?;
+    let field = |c: &ColumnDef| -> Result<Bson, OrmError> {
+        match obj.get(c.field) {
+            None | Some(OJ::Null) => Ok(Bson::Null),
+            Some(v @ (OJ::Object(_) | OJ::Array(_))) if !matches!(c.col_type, ColumnType::Binary) => Bson::from_ordered(v).map_err(conv),
+            Some(v) => to_bson(&v.to_value(), c),
+        }
+    };
     let mut d = Document::new();
-    // _id first.
-    let p = pk::<T>();
-    d.insert("_id", to_bson(obj.get(p.field).unwrap_or(&J::Null), p)?);
+    // _id first, then the columns in declaration order.
+    d.insert("_id", field(pk::<T>())?);
     for c in T::columns().iter().filter(|c| !c.primary_key) {
-        d.insert(c.name, to_bson(obj.get(c.field).unwrap_or(&J::Null), c)?);
+        d.insert(c.name, field(c)?);
     }
     Ok(d)
 }

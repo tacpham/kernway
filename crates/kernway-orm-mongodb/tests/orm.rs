@@ -306,3 +306,60 @@ async fn join_all<F: std::future::Future>(futs: Vec<F>) -> Vec<F::Output> {
     .await;
     out.into_iter().map(Option::unwrap).collect()
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct Detail {
+    zeta: i64,
+    alpha: String,
+    middle: Vec<Line>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct Line {
+    sku: String,
+    cents: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[entity(table = "orm_tickets")]
+struct Ticket {
+    #[id(strategy = "auto")]
+    id: i64,
+    zone: String,
+    detail: Detail,
+    amount: i64,
+}
+
+#[test]
+fn documents_keep_field_order() {
+    let Some(url) = env("KERNWAY_MONGO_URL") else { return };
+    block(async move {
+        let db = driver(&url).await;
+        let repo = db.repository::<Ticket>();
+        let t = Ticket {
+            id: 0,
+            zone: "A".into(),
+            detail: Detail { zeta: 1, alpha: "x".into(), middle: vec![Line { sku: "gel".into(), cents: 3500 }] },
+            amount: 42,
+        };
+        let saved = repo.save(t.clone()).await.unwrap();
+        // The stored document, read raw: _id first, then the declaration
+        // order — nested objects too (sorted keys would be alpha, middle, zeta).
+        let raw = db.database().collection::<kernway_orm_mongodb::Document>("orm_tickets").find_one(doc! {}, Default::default()).await.unwrap().unwrap();
+        let keys = |d: &kernway_orm_mongodb::Document| d.iter().map(|(k, _)| k.to_string()).collect::<Vec<_>>();
+        assert_eq!(keys(&raw), ["_id", "zone", "detail", "amount"]);
+        let Some(kernway_orm_mongodb::Bson::Document(detail)) = raw.get("detail") else { panic!("detail: {raw:?}") };
+        assert_eq!(keys(detail), ["zeta", "alpha", "middle"]);
+        let Some(kernway_orm_mongodb::Bson::Array(lines)) = detail.get("middle") else { panic!() };
+        let Some(kernway_orm_mongodb::Bson::Document(line)) = lines.first() else { panic!() };
+        assert_eq!(keys(line), ["sku", "cents"]);
+        // And it reads back equal.
+        assert_eq!(repo.find_by_id(&saved.id).await.unwrap(), Some(Ticket { id: saved.id, ..t }));
+        // A typed collection insert keeps struct order too.
+        let coll = db.database().collection::<Detail>("orm_details");
+        coll.insert_one(&Detail { zeta: 9, alpha: "y".into(), middle: vec![] }).await.unwrap();
+        let raw = db.database().collection::<kernway_orm_mongodb::Document>("orm_details").find_one(doc! {}, Default::default()).await.unwrap().unwrap();
+        assert_eq!(keys(&raw)[1..], ["zeta", "alpha", "middle"], "after the generated _id");
+        db.database().drop().await.unwrap();
+    });
+}

@@ -15,6 +15,7 @@ BSON | Every type (double incl. NaN / ±∞ / −0, string with NUL, document, a
 BSON | Hostile input refused without panicking or over-allocating (bad lengths, truncation, bad booleans, unknown types, invalid UTF-8, 300-deep nesting) | bson::tests::hostile_input_is_an_error
 BSON | Decimal128 text conversion (exponents, clamping, NaN / Infinity, 34-digit limit), RFC 3339 dates, ObjectIds | bson::tests::decimal128_text, bson::tests::dates_and_ids
 BSON | Extended JSON (canonical and relaxed) and serde: typed structs with ObjectId / DateTime / Decimal128 fields | bson::tests::corpus_round_trips, bson::tests::serde_bridge, every_bson_type_round_trips
+BSON | Field order kept (documents are ordered): Extended JSON text parsed and written in order, structs serialized in declaration order, Document fields read back in stored order, ORM entities stored _id-first then by declaration (nested objects too) — independent of serde_json's preserve_order | bson::tests::key_order_is_kept_through_json_and_serde, documents_keep_field_order
 
 Connection & security | Connection strings: hosts, IPv6, Unix-socket paths, credentials (percent-decoded), every option with validation; bad ones explained | options::tests::connection_strings, options::tests::bad_connection_strings_say_why
 Connection & security | SCRAM-SHA-256 (speculative, in hello) and SCRAM-SHA-1, negotiated by saslSupportedMechs; wrong passwords and mechanisms refused | scram_mechanisms_and_wrong_passwords
