@@ -1,6 +1,6 @@
 [package]
-name = "kernway-orm-postgres"
-description = "PostgreSQL backend for kernway-orm-core (backed by tokio-postgres)"
+name        = "kernway-orm-postgres"
+description = "PostgreSQL for the kernway ORM — a self-written async protocol v3 driver on the Kernway reactor: TLS, SCRAM / MD5, prepared statements, pipelining, cursors, COPY, LISTEN / NOTIFY, on the shared SQL layer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,25 +9,31 @@ license.workspace = true
 kernway-orm-core = { workspace = true }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
-thiserror        = { workspace = true }
 
-# Optional — only compiled when the user enables this backend.
-# Pin to a stable minor version; the API is stable since 0.7.
-tokio-postgres    = { version = "0.7", optional = true }
-deadpool-postgres = { version = "0.12", optional = true }
+# Driver implementation (behind the `postgres` feature): a self-written async
+# wire protocol on the Kernway reactor (rt-net). Outside help is limited to the
+# SHA-2 hashes SCRAM needs and rustls for TLS.
+sha2            = { version = "0.11", optional = true }
+md5             = { package = "md-5", version = "0.11", optional = true }
+kernway-tls     = { workspace = true, optional = true }
+kernway-wire    = { workspace = true, optional = true }
+kernway-orm-sql = { workspace = true, optional = true }
+rt-core         = { workspace = true, optional = true }
+rt-net          = { workspace = true, optional = true }
 
 [features]
 default = []
-# Enable to compile the actual PostgreSQL driver implementation.
-# Without this feature the crate only exports PostgresDialect.
-postgres = ["tokio-postgres", "deadpool-postgres"]
+# The driver. Without it the crate only exports PostgresDialect.
+postgres = ["sha2", "md5", "kernway-tls", "kernway-wire", "kernway-orm-sql", "rt-core", "rt-net"]
 
 [dev-dependencies]
 kernway-orm-macro = { workspace = true }
+kernway-orm-sql   = { workspace = true, features = ["conformance"] }
 rt-core           = { workspace = true }
 
 [lints]
 workspace = true
 
+# docs.rs builds with every feature on, so feature-gated items still appear.
 [package.metadata.docs.rs]
 all-features = true

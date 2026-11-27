@@ -384,7 +384,8 @@ fn raw_sql<H: Harness>(h: H) {
         let d = h.dialect();
         let q = |s: &str| d.quote_identifier(s);
         let (t, name, qty, price, active) = (q("conf_items"), q("name"), q("qty"), q("price"), q("active"));
-        let p = |i: usize| d.placeholder(i);
+        // Placeholders are numbered from 1 ($1, :1), as the engine numbers them.
+        let p = |i: usize| d.placeholder(i + 1);
 
         // Any query, bound parameters, typed values.
         let rows = db

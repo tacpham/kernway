@@ -106,6 +106,14 @@ impl BufStream {
         }
     }
 
+    /// The server's leaf TLS certificate (DER), `None` without TLS.
+    pub fn peer_certificate(&self) -> Option<&[u8]> {
+        match &self.socket {
+            Socket::Tls(s) => s.peer_certificate(),
+            _ => None,
+        }
+    }
+
     /// Whether the session is encrypted.
     #[inline]
     pub fn is_tls(&self) -> bool {

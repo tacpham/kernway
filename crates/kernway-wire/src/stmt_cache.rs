@@ -60,6 +60,13 @@ impl<S: Clone> StmtCache<S> {
         removed
     }
 
+    /// Empty the cache, handing back every statement (for the driver to
+    /// close on the server), oldest first.
+    pub fn drain(&mut self) -> Vec<S> {
+        let order = std::mem::take(&mut self.order);
+        order.into_iter().filter_map(|k| self.map.remove(&k)).collect()
+    }
+
     /// Number of cached statements.
     pub fn len(&self) -> usize {
         self.map.len()

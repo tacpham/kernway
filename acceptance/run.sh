@@ -7,13 +7,14 @@
 #   acceptance/run.sh oracle
 #   acceptance/run.sh sqlite   (embedded: no container, real database files)
 #   acceptance/run.sh redis    (single node, TLS, Sentinel, Cluster — all in Docker)
+#   acceptance/run.sh postgres (PostgreSQL 18 with every auth method and TLS, in Docker)
 #
 # Containers (created if missing; existing ones and their data are reused):
 #   kernway-mysql   mysql:8.0                  host port 3307, root password "secret"
 #   kernway-oracle  gvenzl/oracle-free:23-slim host ports 1521 / 2484 (TCPS)
 # Oracle TCPS needs a wallet once: crates/kernway-orm-oracle/tests/support/oracle-tcps-setup.sh
 set -euo pipefail
-DB="${1:?usage: $0 mysql|oracle|sqlite|redis}"
+DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres}"
 # CI workflow whose jobs for this commit are the cross-OS evidence.
 WORKFLOW=drivers.yml; IMAGE=""; EXTRA=()
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -130,7 +131,19 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     # test runs inside the Redis container (in_container_tests).
     EXTRA=(--include-ignored); SKIP=(--skip unix_socket_)
     ;;
-  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis)" >&2; exit 2 ;;
+  postgres)
+    # Recreated each run (test data only): roles for SCRAM / MD5 / clear-text
+    # / trust / certificate authentication, TLS with a test CA.
+    C="${PG_CONTAINER:-kernway-postgres}"
+    log "PostgreSQL (${PG_IMAGE:-postgres:18-alpine}) with TLS and every auth method"
+    PG_CONTAINER="$C" "$ROOT/crates/kernway-orm-postgres/tests/support/pg-setup.sh" "$WORK/pg-tls" > "$WORK/pg.env"
+    set -a; . "$WORK/pg.env"; set +a
+    VERSION="$(docker exec "$C" postgres --version)"
+    CRATE=kernway-orm-postgres; FEATURES=(--features postgres); TITLE=PostgreSQL
+    # The Unix-socket test runs inside the container (in_container_tests).
+    SKIP=(--skip unix_domain_socket)
+    ;;
+  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres)" >&2; exit 2 ;;
 esac
 
 CMD="cargo test -p $CRATE ${FEATURES[*]+${FEATURES[*]}} --lib --tests -- --test-threads=1 --nocapture ${EXTRA[*]+${EXTRA[*]}} ${SKIP[*]+${SKIP[*]}}"
@@ -168,6 +181,10 @@ in_container_tests() { # test target, name filter, env...
 if [ "$DB" = redis ]; then
   in_container_tests connection unix_socket_ KERNWAY_REDIS_SOCKET=/tmp/redis.sock
   CMD="$CMD; unix_socket_* inside $C"
+fi
+if [ "$DB" = postgres ]; then
+  in_container_tests postgres unix_domain_socket KERNWAY_PG_SOCKET_DIR=/var/run/postgresql KERNWAY_PG_SOCKET_PORT=5432
+  CMD="$CMD; unix_domain_socket inside $C"
 fi
 if [ "$DB" = mysql ]; then
   in_container_tests connection local_socket_ \

@@ -7,6 +7,7 @@ against mocks or another client library's output. One command per database:
 acceptance/run.sh mysql    # -> docs/acceptance/mysql.md
 acceptance/run.sh oracle   # -> docs/acceptance/oracle.md
 acceptance/run.sh sqlite   # -> docs/acceptance/sqlite.md (embedded: no container)
+acceptance/run.sh postgres # -> docs/acceptance/postgres.md (PostgreSQL 18, every auth method, TLS)
 ```
 
 The script creates or reuses the container (data is kept), waits for the

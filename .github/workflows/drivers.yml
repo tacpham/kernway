@@ -137,6 +137,63 @@ jobs:
             ! grep -q "skip:" redis.log
           fi
 
+  # The PostgreSQL driver on every OS against a real server with every
+  # authentication method and TLS (tests/support/pg-setup.sh): Linux runs
+  # PostgreSQL 18 in Docker (its socket directory shared with the runner),
+  # then again on 14, the oldest supported release; macOS a native Homebrew
+  # server (TCP + Unix socket); Windows the runner's own PostgreSQL (TCP).
+  postgres:
+    name: postgres (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: PostgreSQL 18 (Linux, Docker)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: PG_SOCKET_DIR=/tmp/kwpg-sock crates/kernway-orm-postgres/tests/support/pg-setup.sh "$RUNNER_TEMP/pg" >> "$GITHUB_ENV"
+
+      - name: PostgreSQL (macOS, Homebrew)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install postgresql@17 >/dev/null
+          PG_BIN="$(brew --prefix postgresql@17)/bin" crates/kernway-orm-postgres/tests/support/pg-setup.sh "$RUNNER_TEMP/pg" >> "$GITHUB_ENV"
+
+      - name: PostgreSQL (Windows, preinstalled)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: PG_BIN="$(cygpath -u "$PGBIN")" crates/kernway-orm-postgres/tests/support/pg-setup.sh "$RUNNER_TEMP/pg" >> "$GITHUB_ENV"
+
+      - name: PostgreSQL driver — all tests, live
+        shell: bash
+        run: cargo test -p kernway-orm-postgres --features postgres -- --test-threads=1 --nocapture 2>&1 | tee pg.log; test "${PIPESTATUS[0]}" = 0
+
+      - name: Nothing was skipped
+        shell: bash
+        run: |
+          ! grep -q "skip:" pg.log
+          grep -q "test postgres_conforms ... ok" pg.log
+
+      - name: Again on PostgreSQL 14 (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          env="$(PG_IMAGE=postgres:14-alpine PG_PORT=5434 PG_CONTAINER=kernway-postgres-14 \
+            crates/kernway-orm-postgres/tests/support/pg-setup.sh "$RUNNER_TEMP/pg14")"
+          set -a; eval "$env"; set +a
+          unset KERNWAY_PG_SOCKET_DIR
+          cargo test -p kernway-orm-postgres --features postgres -- --test-threads=1 --skip unix_domain_socket --nocapture 2>&1 | tee pg14.log
+          ! grep -q "skip:" pg14.log
+
   # Oracle Database ships a server image for Linux only (no macOS / Windows
   # runner can host one), so the live suite runs here; the client code it
   # exercises is the same on every OS (above: it builds and its unit tests pass

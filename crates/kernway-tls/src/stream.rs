@@ -76,6 +76,12 @@ impl AsyncTlsStream {
         self.flush_tls().await // drain any final records
     }
 
+    /// The server's leaf certificate (DER), once the handshake is done —
+    /// for channel binding (`tls-server-end-point`).
+    pub fn peer_certificate(&self) -> Option<&[u8]> {
+        self.conn.peer_certificates().and_then(|c| c.first()).map(|c| c.as_ref())
+    }
+
     /// Abandon the TLS session (no close_notify) and return the TCP socket, for
     /// protocols that restart TLS from scratch on the same connection (Oracle
     /// TCPS renegotiation). Any undelivered plaintext is discarded.

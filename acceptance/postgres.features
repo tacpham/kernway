@@ -1,0 +1,55 @@
+# PostgreSQL feature catalog for the acceptance report.
+# area | feature | evidence
+# evidence = comma-separated test names (all must pass), or
+#            GAP: <why>  (not implemented — counted against completeness)
+#            N/A: <why> (PostgreSQL has no such feature)
+#
+# Every live test runs against a real PostgreSQL in Docker, set up by
+# crates/kernway-orm-postgres/tests/support/pg-setup.sh: roles for each
+# authentication method, TLS with a test CA whose server certificate names
+# localhost only, and client certificates. CI runs the same suite on Linux
+# (PostgreSQL 18 and 14 in Docker), macOS and Windows (native servers).
+
+Connection & security | URLs: postgres:// and postgresql://, user / password percent-decoded, several hosts, IPv6 literals, Unix-socket directory (host=), port lists, sslmode / sslrootcert / sslcert / sslkey / channel_binding / target_session_attrs / application_name / connect_timeout / options=-c / any other setting; bad ones explained | config::tests::urls, config::tests::bad_urls
+Connection & security | SCRAM-SHA-256 (RFC 7677 vectors, server signature verified, nonce checked), over TLS and plaintext | auth::tests::rfc7677_example, auth::tests::nonce_must_extend_ours, auth::tests::hmac_rfc4231, every_authentication_method
+Connection & security | SCRAM-SHA-256-PLUS channel binding (tls-server-end-point); channel_binding=require refuses plaintext, MD5 and trust | scram_channel_binding
+Connection & security | MD5, clear-text password, trust; wrong passwords refused (28P01) for each; a missing password explained | auth::tests::md5_matches_postgres, every_authentication_method
+Connection & security | TLS: sslmode disable / prefer / require / verify-ca / verify-full — the name check, the chain check, a missing CA file; TLS-only roles (hostssl) | tls_modes_check_what_they_promise, every_authentication_method
+Connection & security | Client-certificate authentication (cert auth, mutual TLS) | every_authentication_method
+Connection & security | Unix-domain socket (inside the PostgreSQL container, and on Linux / macOS CI) | unix_domain_socket, ci::postgres_ubuntu_latest, ci::postgres_macos_latest
+Connection & security | Several hosts tried in turn (a refused one first), every address of a name, target_session_attrs (primary / standby / read-write / read-only / prefer-standby), connect timeout against an address that never answers | hosts_tried_in_turn_and_session_attrs
+Connection & security | Start-up settings (application_name, search_path, statement_timeout), server parameters, version, backend pid | hosts_tried_in_turn_and_session_attrs
+Connection & security | GSSAPI / Kerberos / SSPI authentication | GAP: refused with a clear error; only password, SCRAM, trust and certificate methods are spoken
+Connection & security | SASLprep of non-ASCII passwords | GAP: passwords are sent as given (the server falls back to the raw bytes for passwords SASLprep would reject; a password SASLprep would change does not match)
+Connection & security | libpq environment / files: PGHOST, PGPASSWORD, ~/.pgpass, pg_service.conf, sslnegotiation=direct | GAP: configuration comes from the URL or PgConfig only
+Connection & security | Unix-domain sockets on Windows | GAP: rt-net has no AF_UNIX on Windows; TCP there
+
+Protocol | Extended protocol: Parse / Describe / Bind / Execute / Sync; parameters sent for the type the server resolved; numbers, booleans and bytea in binary, the rest in PostgreSQL's canonical text | values_of_every_common_type, types::tests::params_encode_for_the_target, types::tests::values_by_type
+Protocol | Prepared statements cached per connection, bounded: evicted ones are closed on the server; no cache at all (statement_cache_size=0); a cached statement re-prepared after the table changes shape | statement_cache_is_bounded_and_survives_schema_changes
+Protocol | Simple protocol: several statements in one request, every result typed; COPY through it neither hangs nor desyncs | notices_errors_scripts_and_transactions
+Protocol | Pipelining: a 5 000-row batch in flights of 256 under one Sync (no socket-buffer deadlock); failure semantics as row by row | pipelined_batches_cursors_and_copy, postgres_conforms
+Protocol | Server-side cursors: named portals fetched in batches, inside the caller's transaction or one of their own | pipelined_batches_cursors_and_copy, postgres_conforms
+Protocol | Errors with every field: SQLSTATE, detail, hint, position, constraint; unique and foreign-key violations typed; FATAL / 08xxx / 57Pxx mark the connection broken | protocol::tests::errors_map, notices_errors_scripts_and_transactions, postgres_conforms
+Protocol | Notices (RAISE NOTICE / WARNING) collected | notices_errors_scripts_and_transactions
+Protocol | Logical / physical replication protocol | GAP: no replication connections (replication=database, START_REPLICATION)
+Protocol | A user-facing pipeline of different statements | GAP: pipelining is used for execute_many; a general pipeline API is not exposed
+
+Values | Integers (int2 / int4 / int8 / oid), real and double (shortest decimal form, NaN, ±Infinity), numeric exact as text, booleans, bytea, text in any UTF-8, char(n) padding, json / jsonb, date / time / timestamp / timestamptz (offset normalised) / interval, uuid, inet, NULL | values_of_every_common_type, postgres_conforms, types::tests::values_by_type
+Values | Arrays out (nested, NULL elements, quoting, lower bounds) and in (Param::Array as an array literal for array parameters, as JSON for json parameters) | values_of_every_common_type, types::tests::arrays_parse, types::tests::array_literals_quote
+Values | Parameters of every kind (int, float, bool, text with quotes / backslashes, bytes, NULL, u64 beyond i64 as numeric); a wrong parameter count refused before sending | values_of_every_common_type
+Values | Large binary and text values | postgres_conforms
+Values | Composite types, ranges, geometric and other built-ins | N/A: returned as PostgreSQL's text form (Value::Text), which is exact
+
+ORM (shared layer) | Shared conformance suite (CRUD with identity keys via INSERT … RETURNING, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL, joins / aggregates, execute_many failure semantics, server cursors, cancelled transactions) | postgres_conforms
+ORM (shared layer) | Transactions, row locks (FOR UPDATE) without lost updates, a cancelled transaction never reaches the pool | postgres_conforms
+ORM (shared layer) | Manual transactions on a plain connection; a failed transaction refuses statements and cannot commit (Transaction error, rolled back) | notices_errors_scripts_and_transactions
+
+PostgreSQL features | COPY FROM STDIN (CSV / text / binary passed through) and COPY TO STDOUT, streamed in 64 KiB chunks; bad data is an error and the connection stays usable | pipelined_batches_cursors_and_copy
+PostgreSQL features | LISTEN / NOTIFY: a dedicated listener, cancel-safe waits, notifications queued while statements run, UNLISTEN | listen_notify
+PostgreSQL features | Cancel requests for a running statement (57014), the connection usable afterwards | cancel_a_running_statement
+PostgreSQL features | Procedures (CALL with IN / INOUT / OUT arguments, notices as output) and functions (positional and named arguments, defaults); routine names checked | procedures_and_functions, backend::tests::routine_calls
+PostgreSQL features | Scripts: several statements in one implicit transaction, stopping at the first error | notices_errors_scripts_and_transactions
+
+Reliability | Fully async on kernway's reactor: DNS and certificate reads on the blocking pool, no blocking call on a shard (source scan) | no_blocking_call_runs_on_the_reactor, host_names_resolve_off_the_reactor
+Reliability | Linux, macOS and Windows (CI on each, against a real server) | ci::postgres_ubuntu_latest, ci::postgres_macos_latest, ci::postgres_windows_latest
+Reliability | PostgreSQL 14 (oldest supported) as well as 18 | ci::postgres_ubuntu_latest
