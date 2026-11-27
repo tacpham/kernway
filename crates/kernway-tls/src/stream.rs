@@ -59,6 +59,13 @@ impl AsyncTlsStream {
         Ok(stream)
     }
 
+    /// A TLS session whose handshake already ran over another transport
+    /// (SQL Server's TDS 7.x carries the handshake inside PRELOGIN packets);
+    /// from here on its records go straight over `tcp`.
+    pub fn from_handshaken(tcp: AsyncTcpStream, conn: ClientConnection) -> Self {
+        Self { tcp, conn, inbox: Vec::new(), inbox_pos: 0, closed: false }
+    }
+
     /// Run the handshake to completion, exchanging TLS records over the socket.
     async fn handshake(&mut self) -> io::Result<()> {
         while self.conn.is_handshaking() {

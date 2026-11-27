@@ -248,6 +248,33 @@ impl BufStream {
 }
 
 impl BufStream {
+    /// Switch a plaintext session to `conn`, a TLS session whose handshake
+    /// the driver ran itself through its own framing (SQL Server TDS 7.x).
+    /// Nothing may be buffered.
+    pub fn adopt_tls(&mut self, conn: kernway_tls::rustls::ClientConnection) -> io::Result<()> {
+        if self.buffered() != 0 {
+            return Err(io::Error::other("unread bytes buffered when adopting TLS"));
+        }
+        let Socket::Plain(tcp) = std::mem::replace(&mut self.socket, Socket::Upgrading) else {
+            return Err(io::Error::other("adopting TLS on a connection that is not plaintext"));
+        };
+        self.socket = Socket::Tls(Box::new(AsyncTlsStream::from_handshaken(tcp, conn)));
+        Ok(())
+    }
+
+    /// Leave TLS (without close_notify) and go on in plaintext on the same
+    /// TCP connection — SQL Server's login-only encryption. Nothing may be buffered.
+    pub fn drop_tls(&mut self) -> io::Result<()> {
+        if self.buffered() != 0 {
+            return Err(io::Error::other("unread bytes buffered when leaving TLS"));
+        }
+        let Socket::Tls(tls) = std::mem::replace(&mut self.socket, Socket::Upgrading) else {
+            return Err(io::Error::other("leaving TLS on a connection that is not TLS"));
+        };
+        self.socket = Socket::Plain(tls.into_inner());
+        Ok(())
+    }
+
     /// Start TLS over again on the same TCP connection: drop the current TLS
     /// session (without close_notify) and run a fresh handshake. Oracle TCPS
     /// listeners ask for this after the first CONNECT (a RESEND with the

@@ -62,6 +62,16 @@ fn select_from<T: Entity>(d: &'static dyn SqlDialect) -> Sql {
     q
 }
 
+/// `SELECT … FROM t` with the dialect's locking table hint, if it has one.
+fn select_from_locked<T: Entity>(d: &'static dyn SqlDialect) -> Sql {
+    let mut q = select_from::<T>(d);
+    let hint = d.lock_table_hint();
+    if !hint.is_empty() {
+        q.push(" ").push(hint);
+    }
+    q
+}
+
 /// ` WHERE pk1 = ? AND pk2 = ?` for a key.
 fn where_pk<T: Entity>(q: &mut Sql, id: Vec<Param>) {
     q.push(" WHERE ");
@@ -91,7 +101,7 @@ where
     C: SqlConn,
 {
     let d = dialect::<C>();
-    let mut q = select_from::<T>(d);
+    let mut q = if lock { select_from_locked::<T>(d) } else { select_from::<T>(d) };
     where_pk::<T>(&mut q, id_to_params(id)?);
     if lock && !d.lock_for_update_suffix().is_empty() {
         q.push(" ").push(d.lock_for_update_suffix());

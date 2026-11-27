@@ -445,7 +445,7 @@ impl<'a, T: Entity, S: RowSource + ?Sized> Select<'a, T, S> {
             }
             q.push(if *asc { " ASC" } else { " DESC" });
         }
-        q.push(&d.limit_offset(self.limit, self.offset));
+        q.push(&d.window(self.limit, self.offset, !self.order.is_empty()));
     }
 
     /// The statement for the select list `cols` (`None` = the outputs).

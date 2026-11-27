@@ -75,6 +75,22 @@ pub trait SqlDialect: Send + Sync + 'static {
         ""
     }
 
+    /// A table hint placed right after the table name in a locking read, for
+    /// databases that lock with hints rather than a trailing clause (SQL
+    /// Server: `WITH (UPDLOCK, ROWLOCK)`). Default `""`.
+    fn lock_table_hint(&self) -> &'static str {
+        ""
+    }
+
+    /// The row window for a query, knowing whether it has an `ORDER BY`
+    /// (SQL Server's `OFFSET … FETCH` is only valid after one, so it adds
+    /// `ORDER BY (SELECT NULL)` when there is none). Defaults to
+    /// [`limit_offset`](Self::limit_offset).
+    fn window(&self, limit: Option<u64>, offset: u64, ordered: bool) -> String {
+        let _ = ordered;
+        self.limit_offset(limit, offset)
+    }
+
     /// A cheap statement that proves the connection is alive.
     fn ping_sql(&self) -> &'static str {
         "SELECT 1"

@@ -19,5 +19,16 @@ rt-core           = { workspace = true, optional = true }
 # The shared test suite every SQL backend must pass against a live database.
 conformance = ["kernway-orm-macro", "rt-core"]
 
+[dev-dependencies]
+kernway-orm-macro = { workspace = true }
+rt-core           = { workspace = true }
+# The real dialects of every backend, for tests/sql_generation.rs (the
+# driver crates' default features: dialects only, where they can).
+kernway-orm-postgres = { workspace = true }
+kernway-orm-mysql    = { workspace = true }
+kernway-orm-mssql    = { workspace = true }
+kernway-orm-sqlite   = { workspace = true }
+kernway-orm-oracle   = { workspace = true }
+
 [lints]
 workspace = true

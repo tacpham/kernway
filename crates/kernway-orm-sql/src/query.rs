@@ -185,7 +185,7 @@ where
         for (i, (col, asc)) in self.order.iter().enumerate() {
             q.push(if i == 0 { " ORDER BY " } else { ", " }).ident(col).push(if *asc { " ASC" } else { " DESC" });
         }
-        let window = d.limit_offset(self.limit, self.offset);
+        let window = d.window(self.limit, self.offset, !self.order.is_empty());
         q.push(&window);
         q
     }

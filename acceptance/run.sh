@@ -9,13 +9,14 @@
 #   acceptance/run.sh redis    (single node, TLS, Sentinel, Cluster — all in Docker)
 #   acceptance/run.sh postgres (PostgreSQL 18 with every auth method and TLS, in Docker)
 #   acceptance/run.sh mongodb  (MongoDB 8.0: standalone, TLS / X.509, replica set, sharded — in Docker)
+#   acceptance/run.sh mssql    (SQL Server 2022 with a test CA, in Docker)
 #
 # Containers (created if missing; existing ones and their data are reused):
 #   kernway-mysql   mysql:8.0                  host port 3307, root password "secret"
 #   kernway-oracle  gvenzl/oracle-free:23-slim host ports 1521 / 2484 (TCPS)
 # Oracle TCPS needs a wallet once: crates/kernway-orm-oracle/tests/support/oracle-tcps-setup.sh
 set -euo pipefail
-DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb}"
+DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb|mssql}"
 # CI workflow whose jobs for this commit are the cross-OS evidence.
 WORKFLOW=drivers.yml; IMAGE=""; EXTRA=()
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -157,7 +158,20 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     # The Unix-socket test runs inside the container (in_container_tests).
     SKIP=(--skip unix_domain_socket)
     ;;
-  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb)" >&2; exit 2 ;;
+  mssql)
+    # Recreated each run (test data only): SQL Server 2022 with a server
+    # certificate from a test CA, a login owning kernway_test.
+    C=kernway-mssql
+    log "SQL Server (${MSSQL_IMAGE:-mcr.microsoft.com/mssql/server:2022-latest}) with TLS"
+    "$ROOT/crates/kernway-orm-mssql/tests/support/mssql-setup.sh" "$WORK/mssql" > "$WORK/mssql.env"
+    set -a; . "$WORK/mssql.env"; set +a
+    VERSION="$(docker exec "$C" /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Kernway_pw1!' -h -1 -Q 'SET NOCOUNT ON; SELECT @@VERSION' | head -1 | sed 's/ *$//')"
+    CRATE=kernway-orm-mssql; FEATURES=(--features mssql); TITLE="SQL Server"
+    # Strict (TDS 8.0) needs TLS 1.3 on the server, which crashes it under
+    # x86 emulation: the CI job (native x86-64) is its evidence.
+    SKIP=(--skip strict_tds8)
+    ;;
+  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql)" >&2; exit 2 ;;
 esac
 
 CMD="cargo test -p $CRATE ${FEATURES[*]+${FEATURES[*]}} --lib --tests -- --test-threads=1 --nocapture ${EXTRA[*]+${EXTRA[*]}} ${SKIP[*]+${SKIP[*]}}"

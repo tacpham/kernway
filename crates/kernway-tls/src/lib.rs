@@ -215,7 +215,7 @@ impl ServerCertVerifier for NoCertCheck {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+        unparsable_is_fine(verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms))
     }
 
     fn verify_tls13_signature(
@@ -224,11 +224,25 @@ impl ServerCertVerifier for NoCertCheck {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+        unparsable_is_fine(verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms))
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+/// With no certificate check, a certificate webpki cannot parse (an X.509
+/// v1 one — SQL Server's self-signed default) is accepted: the handshake
+/// signature only proves possession of a key nobody vouched for, which any
+/// interceptor has for its own certificate, so skipping it loses nothing.
+/// A signature that parses and is wrong is still refused.
+fn unparsable_is_fine(r: Result<HandshakeSignatureValid, rustls::Error>) -> Result<HandshakeSignatureValid, rustls::Error> {
+    match r {
+        Err(rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding | rustls::CertificateError::Other(_))) => {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+        other => other,
     }
 }
 

@@ -1,0 +1,47 @@
+# SQL Server feature catalog for the acceptance report.
+# area | feature | evidence
+# evidence = comma-separated test names (all must pass), or
+#            GAP: <why>  (not implemented — counted against completeness)
+#            N/A: <why> (SQL Server has no such feature)
+#
+# Every live test runs against SQL Server 2022 in Docker, set up by
+# crates/kernway-orm-mssql/tests/support/mssql-setup.sh (a server
+# certificate from a test CA, a login owning kernway_test). CI runs the
+# same suite on a native x86-64 Linux host (TLS 1.3 there, so TDS 8.0
+# strict too); the client builds and its unit tests pass on macOS and
+# Windows.
+
+Connection & security | mssql:// URLs and ADO.NET connection strings (quoted values with ;, Server=tcp:host,port, Initial Catalog, Encrypt, TrustServerCertificate, Application Name, Packet Size, timeouts); unsupported settings explained | config::tests::urls_and_ado_strings, config::tests::bad_strings_say_why
+Connection & security | TDS 7.4 TLS inside PRELOGIN, the certificate checked against a CA and the host name (hostNameInCertificate), trustServerCertificate (incl. SQL Server's X.509 v1 self-signed default) | encryption_modes_and_certificates
+Connection & security | Login-only encryption (the password never in the clear, the session plaintext) and no encryption | encryption_modes_and_certificates
+Connection & security | TDS 8.0 strict: TLS before the first TDS byte (ALPN tds/8.0), the name checked | ci::mssql_live_ubuntu_latest
+Connection & security | SQL Server logins; wrong passwords (18456) and unknown databases refused clearly | encryption_modes_and_certificates
+Connection & security | Host names resolved off the reactor (every address), unknown hosts and unreachable addresses bounded | host_names_resolve_off_the_reactor
+Connection & security | Windows authentication (NTLM / Kerberos), Microsoft Entra (Azure AD) tokens | GAP: refused with a clear error; SQL Server logins only
+Connection & security | Named instances (host\instance via SQL Server Browser) | GAP: refused with a clear error; give the instance's port
+Connection & security | Always Encrypted (client-side column encryption) | GAP: not implemented
+
+Protocol | Packets split at the negotiated size, one TLS record per packet (SQL Server refuses a packet split across records); values in PLP chunks (nvarchar / varbinary(max), 100 kB) | values_of_every_common_type, sqlserver_conforms
+Protocol | sp_executesql with typed parameters; a NULL for a binary column typed as binary (sp_describe_undeclared_parameters) | values_of_every_common_type, types::tests::params_encode
+Protocol | Command timeout: ATTENTION sent, read up to the acknowledgement (also while a large result streams), the connection usable after | command_timeouts_cancel_and_keep_the_connection
+Protocol | Errors with number, state, class, line; unique (columns named) / foreign-key / deadlock typed; RAISERROR / PRINT messages collected | procedures_scripts_messages_and_errors, protocol::tests::messages_map_to_errors
+Protocol | Transaction descriptors tracked (ENVCHANGE) and sent with every request | transactions_cursors_and_batches, sqlserver_conforms
+Protocol | MARS (several active result sets on one connection) | GAP: refused with a clear error; use a connection per statement
+Protocol | Bulk copy (BCP / INSERT BULK), table-valued parameters | GAP: execute_many pipelines sp_executesql calls instead
+
+Values | Integers, bit, real (shortest form) and float, decimal(38,9) exact, money / smallmoney, date, time(7), datetime2(7), datetime, smalldatetime, datetimeoffset (local time + offset), uniqueidentifier, nvarchar (UTF-16, emoji), varchar (Windows-1252 / UTF-8 collations), char padding, binary, xml, sql_variant, NULL | values_of_every_common_type, types::tests::values_decode
+Values | Parameters of every kind: bigint, float, bit, text with quotes, binary, u64 beyond bigint (decimal(20,0)), JSON arrays, 70 000-character text, 100 kB binary; ±Infinity refused | values_of_every_common_type, types::tests::params_encode
+Values | varchar in non-Western code pages (932, 936, 949, 950, 1250–1258 …) | GAP: Windows-1252 and UTF-8 collations are decoded; use nvarchar for other scripts
+
+ORM (shared layer) | Shared conformance suite (CRUD with IDENTITY keys via SCOPE_IDENTITY, values, batch, query builder with OFFSET / FETCH, binary and long text, unique violation, transactions, row locks via WITH (UPDLOCK, ROWLOCK) without lost updates, raw SQL, joins / aggregates, execute_many failure semantics, server cursors, cancelled transactions) | sqlserver_conforms
+ORM (shared layer) | T-SQL dialect: [quoted] identifiers, @Pn placeholders, IDENTITY, NVARCHAR(450) keys, guarded CREATE TABLE, windows without an ORDER BY | dialect::tests::ddl_and_windows
+
+SQL Server features | Procedures by name: IN / IN OUT / OUT parameters (typed), named arguments, result sets, RETURN status, PRINT output; scalar functions | procedures_scripts_messages_and_errors
+SQL Server features | Scripts split at GO (GO n repeats), stopping at the first failing batch | procedures_scripts_messages_and_errors, backend::tests::go_splits_scripts
+SQL Server features | API cursors (sp_cursoropen / fetch / close) fetched in batches with other statements in between | transactions_cursors_and_batches, sqlserver_conforms
+SQL Server features | Pipelined batches: 3 000 rows in flights of 200 RPCs; a failure mid-flight behaves as row by row | transactions_cursors_and_batches, sqlserver_conforms
+SQL Server features | Manual transactions; a transaction an error rolled back (XACT_ABORT) cannot commit | transactions_cursors_and_batches
+
+Reliability | Fully async on kernway's reactor: DNS and certificate reads on the blocking pool, no blocking call on a shard (source scan) | no_blocking_call_runs_on_the_reactor, host_names_resolve_off_the_reactor
+Reliability | Builds and passes its unit tests on Linux, macOS and Windows | ci::drivers_ubuntu_latest, ci::drivers_macos_latest, ci::drivers_windows_latest
+Reliability | Live tests on macOS / Windows | GAP: no SQL Server for macOS; Windows runners have no TCP-enabled instance (live on Linux only, as Oracle)

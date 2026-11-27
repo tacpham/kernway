@@ -1,0 +1,35 @@
+[package]
+name        = "kernway-orm-mssql"
+description = "SQL Server for the kernway ORM — a self-written async TDS 7.4 / 8.0 driver on the Kernway reactor: TLS (in PRELOGIN, login-only, strict), sp_executesql with typed parameters, API cursors, OUTPUT parameters, pipelined batches, ATTENTION cancels, on the shared SQL layer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kernway-orm-core = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+
+# The driver (feature `mssql`): a self-written TDS client on the Kernway
+# reactor; outside help is rustls for TLS.
+kernway-tls     = { workspace = true, optional = true }
+kernway-wire    = { workspace = true, optional = true }
+kernway-orm-sql = { workspace = true, optional = true }
+rt-core         = { workspace = true, optional = true }
+rt-net          = { workspace = true, optional = true }
+
+[features]
+default = []
+# The driver. Without it the crate only exports SqlServerDialect.
+mssql = ["kernway-tls", "kernway-wire", "kernway-orm-sql", "rt-core", "rt-net"]
+
+[dev-dependencies]
+kernway-orm-macro = { workspace = true }
+kernway-orm-sql   = { workspace = true, features = ["conformance"] }
+rt-core           = { workspace = true }
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
