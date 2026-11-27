@@ -545,6 +545,12 @@ fn volume_without_loss_or_duplicates<H: Harness>(h: H) {
                 c.ack(&d).await.unwrap();
             }
         }
+        // A broker may deliver a message before its producer has the
+        // confirm (RabbitMQ does): give the last confirms time to land.
+        let confirmed_by = std::time::Instant::now() + Duration::from_secs(30);
+        while done.get() < PRODUCERS && std::time::Instant::now() < confirmed_by {
+            rt_core::sleep(Duration::from_millis(20)).await;
+        }
         assert_eq!(done.get(), PRODUCERS, "every publish was confirmed");
         nothing_more(&mut m1, "after the volume").await;
         nothing_more(&mut m2, "after the volume").await;
