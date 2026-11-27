@@ -10,9 +10,16 @@ fn run<F: std::future::Future>(f: F) -> F::Output {
     rt_core::Executor::new().unwrap().block_on(f).unwrap()
 }
 
-/// Build tests/ext and return the library path. Its own target directory:
-/// it is a separate workspace (see its Cargo.toml).
+/// Build tests/ext once for this test binary and return the library path.
+/// Once: the tests run in parallel, and two cargo builds of the same target
+/// at the same time let one see the library while the other relinks it.
 fn build_extension() -> PathBuf {
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BUILT.get_or_init(build_extension_now).clone()
+}
+
+/// Its own target directory: it is a separate workspace (see its Cargo.toml).
+fn build_extension_now() -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("ext");
     let target = std::env::temp_dir().join("kernway-test-ext-target");
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());

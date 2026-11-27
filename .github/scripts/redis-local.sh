@@ -80,8 +80,11 @@ for mode in $MODES; do
       C="$DIR/cluster"
       for p in 7000 7001 7002 7003 7004 7005; do
         mkdir -p "$C/$p"
-        "$SERVER" --port "$p" --cluster-enabled yes --cluster-config-file "$C/$p/nodes.conf" --cluster-node-timeout 2000 \
-          --cluster-announce-ip 127.0.0.1 --dir "$C/$p" --logfile "$DIR/cluster-$p.log" "${COMMON[@]}"
+        node=(--port "$p" --cluster-enabled yes --cluster-config-file "$C/$p/nodes.conf" --cluster-node-timeout 2000
+              --cluster-announce-ip 127.0.0.1 --dir "$C/$p" --logfile "$DIR/cluster-$p.log" "${COMMON[@]}")
+        # Redis 8 refuses a cluster whose bus port has no TLS unless told the
+        # (loopback-only, test) bus is fine; Redis 7 does not know the option.
+        "$SERVER" "${node[@]}" --cluster-bus-port-protected-mode no 2>/dev/null || "$SERVER" "${node[@]}"
         wait_ping -p "$p"
       done
       "$CLI" --cluster create 127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 127.0.0.1:7003 127.0.0.1:7004 127.0.0.1:7005 \
