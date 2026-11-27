@@ -19,7 +19,8 @@ Connection & security | MariaDB ed25519 and PARSEC authentication | GAP: not imp
 Connection & security | Connection URL parsing | protocol::tests::url_parsing
 Connection & security | Host names resolved off the reactor (blocking pool); IP literals skip DNS | host_names_resolve_without_blocking_and_ip_literals_skip_dns
 Connection & security | Auth scramble (native SHA-1) matches the reference construction | protocol::tests::native_scramble_shape
-Connection & security | Local channel: Unix socket file / Windows named pipe (server reports the transport; TLS-requiring ssl-mode refused) — here inside the MariaDB container, on Windows over a named pipe in CI | local_socket_connects_over_the_servers_local_channel, local_socket_carries_a_caching_sha2_full_authentication, local_socket_refuses_an_ssl_mode_that_requires_tls, ci::drivers_windows_latest
+Connection & security | Local channel: Unix socket file (the server reports the transport; the whole driver over it, compressed; TLS-requiring ssl-mode refused) — inside the MariaDB container | local_socket_connects_over_the_servers_local_channel, local_socket_refuses_an_ssl_mode_that_requires_tls
+Connection & security | caching_sha2 full authentication over the local channel | N/A: MariaDB has no caching_sha2_password
 Connection & security | Compressed protocol (zlib): server reports Compression=ON; >16 MiB values, TLS, binary/text, streaming, pipelining, cursors over it; the wire carries far fewer bytes | compressed_protocol_is_negotiated_and_carries_every_kind_of_traffic, compression_shrinks_what_crosses_the_wire
 Connection & security | zstd compression algorithm | N/A: the client picks the algorithm; zlib is offered by every MySQL / MariaDB server
 Protocol | Prepared statements cached per connection; re-prepared after server reset / DDL | protocol::tests::a_cached_statement_runs_in_one_round_trip_and_survives_a_server_reset, protocol::tests::a_full_statement_cache_evicts_and_closes_the_oldest

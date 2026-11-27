@@ -289,9 +289,12 @@ if [ "$DB" = mysql ]; then
   CMD="$CMD; local_socket_* inside $C"
 fi
 if [ "$DB" = mariadb ]; then
-  in_container_tests connection local_socket_ \
-    KERNWAY_MYSQL_SOCKET=/run/mysqld/mysqld.sock KERNWAY_MYSQL_ROOT_PASSWORD=secret
-  CMD="$CMD; local_socket_* inside $C"
+  # Not local_socket_carries_a_caching_sha2…: caching_sha2_password is MySQL's.
+  for t in local_socket_connects local_socket_refuses; do
+    in_container_tests connection "$t" \
+      KERNWAY_MYSQL_SOCKET=/run/mysqld/mysqld.sock KERNWAY_MYSQL_ROOT_PASSWORD=secret
+  done
+  CMD="$CMD; local_socket_connects* / local_socket_refuses* inside $C"
 fi
 
 # Every-OS evidence: the CI workflow ($WORKFLOW) runs the driver's tests on

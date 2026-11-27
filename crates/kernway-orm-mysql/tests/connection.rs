@@ -305,11 +305,22 @@ fn root_pw() -> String {
 
 /// What the server itself calls this connection's transport.
 async fn connection_type(conn: &mut Conn) -> String {
-    session_status_first(
+    let t = session_status_first(
         conn.query("SELECT CONNECTION_TYPE FROM performance_schema.threads WHERE PROCESSLIST_ID = CONNECTION_ID()")
             .await
             .unwrap(),
-    )
+    );
+    if !t.is_empty() {
+        return t;
+    }
+    // MariaDB keeps performance_schema off by default: the process list's
+    // host says it — `localhost` for the local channel, `host:port` for TCP.
+    let host = session_status_first(conn.query("SELECT HOST FROM information_schema.PROCESSLIST WHERE ID = CONNECTION_ID()").await.unwrap());
+    match host.as_str() {
+        "localhost" if cfg!(windows) => "Named Pipe".into(),
+        "localhost" => "Socket".into(),
+        other => format!("TCP ({other})"),
+    }
 }
 
 #[test]
@@ -341,7 +352,7 @@ fn local_socket_connects_over_the_servers_local_channel() {
 
 fn session_status_first(r: QueryResult) -> String {
     match r {
-        QueryResult::Rows { rows, .. } => rows[0][0].clone().unwrap_or_default(),
+        QueryResult::Rows { rows, .. } => rows.first().and_then(|r| r[0].clone()).unwrap_or_default(),
         QueryResult::Ok { .. } => String::new(),
     }
 }
