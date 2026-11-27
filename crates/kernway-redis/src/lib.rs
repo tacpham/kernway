@@ -26,6 +26,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cache;
+pub mod cluster;
 pub mod cmd;
 pub mod commands;
 pub mod conn;
@@ -42,6 +43,7 @@ use std::sync::Mutex;
 use std::thread::{self, ThreadId};
 
 pub use cache::RedisCache;
+pub use cluster::{key_slot, ClusterClient, Shard};
 pub use cmd::{pairs, Cmd, FromValue, ToArg};
 pub use commands::{ScanPage, Script, SetCondition, SetOptions};
 pub use conn::{Connection, PubSubMessage};

@@ -598,6 +598,13 @@ impl Connection {
         self.sub_command(b"PSUBSCRIBE", patterns).await
     }
 
+    /// `SSUBSCRIBE shardchannel…` — sharded pub/sub (Redis 7): in a cluster
+    /// the channel lives on the node owning its slot. Messages arrive as
+    /// for `SUBSCRIBE`.
+    pub async fn ssubscribe(&mut self, channels: &[&str]) -> Result<(), RedisError> {
+        self.sub_command(b"SSUBSCRIBE", channels).await
+    }
+
     /// `UNSUBSCRIBE channel…` (no channels: from all).
     pub async fn unsubscribe(&mut self, channels: &[&str]) -> Result<(), RedisError> {
         self.sub_command(b"UNSUBSCRIBE", channels).await
@@ -631,7 +638,7 @@ impl Connection {
                         confirmations -= 1;
                         // Back to normal mode once nothing is subscribed.
                         if let Some(Value::Int(0)) = items.get(2) {
-                            if kind.starts_with("unsub") || kind.starts_with("punsub") {
+                            if kind.starts_with("unsub") || kind.starts_with("punsub") || kind.starts_with("sunsub") {
                                 self.subscribed = false;
                                 confirmations = 0;
                             }
@@ -661,7 +668,7 @@ impl Connection {
             };
             let text = |v: &Value| v.as_text();
             match items.as_slice() {
-                [Value::Bulk(kind), channel, payload] if kind.as_slice() == b"message" => {
+                [Value::Bulk(kind), channel, payload] if kind.as_slice() == b"message" || kind.as_slice() == b"smessage" => {
                     return Ok(PubSubMessage {
                         pattern: None,
                         channel: text(channel).unwrap_or_default(),
