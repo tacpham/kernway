@@ -536,6 +536,36 @@ jobs:
         run: |
           ! grep -q "skip:" valkey.log
 
+  # S3-compatible object storage: the Versity S3 Gateway, one binary on every
+  # OS, downloaded and run natively by the setup script.
+  s3:
+    name: s3 (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: S3 server (versitygw, official release)
+        shell: bash
+        run: crates/kernway-s3/tests/support/s3-setup.sh "$RUNNER_TEMP/s3" >> "$GITHUB_ENV"
+
+      - name: S3 client — all tests, live
+        shell: bash
+        run: cargo test -p kernway-s3 -p kernway-http-client -- --test-threads=1 --nocapture 2>&1 | tee s3.log
+
+      - name: Nothing was skipped
+        shell: bash
+        run: |
+          ! grep -q "skip:" s3.log
+          grep -q "^test presigned_urls_work_without_credentials " s3.log
+
   # SQL Server runs on Linux in Docker (Microsoft ships no macOS build, and a
   # Windows runner has no TCP-enabled instance); the client code is the same
   # on every OS — it builds and its unit tests pass in the drivers job above.

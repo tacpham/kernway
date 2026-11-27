@@ -1,0 +1,18 @@
+[package]
+name        = "kernway-s3"
+description = "A self-written async S3-compatible object storage client for Kernway (AWS S3, MinIO, R2, B2 …): SigV4 signing, objects, listing, multipart uploads, presigned URLs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kernway-http-client = { workspace = true }
+kernway-wire        = { workspace = true, features = ["scram"] }
+rt-core             = { workspace = true }
+
+[dev-dependencies]
+rt-core             = { workspace = true }
+kernway-http-client = { workspace = true }
+
+[lints]
+workspace = true

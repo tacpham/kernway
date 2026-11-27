@@ -1,0 +1,32 @@
+# S3-compatible object storage feature catalog for the acceptance report.
+# area | feature | evidence
+# evidence = comma-separated test names (all must pass), or
+#            GAP: <why>  (not implemented / not verified — counted against completeness)
+#            N/A: <why>  (S3 has no such feature)
+#
+# Every live test runs against the Versity S3 Gateway (versitygw, Apache-2.0)
+# over a posix directory, run natively by
+# crates/kernway-s3/tests/support/s3-setup.sh — MinIO no longer publishes
+# community builds. CI runs the same suite on Linux, macOS and Windows.
+
+Signing | AWS Signature V4 for requests and presigned URLs — byte-identical to the AWS documentation's examples | sigv4::tests::matches_the_aws_get_object_example, sigv4::tests::matches_the_aws_presigned_url_example
+Signing | Canonical forms: SigV4 URI encoding (UTF-8 keys, punctuation), dates (incl. leap days) | sigv4::tests::dates_and_encoding
+Signing | A wrong secret is refused with the server's code (SignatureDoesNotMatch) | failures_are_typed_errors
+Buckets | Create (idempotent: already yours), exists, delete; a non-empty bucket refused (409 BucketNotEmpty); names validated | buckets_are_created_found_and_removed, client::tests::addressing_and_names
+Objects | Put / get byte-exact: every byte value, empty, 3 MiB; keys with Vietnamese, spaces, + = & ? #, deep paths | objects_round_trip_byte_exact_with_metadata_and_ranges
+Objects | Content type, Cache-Control and x-amz-meta-* metadata kept | objects_round_trip_byte_exact_with_metadata_and_ranges
+Objects | Ranged reads (the whole object's size reported), head, missing keys as none, delete (idempotent), overwrite | objects_round_trip_byte_exact_with_metadata_and_ranges
+Objects | Server-side copy | listing_pages_prefixes_and_copies
+Listing | ListObjectsV2: pages followed by continuation tokens, keys in order, prefixes, "directories" with a delimiter, delete by prefix | listing_pages_prefixes_and_copies
+Multipart | Multipart upload (12 MiB in three parts) byte-exact; an abandoned upload leaves nothing | multipart_uploads_complete_and_abort
+Presigned URLs | Presigned PUT and GET used without credentials (a browser uploading / fetching directly); tampered or unsigned refused | presigned_urls_work_without_credentials
+Errors | Typed errors: denied (403), not found (NoSuchBucket / NoSuchKey), service errors with S3's code, connection failures; error documents parsed | failures_are_typed_errors, client::tests::error_documents, xml::tests::elements_and_entities
+Addressing | Path-style (MinIO, R2, B2, versitygw) and virtual-hosted (AWS) URLs | client::tests::addressing_and_names
+Addressing | Virtual-hosted requests against AWS itself | GAP: built and unit-tested; no AWS account in the test setup
+Security | HTTPS with a private CA / self-signed certificate | GAP: kernway-http-client verifies against the public web roots only (no CA option)
+Security | Temporary credentials (session tokens) | GAP: signed (x-amz-security-token), not verified against STS-issued credentials
+Objects | Batch delete (DeleteObjects), object tagging, versioning, object lock, server-side encryption headers, checksums (CRC32C / SHA256 trailers) | GAP: not implemented (delete_prefix deletes one by one)
+Objects | Streaming uploads / downloads without holding the object in memory | GAP: bodies are buffered (multipart splits large uploads)
+
+Reliability | Fully async on kernway's reactor: no blocking call on a shard (source scan) | no_blocking_call_runs_on_the_reactor
+Reliability | Linux, macOS and Windows (CI on each, against a real server) | ci::s3_ubuntu_latest, ci::s3_macos_latest, ci::s3_windows_latest

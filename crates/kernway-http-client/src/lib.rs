@@ -621,7 +621,7 @@ impl HttpClient {
         let exchange = async {
             conn.write_all(&encode_request(req, keep_alive, cookie))
                 .await?;
-            read_stream_head(conn).await
+            read_stream_head(conn, req.method == Method::Head).await
         };
         match self.timeout {
             Some(limit) => match rt_core::timeout(limit, exchange).await {
@@ -818,7 +818,7 @@ async fn send_on(
 ) -> Result<(Response, bool), HttpError> {
     conn.write_all(&encode_request(req, keep_alive, cookie))
         .await?;
-    read_response(conn).await
+    read_response(conn, req.method == Method::Head).await
 }
 
 /// How the streaming reader delivers the body, and where it currently sits.
@@ -845,9 +845,9 @@ struct HeadRead {
 }
 
 /// Read the head and set up the streaming body plan, without reading any body.
-async fn read_stream_head(stream: &mut Conn) -> Result<HeadRead, HttpError> {
+async fn read_stream_head(stream: &mut Conn, head_request: bool) -> Result<HeadRead, HttpError> {
     let (status, head, spans, buf) = read_head(stream).await?;
-    let plan = match body_plan(&head, &spans) {
+    let plan = match body_plan(&head, &spans, head_request, status) {
         BodyPlan::Length(n) => StreamPlan::Length(n),
         BodyPlan::Chunked => StreamPlan::Chunked(ChunkDecoder::new()),
         BodyPlan::UntilClose => StreamPlan::UntilClose,
@@ -1085,10 +1085,10 @@ async fn read_head(
 /// Read the whole response, following `Content-Length`, chunked, or read-to-close. The
 /// returned bool is whether the body was framed (so the connection can be kept alive);
 /// a read-to-close body consumes the connection.
-async fn read_response(stream: &mut Conn) -> Result<(Response, bool), HttpError> {
+async fn read_response(stream: &mut Conn, head_request: bool) -> Result<(Response, bool), HttpError> {
     let (status, head_block, spans, mut body) = read_head(stream).await?;
 
-    let keepable = match body_plan(&head_block, &spans) {
+    let keepable = match body_plan(&head_block, &spans, head_request, status) {
         BodyPlan::Length(n) => {
             while body.len() < n {
                 if !read_more_into(stream, &mut body).await? {
@@ -1236,8 +1236,13 @@ fn header_bytes<'a>(
         .map(|(_, v)| &block[v.clone()])
 }
 
-/// Decide how to read the body from the parsed header ranges.
-fn body_plan(block: &[u8], spans: &[(Range<usize>, Range<usize>)]) -> BodyPlan {
+/// Decide how to read the body from the parsed header ranges. A response
+/// to HEAD, and a 1xx / 204 / 304, has no body whatever its headers say
+/// (RFC 9112 §6.3) — a HEAD answer's Content-Length is the GET's.
+fn body_plan(block: &[u8], spans: &[(Range<usize>, Range<usize>)], head_request: bool, status: u16) -> BodyPlan {
+    if head_request || status / 100 == 1 || status == 204 || status == 304 {
+        return BodyPlan::Length(0);
+    }
     if header_bytes(block, spans, b"transfer-encoding")
         .is_some_and(|v| v.eq_ignore_ascii_case(b"chunked"))
     {
@@ -1575,6 +1580,19 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn head_204_and_304_responses_have_no_body() {
+        let head = b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\nETag: \"x\"\r\n\r\n";
+        let (status, spans) = parse_head_spans(head).unwrap();
+        assert!(matches!(body_plan(head, &spans, true, status), BodyPlan::Length(0)), "HEAD: the GET's length, no body");
+        assert!(matches!(body_plan(head, &spans, false, status), BodyPlan::Length(4096)));
+        for (code, block) in [(204u16, &b"HTTP/1.1 204 No Content\r\nContent-Length: 10\r\n\r\n"[..]), (304, b"HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: chunked\r\n\r\n")] {
+            let (status, spans) = parse_head_spans(block).unwrap();
+            assert_eq!(status, code);
+            assert!(matches!(body_plan(block, &spans, false, status), BodyPlan::Length(0)), "{code}");
+        }
+    }
     use super::*;
 
     #[test]

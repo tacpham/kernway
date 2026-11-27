@@ -10,6 +10,7 @@
 #   acceptance/run.sh postgres (PostgreSQL 18 with every auth method and TLS, in Docker)
 #   acceptance/run.sh mongodb  (MongoDB 8.0: standalone, TLS / X.509, replica set, sharded — in Docker)
 #   acceptance/run.sh mssql    (SQL Server 2022 with a test CA, in Docker)
+#   acceptance/run.sh s3       (the Versity S3 Gateway, natively — S3-compatible object storage)
 #   acceptance/run.sh mariadb  (MariaDB 11.4 LTS through the MySQL driver, in Docker)
 #   acceptance/run.sh valkey   (Valkey 8.1 through the Redis client: single, TLS, Sentinel, Cluster — in Docker)
 #   acceptance/run.sh nats     (nats-server natively: plain, auth, TLS / mTLS, a JetStream cluster)
@@ -22,7 +23,7 @@
 #   kernway-oracle  gvenzl/oracle-free:23-slim host ports 1521 / 2484 (TCPS)
 # Oracle TCPS needs a wallet once: crates/kernway-orm-oracle/tests/support/oracle-tcps-setup.sh
 set -euo pipefail
-DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb|mssql|nats|rabbitmq|meilisearch|kafka|mariadb|valkey}"
+DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb|mssql|nats|rabbitmq|meilisearch|kafka|mariadb|valkey|s3}"
 # CI workflow whose jobs for this commit are the cross-OS evidence.
 WORKFLOW=drivers.yml; IMAGE=""; EXTRA=()
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -236,7 +237,15 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     # caching_sha2_password is MySQL's; the local channel runs in the container.
     SKIP=(--skip local_socket_ --skip caching_sha2)
     ;;
-  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql | nats | rabbitmq | meilisearch | kafka | mariadb | valkey)" >&2; exit 2 ;;
+  s3)
+    # The Versity S3 Gateway (natively) over a fresh posix directory.
+    log "S3-compatible storage (versitygw, native)"
+    "$ROOT/crates/kernway-s3/tests/support/s3-setup.sh" "$ROOT/target/s3" > "$WORK/s3.env"
+    set -a; . "$WORK/s3.env"; set +a
+    VERSION="$KERNWAY_S3_SERVER"; IMAGE="official release binary (native)"; C="none (native versitygw process)"
+    CRATE=kernway-s3; FEATURES=(); TITLE="S3-compatible object storage"; SKIP=()
+    ;;
+  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql | nats | rabbitmq | meilisearch | kafka | mariadb | valkey | s3)" >&2; exit 2 ;;
 esac
 
 CMD="cargo test -p $CRATE ${FEATURES[*]+${FEATURES[*]}} --lib --tests -- --test-threads=1 --nocapture ${EXTRA[*]+${EXTRA[*]}} ${SKIP[*]+${SKIP[*]}}"

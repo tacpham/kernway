@@ -30,6 +30,7 @@ members = [
     "crates/kernway-cache-memory",
     "crates/kernway-redis",
     "crates/kernway-messaging",
+    "crates/kernway-s3",
     "crates/kernway-nats",
     "crates/kernway-rabbitmq",
     "crates/kernway-kafka",
@@ -159,6 +160,7 @@ kernway-cache-macro  = { path = "crates/kernway-cache-macro" }
 kernway-cache-memory = { path = "crates/kernway-cache-memory" }
 kernway-redis        = { path = "crates/kernway-redis" }
 kernway-messaging    = { path = "crates/kernway-messaging" }
+kernway-s3           = { path = "crates/kernway-s3" }
 kernway-nats         = { path = "crates/kernway-nats" }
 kernway-rabbitmq     = { path = "crates/kernway-rabbitmq" }
 kernway-kafka        = { path = "crates/kernway-kafka" }
