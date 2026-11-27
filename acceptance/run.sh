@@ -241,6 +241,8 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     # The Versity S3 Gateway (natively) over a fresh posix directory.
     log "S3-compatible storage (versitygw, native)"
     "$ROOT/crates/kernway-s3/tests/support/s3-setup.sh" "$ROOT/target/s3" > "$WORK/s3.env"
+    # KERNWAY_S3_SERVER holds a space ("versitygw 1.11.0"): quote for sourcing.
+    sed -i.bak 's/^\(KERNWAY_S3_[A-Z_]*=\)\(.*\)$/\1"\2"/' "$WORK/s3.env"
     set -a; . "$WORK/s3.env"; set +a
     VERSION="$KERNWAY_S3_SERVER"; IMAGE="official release binary (native)"; C="none (native versitygw process)"
     CRATE=kernway-s3; FEATURES=(); TITLE="S3-compatible object storage"; SKIP=()
