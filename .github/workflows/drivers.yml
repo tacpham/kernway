@@ -295,6 +295,64 @@ jobs:
             grep -q "^test $t " nats.log || { echo "did not run: $t"; exit 1; }
           done
 
+  # RabbitMQ: Docker on Linux; on macOS (Homebrew) and Windows (Chocolatey)
+  # the broker is installed natively and the setup script starts its own
+  # node with the test config (TLS, EXTERNAL) — the Windows service is
+  # stopped first.
+  rabbitmq:
+    name: rabbitmq (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: RabbitMQ (Linux, Docker)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: crates/kernway-rabbitmq/tests/support/rabbitmq-setup.sh "$RUNNER_TEMP/rabbitmq" >> "$GITHUB_ENV"
+
+      - name: RabbitMQ (macOS, Homebrew)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install rabbitmq >/dev/null
+          RABBITMQ_SBIN="$(brew --prefix rabbitmq)/sbin" crates/kernway-rabbitmq/tests/support/rabbitmq-setup.sh "$RUNNER_TEMP/rabbitmq" >> "$GITHUB_ENV"
+
+      - name: RabbitMQ (Windows, Chocolatey)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          choco install rabbitmq -y --no-progress >/dev/null
+          sc.exe stop RabbitMQ >/dev/null 2>&1 || true
+          sleep 5
+          ERLANG_HOME="$(ls -d "/c/Program Files/Erlang OTP" "/c/Program Files"/erl* 2>/dev/null | head -1)"
+          export ERLANG_HOME="$(cygpath -w "$ERLANG_HOME")"
+          echo "ERLANG_HOME=$ERLANG_HOME" >> "$GITHUB_ENV"
+          SBIN="$(ls -d "/c/Program Files/RabbitMQ Server"/rabbitmq_server-*/sbin | head -1)"
+          RABBITMQ_SBIN="$SBIN" crates/kernway-rabbitmq/tests/support/rabbitmq-setup.sh "$(cygpath -u "$RUNNER_TEMP")/rabbitmq" >> "$GITHUB_ENV"
+
+      - name: RabbitMQ client — all tests, live
+        shell: bash
+        run: cargo test -p kernway-rabbitmq -- --test-threads=1 --nocapture 2>&1 | tee rabbitmq.log
+
+      - name: Every scenario ran (nothing skipped)
+        shell: bash
+        # A failing test already failed the step above (pipefail).
+        run: |
+          ! grep -q "skip:" rabbitmq.log
+          # The two capabilities RabbitMQ lacks (GAPs in the acceptance report).
+          ! grep "^n/a" rabbitmq.log | grep -v -e "^n/a: key order across members$" -e "^n/a: no replay for a new group (the latest half ran)$"
+          for t in rabbitmq_conforms tls_mutual_tls_and_external_auth consumers_and_producers_survive_a_lost_connection memory_alarms_block_publishers; do
+            grep -q "^test $t " rabbitmq.log || { echo "did not run: $t"; exit 1; }
+          done
+
   # SQL Server runs on Linux in Docker (Microsoft ships no macOS build, and a
   # Windows runner has no TCP-enabled instance); the client code is the same
   # on every OS — it builds and its unit tests pass in the drivers job above.

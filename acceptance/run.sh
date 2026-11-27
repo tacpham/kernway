@@ -11,13 +11,14 @@
 #   acceptance/run.sh mongodb  (MongoDB 8.0: standalone, TLS / X.509, replica set, sharded — in Docker)
 #   acceptance/run.sh mssql    (SQL Server 2022 with a test CA, in Docker)
 #   acceptance/run.sh nats     (nats-server natively: plain, auth, TLS / mTLS, a JetStream cluster)
+#   acceptance/run.sh rabbitmq (RabbitMQ 4.1 with TLS and EXTERNAL auth, in Docker)
 #
 # Containers (created if missing; existing ones and their data are reused):
 #   kernway-mysql   mysql:8.0                  host port 3307, root password "secret"
 #   kernway-oracle  gvenzl/oracle-free:23-slim host ports 1521 / 2484 (TCPS)
 # Oracle TCPS needs a wallet once: crates/kernway-orm-oracle/tests/support/oracle-tcps-setup.sh
 set -euo pipefail
-DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb|mssql|nats}"
+DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb|mssql|nats|rabbitmq}"
 # CI workflow whose jobs for this commit are the cross-OS evidence.
 WORKFLOW=drivers.yml; IMAGE=""; EXTRA=()
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -179,7 +180,19 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     VERSION="nats-server $KERNWAY_NATS_VERSION"; IMAGE="official release binary (native)"; C="none (native nats-server processes)"
     CRATE=kernway-nats; FEATURES=(); TITLE="NATS / JetStream"; SKIP=()
     ;;
-  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql | nats)" >&2; exit 2 ;;
+  rabbitmq)
+    # Recreated each run (test data only): RabbitMQ with a test CA, TLS,
+    # EXTERNAL (client-certificate) auth, users and a second vhost.
+    C=kernway-rabbitmq
+    log "RabbitMQ (${RABBITMQ_IMAGE:-rabbitmq:4.1-management}) with TLS and EXTERNAL auth"
+    "$ROOT/crates/kernway-rabbitmq/tests/support/rabbitmq-setup.sh" "$ROOT/target/rabbitmq" > "$WORK/rabbitmq.env"
+    # The rabbitmqctl command holds spaces: quote it for sourcing.
+    sed -i.bak 's/^\(KERNWAY_RABBITMQ_CTL=\)\(.*\)$/\1"\2"/' "$WORK/rabbitmq.env"
+    set -a; . "$WORK/rabbitmq.env"; set +a
+    VERSION="RabbitMQ $KERNWAY_RABBITMQ_VERSION"
+    CRATE=kernway-rabbitmq; FEATURES=(); TITLE=RabbitMQ; SKIP=()
+    ;;
+  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql | nats | rabbitmq)" >&2; exit 2 ;;
 esac
 
 CMD="cargo test -p $CRATE ${FEATURES[*]+${FEATURES[*]}} --lib --tests -- --test-threads=1 --nocapture ${EXTRA[*]+${EXTRA[*]}} ${SKIP[*]+${SKIP[*]}}"

@@ -313,28 +313,40 @@ fn key_order_across_members<H: Harness>(h: H) {
     });
 }
 
-/// A new group starts at the oldest message or after the newest.
+/// A new group starts after the newest message (every backend), or at the
+/// oldest one (backends that replay).
 fn start_earliest_or_latest<H: Harness>(h: H) {
     block(async move {
         let b = h.broker().await;
-        if !caps_of(&b).replay {
-            eprintln!("n/a: no replay for a new group");
-            return;
-        }
+        let replay = caps_of(&b).replay;
         let topic = unique("start");
         b.ensure_topic(&topic).await.unwrap();
         let p = b.producer().await.unwrap();
+        // A group that exists keeps what arrives while no member is connected.
+        let keeper = b.subscribe(Subscription::new(&topic, "keeper")).await.unwrap();
+        keeper.close().await.unwrap();
         p.publish(&topic, OutMessage::new("old")).await.unwrap();
-        let mut early = b.subscribe(Subscription::new(&topic, "early").from_earliest()).await.unwrap();
+        let mut early = if replay { Some(b.subscribe(Subscription::new(&topic, "early").from_earliest()).await.unwrap()) } else { None };
         let mut late = b.subscribe(Subscription::new(&topic, "late")).await.unwrap();
         // Let a lazily-attached consumer settle before the new message.
         let _ = late.next_timeout(Duration::from_millis(500)).await.map(|d| panic!("late saw {:?}", text(&d)));
         p.publish(&topic, OutMessage::new("new")).await.unwrap();
-        assert_eq!(text(&recv(&mut early, "earliest: old").await), "old");
-        assert_eq!(text(&recv(&mut early, "earliest: new").await), "new");
+        if let Some(early) = early.as_mut() {
+            assert_eq!(text(&recv(early, "earliest: old").await), "old");
+            assert_eq!(text(&recv(early, "earliest: new").await), "new");
+        } else {
+            eprintln!("n/a: no replay for a new group (the latest half ran)");
+        }
         let d = recv(&mut late, "latest").await;
         assert_eq!(text(&d), "new", "latest skips what was published before");
-        for c in [early, late] {
+        late.ack(&d).await.unwrap();
+        let mut keeper = b.subscribe(Subscription::new(&topic, "keeper")).await.unwrap();
+        for want in ["old", "new"] {
+            let d = recv(&mut keeper, "kept while away").await;
+            assert_eq!(text(&d), want);
+            keeper.ack(&d).await.unwrap();
+        }
+        for c in [Some(late), Some(keeper), early].into_iter().flatten() {
             c.close().await.unwrap();
         }
         b.delete_topic(&topic).await.unwrap();

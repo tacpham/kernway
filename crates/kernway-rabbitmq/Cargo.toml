@@ -1,0 +1,19 @@
+[package]
+name        = "kernway-rabbitmq"
+description = "A self-written async AMQP 0-9-1 client for RabbitMQ on Kernway — TLS, PLAIN / EXTERNAL auth, heartbeats, channels, exchanges / queues, publisher confirms, consumers with prefetch — and the kernway-messaging broker backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kernway-messaging = { workspace = true }
+kernway-tls       = { workspace = true }
+kernway-wire      = { workspace = true }
+rt-core           = { workspace = true }
+
+[dev-dependencies]
+kernway-messaging = { workspace = true, features = ["conformance"] }
+rt-core           = { workspace = true }
+
+[lints]
+workspace = true

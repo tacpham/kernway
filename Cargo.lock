@@ -1145,6 +1145,16 @@ name = "kernway-persist"
 version = "0.1.0"
 
 [[package]]
+name = "kernway-rabbitmq"
+version = "0.1.0"
+dependencies = [
+ "kernway-messaging",
+ "kernway-tls",
+ "kernway-wire",
+ "rt-core",
+]
+
+[[package]]
 name = "kernway-redis"
 version = "0.1.0"
 dependencies = [

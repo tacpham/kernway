@@ -1,0 +1,53 @@
+# RabbitMQ feature catalog for the acceptance report.
+# area | feature | evidence
+# evidence = comma-separated test names (all must pass), or
+#            GAP: <why>  (not implemented / not verified — counted against completeness)
+#            N/A: <why>  (RabbitMQ / AMQP 0-9-1 has no such feature)
+#
+# Every live test runs against RabbitMQ 4.1 set up by
+# crates/kernway-rabbitmq/tests/support/rabbitmq-setup.sh: TLS with a test
+# CA (client certificates checked when sent), PLAIN / AMQPLAIN / EXTERNAL
+# auth, an administrator, a certificate-only user, a user without vhost
+# access and a second vhost. CI runs the same suite on Linux (Docker),
+# macOS (Homebrew) and Windows (Chocolatey).
+
+Messaging contract | Confirmed publish (publisher confirms): payloads binary / empty / 900 KiB / UTF-8, headers intact; every message once | rabbitmq_conforms
+Messaging contract | Groups (a quorum queue per group, bound to the topic's fanout exchange): every group sees every message, members split them | rabbitmq_conforms
+Messaging contract | Redelivery: nack comes again flagged as redelivered; a member that closes hands its unacknowledged deliveries to the others | rabbitmq_conforms
+Messaging contract | Acks are durable across members leaving and joining; an ack is on the wire when `ack` returns | rabbitmq_conforms, consumers_and_producers_survive_a_lost_connection
+Messaging contract | Per-key order for a member; key travels with the message | rabbitmq_conforms
+Messaging contract | A group that exists keeps what arrives while no member is connected; a new group starts after the newest message | rabbitmq_conforms
+Messaging contract | A delivery left unacknowledged past ack_wait is redelivered while its consumer stays connected (kept by the client: RabbitMQ has no per-delivery timeout) | rabbitmq_conforms
+Messaging contract | Rejected deliveries reach the dead-letter topic with their headers (x-dead-letter-exchange, at-least-once strategy) | rabbitmq_conforms
+Messaging contract | A new group replaying messages published before it existed | GAP: a queue only receives what arrives after it is bound (needs RabbitMQ streams)
+Messaging contract | Per-key order across the members of a group | GAP: one queue feeds every member (needs single-active-consumer or consistent-hash partitions)
+
+Protocol | AMQP 0-9-1 framing: field tables of every RabbitMQ type, all 13 basic properties, frames split to frame_max; hostile input refused | codec::tests::tables_and_properties_round_trip, codec::tests::hostile_input_is_an_error, codec::tests::large_bodies_are_split_to_frame_max
+Protocol | Handshake and tuning (channel_max / frame_max / heartbeat negotiated, the lower value wins), server properties, many channels on one connection | handshake_tuning_and_server_properties
+Protocol | Tuning the broker refuses (RabbitMQ 4: frame_max below 8192) is explained, not a bare hang-up | refused_tuning_is_explained
+Protocol | Exchanges (topic routing), server-named and exclusive queues, bindings / unbinding, Basic.Get / Get-Empty, purge, delete with counts | exchanges_queues_bindings_routing_and_get
+Protocol | Every property and header type round-trips; 2 MiB bodies over 8 KiB frames; the broker's user-id check | properties_headers_and_large_bodies_round_trip
+Protocol | Publisher confirms (500 in flight on one channel), mandatory returns (an unrouted message is reported, not silently lost) | confirms_returns_and_a_missing_topic
+Protocol | Prefetch (Basic.Qos) limits deliveries in flight; nack without requeue drops | prefetch_limits_what_a_consumer_holds
+Protocol | A channel the broker closes (404, 406) fails alone: the connection and other channels go on | exchanges_queues_bindings_routing_and_get, confirms_returns_and_a_missing_topic
+Protocol | Broker-initiated consumer cancel (queue deleted) surfaces as an error | the_broker_cancels_a_consumer_whose_queue_is_deleted
+Protocol | Connection.Blocked / Unblocked (memory alarm) reported to the client | memory_alarms_block_publishers
+Protocol | Transactions (tx.select / commit / rollback), Basic.Recover | GAP: not implemented (publisher confirms are the supported path)
+Protocol | Exchange-to-exchange bindings, alternate exchanges, priority / lazy queue options | GAP: passed through as declare arguments, not verified by a test
+Protocol | RabbitMQ streams (x-queue-type stream, offsets, super streams) | GAP: not implemented
+Protocol | AMQP 1.0 (RabbitMQ 4's native second protocol) | GAP: AMQP 0-9-1 only
+
+Connection & security | URIs (the RabbitMQ URI spec): several hosts, IPv6, percent-decoded user / password / vhost, every query option validated | options::tests::uris
+Connection & security | PLAIN and AMQPLAIN; wrong passwords, unknown vhosts and vhosts without permission are authentication errors | authentication_and_virtual_hosts
+Connection & security | TLS (CA and host name checked; insecure mode for tests), 3 MiB through TLS records | tls_mutual_tls_and_external_auth
+Connection & security | Mutual TLS and EXTERNAL auth (the client certificate's CN is the user); EXTERNAL without a certificate refused | tls_mutual_tls_and_external_auth
+Connection & security | OAuth 2 tokens (Connection.Update-Secret refresh) | GAP: not implemented
+Connection & security | Unix-domain sockets | N/A: RabbitMQ listens on TCP only
+
+Resilience | Heartbeats keep an idle connection open; a silent broker is detected after two missed heartbeats | handshake_tuning_and_server_properties, a_silent_broker_is_detected_by_heartbeats
+Resilience | Consumers and producers survive a lost connection: unacknowledged deliveries come again (flagged), acknowledged ones do not, stale acks are harmless; buffered deliveries of a dead channel are not handed out | consumers_and_producers_survive_a_lost_connection
+Resilience | The broker closing every connection (operator / restart): producer and consumer reconnect | consumers_and_producers_survive_a_lost_connection
+Resilience | Failover across the nodes of a RabbitMQ cluster (several hosts in the URI) | GAP: hosts are tried in turn, not verified against a cluster
+
+Reliability | Fully async on kernway's reactor: DNS and file reads on the blocking pool; no blocking call on a shard (source scan) | no_blocking_call_runs_on_the_reactor
+Reliability | Linux, macOS and Windows (CI on each, against real brokers) | ci::rabbitmq_ubuntu_latest, ci::rabbitmq_macos_latest, ci::rabbitmq_windows_latest
