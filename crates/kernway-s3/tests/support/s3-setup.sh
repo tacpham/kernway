@@ -35,7 +35,7 @@ if [ -z "${VERSITYGW_BIN:-}" ]; then
     url="https://github.com/versity/versitygw/releases/download/v$VERSION/$asset"
     if [ -n "$WIN" ]; then
       curl -fsSL -o "$DIR/vgw.zip" "$url" && unzip -qo "$DIR/vgw.zip" -d "$DIR/$name"
-      found="$(find "$DIR/$name" -name 'versitygw.exe' | head -1)"; VERSITYGW_BIN="$found"
+      found="$(find "$DIR/$name" -name 'versitygw.exe' | sed -n 1p)"; VERSITYGW_BIN="$found"
     else
       curl -fsSL "$url" | tar xz -C "$DIR"
     fi

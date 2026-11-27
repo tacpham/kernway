@@ -5,20 +5,20 @@
 
 | | |
 |---|---|
-| generated | 2026-11-27 02:23 UTC |
+| generated | 2026-11-27 15:41 UTC |
 | server | postgres (PostgreSQL) 18.7 |
 | image | postgres:18-alpine |
 | container | kernway-postgres |
-| driver commit | 7c15b1c on feat/postgres-full |
+| driver commit | 0170340 on docs/acceptance-orm-reuse |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
-| command | `cargo test -p kernway-orm-postgres --features postgres --lib --tests -- --test-threads=1 --nocapture  --skip unix_domain_socket; unix_domain_socket inside kernway-postgres; CI run 45927564050 (Linux / macOS / Windows)` |
+| command | `cargo test -p kernway-orm-postgres --features postgres --lib --tests -- --test-threads=1 --nocapture  --skip unix_domain_socket; unix_domain_socket inside kernway-postgres; CI run 46025359144 (Linux / macOS / Windows)` |
 
 ## Verdict: implemented features **PASSED** · completeness **31/37** — NOT complete
 
 - *Implemented features* passes only if every test ran and passed (no skips) in this run.
 - *Completeness* counts 🚧 gaps (listed below) against the full feature catalog.
 - Features verified: **31 / 37** (6 not implemented yet, 0 failing; 1 not applicable to PostgreSQL).
-- Tests run: 40 — 40 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
+- Tests run: 57 — 57 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
 - A feature is ✅ only when every test listed as its evidence ran and passed in this run.
 
 ## Connection & security
@@ -26,7 +26,7 @@
 | Feature | Status | Evidence / note |
 |---|---|---|
 | URLs: postgres:// and postgresql://, user / password percent-decoded, several hosts, IPv6 literals, Unix-socket directory (host=), port lists, sslmode / sslrootcert / sslcert / sslkey / channel_binding / target_session_attrs / application_name / connect_timeout / options=-c / any other setting; bad ones explained | ✅ PASS | `config::tests::urls`<br>`config::tests::bad_urls` |
-| SCRAM-SHA-256 (RFC 7677 vectors, server signature verified, nonce checked), over TLS and plaintext | ✅ PASS | `auth::tests::rfc7677_example`<br>`auth::tests::nonce_must_extend_ours`<br>`auth::tests::hmac_rfc4231`<br>`every_authentication_method` |
+| SCRAM-SHA-256 over TLS and plaintext, server signature verified, nonce checked (the shared kernway-wire SCRAM client; its RFC 5802 / 7677 vectors run in that crate) | ✅ PASS | `every_authentication_method`<br>`scram_channel_binding` |
 | SCRAM-SHA-256-PLUS channel binding (tls-server-end-point); channel_binding=require refuses plaintext, MD5 and trust | ✅ PASS | `scram_channel_binding` |
 | MD5, clear-text password, trust; wrong passwords refused (28P01) for each; a missing password explained | ✅ PASS | `auth::tests::md5_matches_postgres`<br>`every_authentication_method` |
 | TLS: sslmode disable / prefer / require / verify-ca / verify-full — the name check, the chain check, a missing CA file; TLS-only roles (hostssl) | ✅ PASS | `tls_modes_check_what_they_promise`<br>`every_authentication_method` |
@@ -93,11 +93,7 @@
 
 | Test | Result | Mapped to a feature |
 |---|---|---|
-| `auth::tests::base64` | PASS | no |
-| `auth::tests::hmac_rfc4231` | PASS | yes |
 | `auth::tests::md5_matches_postgres` | PASS | yes |
-| `auth::tests::nonce_must_extend_ours` | PASS | yes |
-| `auth::tests::rfc7677_example` | PASS | yes |
 | `backend::tests::routine_calls` | PASS | yes |
 | `config::tests::bad_urls` | PASS | yes |
 | `config::tests::urls` | PASS | yes |
@@ -123,14 +119,35 @@
 | `tls_modes_check_what_they_promise` | PASS | yes |
 | `values_of_every_common_type` | PASS | yes |
 | `unix_domain_socket` | PASS | yes |
+| `ci::mongodb_ubuntu_latest` | PASS | no |
 | `ci::oracle_live_ubuntu_latest` | PASS | no |
-| `ci::postgres_windows_latest` | PASS | yes |
-| `ci::redis_windows_latest` | PASS | no |
-| `ci::drivers_ubuntu_latest` | PASS | no |
-| `ci::drivers_macos_latest` | PASS | no |
-| `ci::postgres_macos_latest` | PASS | yes |
-| `ci::redis_macos_latest` | PASS | no |
-| `ci::redis_ubuntu_latest` | PASS | no |
+| `ci::mongodb_windows_latest` | PASS | no |
+| `ci::nats_macos_latest` | PASS | no |
 | `ci::drivers_windows_latest` | PASS | no |
+| `ci::meilisearch_macos_latest` | PASS | no |
+| `ci::s3_windows_latest` | PASS | no |
+| `ci::kafka_macos_latest` | PASS | no |
+| `ci::s3_macos_latest` | PASS | no |
+| `ci::meilisearch_windows_latest` | PASS | no |
+| `ci::nats_windows_latest` | PASS | no |
+| `ci::valkey_ubuntu_latest` | PASS | no |
+| `ci::redis_macos_latest` | PASS | no |
 | `ci::postgres_ubuntu_latest` | PASS | yes |
+| `ci::meilisearch_ubuntu_latest` | PASS | no |
+| `ci::rabbitmq_macos_latest` | PASS | no |
+| `ci::nats_ubuntu_latest` | PASS | no |
+| `ci::s3_ubuntu_latest` | PASS | no |
+| `ci::drivers_ubuntu_latest` | PASS | no |
+| `ci::kafka_windows_latest` | PASS | no |
+| `ci::mongodb_macos_latest` | PASS | no |
+| `ci::rabbitmq_ubuntu_latest` | PASS | no |
+| `ci::redis_ubuntu_latest` | PASS | no |
+| `ci::mssql_live_ubuntu_latest` | PASS | no |
+| `ci::redis_windows_latest` | PASS | no |
+| `ci::mariadb_ubuntu_latest` | PASS | no |
+| `ci::postgres_macos_latest` | PASS | yes |
+| `ci::rabbitmq_windows_latest` | PASS | no |
+| `ci::drivers_macos_latest` | PASS | no |
+| `ci::postgres_windows_latest` | PASS | yes |
+| `ci::kafka_ubuntu_latest` | PASS | no |
 

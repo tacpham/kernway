@@ -82,7 +82,7 @@ if [ "$MODE" = docker ]; then
   TOOLS="docker exec -i kernway-kafka /opt/kafka/bin"
   RESTART="docker restart kernway-kafka"
   EXT=".sh"
-  VERSION="$(docker exec kernway-kafka ls /opt/kafka/libs | sed -n 's/^kafka_2\.13-\([0-9.]*\)\.jar$/\1/p' | head -1)"
+  VERSION="$(docker exec kernway-kafka ls /opt/kafka/libs | sed -n 's/^kafka_2\.13-\([0-9.]*\)\.jar$/\1/p' | sed -n 1p)"
 else
   # Java directly (not the .sh / .bat wrappers): cmd.exe splits the SCRAM
   # specs at their = and , — the JVM gets its arguments intact on every OS.
@@ -101,7 +101,7 @@ else
   cat > "$DIR/restart.sh" <<EOS
 #!/usr/bin/env bash
 if [ -n "$WIN" ]; then
-  pid=\$(netstat -ano | grep -E 'TCP +[^ ]+:9092 +[^ ]+ +LISTENING' | awk '{print \$NF}' | head -1)
+  pid=\$(netstat -ano | grep -E 'TCP +[^ ]+:9092 +[^ ]+ +LISTENING' | awk '{print \$NF}' | sed -n 1p)
   [ -n "\$pid" ] && taskkill //F //PID "\$pid" >/dev/null 2>&1
 else
   kill "\$(cat "$DIR/pid")" 2>/dev/null

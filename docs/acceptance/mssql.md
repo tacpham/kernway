@@ -5,20 +5,20 @@
 
 | | |
 |---|---|
-| generated | 2026-11-27 04:58 UTC |
+| generated | 2026-11-27 15:41 UTC |
 | server | Microsoft SQL Server 2022 (RTM-CU28) (KB5125472) - 16.0.4325.4 (X64) |
 | image | mcr.microsoft.com/mssql/server:2022-latest |
 | container | kernway-mssql |
-| driver commit | 3861280 on feat/sqlserver-full |
+| driver commit | 0170340 on docs/acceptance-orm-reuse |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
-| command | `cargo test -p kernway-orm-mssql --features mssql --lib --tests -- --test-threads=1 --nocapture  ; CI run 45942376687 (Linux / macOS / Windows)` |
+| command | `cargo test -p kernway-orm-mssql --features mssql --lib --tests -- --test-threads=1 --nocapture  ; CI run 46025359144 (Linux / macOS / Windows)` |
 
 ## Verdict: implemented features **PASSED** · completeness **21/29** — NOT complete
 
 - *Implemented features* passes only if every test ran and passed (no skips) in this run.
 - *Completeness* counts 🚧 gaps (listed below) against the full feature catalog.
 - Features verified: **21 / 29** (8 not implemented yet, 0 failing; 0 not applicable to SQL Server).
-- Tests run: 29 — 29 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
+- Tests run: 46 — 46 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
 - A feature is ✅ only when every test listed as its evidence ran and passed in this run.
 
 ## Connection & security
@@ -99,18 +99,35 @@
 | `transactions_cursors_and_batches` | PASS | yes |
 | `values_of_every_common_type` | PASS | yes |
 | `no_blocking_call_runs_on_the_reactor` | PASS | yes |
-| `ci::mssql_live_ubuntu_latest` | PASS | no |
-| `ci::oracle_live_ubuntu_latest` | PASS | no |
-| `ci::drivers_ubuntu_latest` | PASS | yes |
-| `ci::postgres_macos_latest` | PASS | no |
-| `ci::redis_ubuntu_latest` | PASS | no |
-| `ci::postgres_windows_latest` | PASS | no |
-| `ci::drivers_macos_latest` | PASS | yes |
-| `ci::drivers_windows_latest` | PASS | yes |
-| `ci::postgres_ubuntu_latest` | PASS | no |
-| `ci::redis_windows_latest` | PASS | no |
-| `ci::mongodb_macos_latest` | PASS | no |
-| `ci::redis_macos_latest` | PASS | no |
-| `ci::mongodb_windows_latest` | PASS | no |
 | `ci::mongodb_ubuntu_latest` | PASS | no |
+| `ci::oracle_live_ubuntu_latest` | PASS | no |
+| `ci::mongodb_windows_latest` | PASS | no |
+| `ci::nats_macos_latest` | PASS | no |
+| `ci::drivers_windows_latest` | PASS | yes |
+| `ci::meilisearch_macos_latest` | PASS | no |
+| `ci::s3_windows_latest` | PASS | no |
+| `ci::kafka_macos_latest` | PASS | no |
+| `ci::s3_macos_latest` | PASS | no |
+| `ci::meilisearch_windows_latest` | PASS | no |
+| `ci::nats_windows_latest` | PASS | no |
+| `ci::valkey_ubuntu_latest` | PASS | no |
+| `ci::redis_macos_latest` | PASS | no |
+| `ci::postgres_ubuntu_latest` | PASS | no |
+| `ci::meilisearch_ubuntu_latest` | PASS | no |
+| `ci::rabbitmq_macos_latest` | PASS | no |
+| `ci::nats_ubuntu_latest` | PASS | no |
+| `ci::s3_ubuntu_latest` | PASS | no |
+| `ci::drivers_ubuntu_latest` | PASS | yes |
+| `ci::kafka_windows_latest` | PASS | no |
+| `ci::mongodb_macos_latest` | PASS | no |
+| `ci::rabbitmq_ubuntu_latest` | PASS | no |
+| `ci::redis_ubuntu_latest` | PASS | no |
+| `ci::mssql_live_ubuntu_latest` | PASS | no |
+| `ci::redis_windows_latest` | PASS | no |
+| `ci::mariadb_ubuntu_latest` | PASS | no |
+| `ci::postgres_macos_latest` | PASS | no |
+| `ci::rabbitmq_windows_latest` | PASS | no |
+| `ci::drivers_macos_latest` | PASS | yes |
+| `ci::postgres_windows_latest` | PASS | no |
+| `ci::kafka_ubuntu_latest` | PASS | no |
 

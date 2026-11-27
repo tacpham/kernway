@@ -5,20 +5,20 @@
 
 | | |
 |---|---|
-| generated | 2026-11-27 11:48 UTC |
+| generated | 2026-11-27 15:41 UTC |
 | server | MariaDB 11.4.13-MariaDB-ubu2404 |
 | image | mariadb:11.4 |
 | container | kernway-mariadb |
-| driver commit | 4b72c98 on feat/mariadb-valkey |
+| driver commit | 0170340 on docs/acceptance-orm-reuse |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
-| command | `cargo test -p kernway-orm-mysql --features mysql --lib --tests -- --test-threads=1 --nocapture  --skip local_socket_ --skip caching_sha2; local_socket_connects* / local_socket_refuses* inside kernway-mariadb; CI run 45990705124 (Linux / macOS / Windows)` |
+| command | `cargo test -p kernway-orm-mysql --features mysql --lib --tests -- --test-threads=1 --nocapture  --skip local_socket_ --skip caching_sha2; local_socket_connects* / local_socket_refuses* inside kernway-mariadb; CI run 46025359144 (Linux / macOS / Windows)` |
 
 ## Verdict: implemented features **PASSED** · completeness **43/45** — NOT complete
 
 - *Implemented features* passes only if every test ran and passed (no skips) in this run.
 - *Completeness* counts 🚧 gaps (listed below) against the full feature catalog.
 - Features verified: **43 / 45** (2 not implemented yet, 0 failing; 5 not applicable to MariaDB (MySQL driver)).
-- Tests run: 82 — 82 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
+- Tests run: 85 — 85 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
 - A feature is ✅ only when every test listed as its evidence ran and passed in this run.
 
 ## Connection & security
@@ -169,32 +169,35 @@
 | `scripts_run_several_statements_but_ordinary_calls_never_stack` | PASS | yes |
 | `local_socket_connects_over_the_servers_local_channel` | PASS | yes |
 | `local_socket_refuses_an_ssl_mode_that_requires_tls` | PASS | yes |
-| `ci::postgres_windows_latest` | PASS | no |
-| `ci::kafka_macos_latest` | PASS | no |
-| `ci::nats_macos_latest` | PASS | no |
-| `ci::redis_windows_latest` | PASS | no |
-| `ci::redis_macos_latest` | PASS | no |
-| `ci::nats_ubuntu_latest` | PASS | no |
 | `ci::mongodb_ubuntu_latest` | PASS | no |
+| `ci::oracle_live_ubuntu_latest` | PASS | no |
+| `ci::mongodb_windows_latest` | PASS | no |
+| `ci::nats_macos_latest` | PASS | no |
+| `ci::drivers_windows_latest` | PASS | yes |
+| `ci::meilisearch_macos_latest` | PASS | no |
+| `ci::s3_windows_latest` | PASS | no |
+| `ci::kafka_macos_latest` | PASS | no |
+| `ci::s3_macos_latest` | PASS | no |
 | `ci::meilisearch_windows_latest` | PASS | no |
 | `ci::nats_windows_latest` | PASS | no |
-| `ci::kafka_ubuntu_latest` | PASS | no |
-| `ci::rabbitmq_macos_latest` | PASS | no |
-| `ci::oracle_live_ubuntu_latest` | PASS | no |
-| `ci::rabbitmq_windows_latest` | PASS | no |
+| `ci::valkey_ubuntu_latest` | PASS | no |
+| `ci::redis_macos_latest` | PASS | no |
 | `ci::postgres_ubuntu_latest` | PASS | no |
 | `ci::meilisearch_ubuntu_latest` | PASS | no |
-| `ci::postgres_macos_latest` | PASS | no |
-| `ci::mongodb_windows_latest` | PASS | no |
-| `ci::mssql_live_ubuntu_latest` | PASS | no |
-| `ci::rabbitmq_ubuntu_latest` | PASS | no |
+| `ci::rabbitmq_macos_latest` | PASS | no |
+| `ci::nats_ubuntu_latest` | PASS | no |
+| `ci::s3_ubuntu_latest` | PASS | no |
 | `ci::drivers_ubuntu_latest` | PASS | no |
-| `ci::drivers_macos_latest` | PASS | yes |
-| `ci::meilisearch_macos_latest` | PASS | no |
-| `ci::valkey_ubuntu_latest` | PASS | no |
-| `ci::drivers_windows_latest` | PASS | yes |
-| `ci::mariadb_ubuntu_latest` | PASS | yes |
-| `ci::redis_ubuntu_latest` | PASS | no |
-| `ci::mongodb_macos_latest` | PASS | no |
 | `ci::kafka_windows_latest` | PASS | no |
+| `ci::mongodb_macos_latest` | PASS | no |
+| `ci::rabbitmq_ubuntu_latest` | PASS | no |
+| `ci::redis_ubuntu_latest` | PASS | no |
+| `ci::mssql_live_ubuntu_latest` | PASS | no |
+| `ci::redis_windows_latest` | PASS | no |
+| `ci::mariadb_ubuntu_latest` | PASS | yes |
+| `ci::postgres_macos_latest` | PASS | no |
+| `ci::rabbitmq_windows_latest` | PASS | no |
+| `ci::drivers_macos_latest` | PASS | yes |
+| `ci::postgres_windows_latest` | PASS | no |
+| `ci::kafka_ubuntu_latest` | PASS | no |
 

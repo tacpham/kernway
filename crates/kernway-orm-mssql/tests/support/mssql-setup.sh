@@ -54,7 +54,7 @@ IF SUSER_ID('kw_app') IS NULL CREATE LOGIN kw_app WITH PASSWORD = 'Kw_app_pw1!',
 ALTER AUTHORIZATION ON DATABASE::kernway_test TO kw_app;
 GRANT VIEW SERVER STATE TO kw_app;
 " >/dev/null
-"${SQLCMD[@]}" -Q 'SELECT @@VERSION' -h -1 | head -1 >&2
+"${SQLCMD[@]}" -Q 'SELECT @@VERSION' -h -1 | sed -n 1p >&2
 echo "KERNWAY_MSSQL_URL=mssql://kw_app:Kw_app_pw1%21@127.0.0.1:1433/kernway_test?trustServerCertificate=true"
 echo "KERNWAY_MSSQL_SA_URL=mssql://sa:Kernway_pw1%21@127.0.0.1:1433/master?trustServerCertificate=true"
 echo "KERNWAY_MSSQL_TLS_DIR=$DIR"

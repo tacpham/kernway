@@ -5,13 +5,13 @@
 
 | | |
 |---|---|
-| generated | 2026-11-26 23:53 UTC |
+| generated | 2026-11-27 15:39 UTC |
 | server | SQLite 3.54.1 |
 | image | vendored in the driver (crates/kernway-orm-sqlite/sqlite, official amalgamation), own C-API binding |
 | container | none (embedded) |
-| driver commit | 12d47d0 on feat/sqlite-ffi |
+| driver commit | 0170340 on docs/acceptance-orm-reuse |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
-| command | `cargo test -p kernway-orm-sqlite  --lib --tests -- --test-threads=1 --nocapture ; CI run 45913191570 (Linux / macOS / Windows)` |
+| command | `cargo test -p kernway-orm-sqlite  --lib --tests -- --test-threads=1 --nocapture  ; CI run 46025359182 (Linux / macOS / Windows)` |
 
 ## Verdict: implemented features **PASSED** · completeness **47/47** — complete
 
@@ -156,8 +156,8 @@
 | `values_are_typed_by_the_declared_column_type` | PASS | yes |
 | `waiting_for_a_lock_queues_without_stalling_and_times_out_cleanly` | PASS | yes |
 | `unsafe_code_lives_only_in_the_binding` | PASS | yes |
-| `ci::test_macos_latest` | PASS | yes |
-| `ci::test_windows_latest` | PASS | yes |
-| `ci::test_ubuntu_latest` | PASS | yes |
 | `ci::service_backed_tests_Redis,_Meilisearch,_network` | PASS | no |
+| `ci::test_macos_latest` | PASS | yes |
+| `ci::test_ubuntu_latest` | PASS | yes |
+| `ci::test_windows_latest` | PASS | yes |
 

@@ -167,7 +167,7 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     log "MongoDB (${MONGO_IMAGE:-mongo:8.0}): standalone, TLS, replica set, sharded cluster"
     "$ROOT/crates/kernway-orm-mongodb/tests/support/mongo-setup.sh" "$WORK/mongo" > "$WORK/mongo.env"
     set -a; . "$WORK/mongo.env"; set +a
-    VERSION="MongoDB $(docker exec "$C" mongod --version | head -1 | sed 's/db version v//')"
+    VERSION="MongoDB $(docker exec "$C" mongod --version | sed -n 1p | sed 's/db version v//')"
     CRATE=kernway-orm-mongodb; FEATURES=(); TITLE=MongoDB
     # The Unix-socket test runs inside the container (in_container_tests).
     SKIP=(--skip unix_domain_socket)
@@ -179,7 +179,7 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     log "SQL Server (${MSSQL_IMAGE:-mcr.microsoft.com/mssql/server:2022-latest}) with TLS"
     "$ROOT/crates/kernway-orm-mssql/tests/support/mssql-setup.sh" "$WORK/mssql" > "$WORK/mssql.env"
     set -a; . "$WORK/mssql.env"; set +a
-    VERSION="$(docker exec "$C" /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Kernway_pw1!' -h -1 -Q 'SET NOCOUNT ON; SELECT @@VERSION' | head -1 | sed 's/ *$//')"
+    VERSION="$(docker exec "$C" /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Kernway_pw1!' -h -1 -Q 'SET NOCOUNT ON; SELECT @@VERSION' | sed -n 1p | sed 's/ *$//')"
     CRATE=kernway-orm-mssql; FEATURES=(--features mssql); TITLE="SQL Server"; SKIP=()
     ;;
   nats)
@@ -258,7 +258,7 @@ if ! grep -q "^test result:" "$WORK/test.log"; then
 fi
 
 if [ "$DB" = sqlite ]; then
-  VERSION="SQLite $(sed -n 's/.*SQLite engine: //p' "$WORK/test.log" | head -1)"
+  VERSION="SQLite $(sed -n 's/.*SQLite engine: //p' "$WORK/test.log" | sed -n 1p)"
 fi
 
 # Tests that must run next to the server (its Unix socket): build a static

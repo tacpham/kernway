@@ -31,7 +31,7 @@ Connection & security | Encrypted client keys (tlsCertificateKeyFilePassword), O
 Connection & security | Unix-domain sockets on Windows | GAP: rt-net has no AF_UNIX on Windows; TCP there
 
 Protocol | OP_MSG with document sequences; replies checked (request ids, sizes, sections, checksums) | wire::tests::op_msg_round_trips_compressed_or_not, writes_updates_and_limits
-Protocol | Compression: snappy (written here) and zlib, negotiated in hello and used for every command except the handshake / auth ones | wire::tests::snappy_round_trips, compression_is_negotiated_and_used
+Protocol | Compression: snappy (kernway-wire's, shared with Kafka) and zlib, negotiated in hello and used for every command except the handshake / auth ones | wire::tests::op_msg_round_trips_compressed_or_not, compression_is_negotiated_and_used
 Protocol | Errors with code, code name and labels; write errors per document; write-concern errors; duplicate keys typed | error::tests::replies_and_labels, writes_updates_and_limits
 Protocol | A command abandoned mid-flight (timeout) never leaves its reply on a pooled connection | change_streams_resume_after_errors
 Protocol | zstd compression | GAP: not negotiated (snappy and zlib are)

@@ -243,7 +243,7 @@ jobs:
           T="$(cygpath -u "$RUNNER_TEMP")"
           curl -fsSL -o "$T/mongodb.zip" "https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-$MONGO_VERSION.zip" && unzip -q "$T/mongodb.zip" -d "$T"
           curl -fsSL -o "$T/mongosh.zip" "https://downloads.mongodb.com/compass/mongosh-$MONGOSH_VERSION-win32-x64.zip" && unzip -q "$T/mongosh.zip" -d "$T"
-          MONGO_BIN="$(ls -d "$T"/mongodb-win32-x86_64-*/bin | head -1)" MONGOSH="$T/mongosh-$MONGOSH_VERSION-win32-x64/bin/mongosh.exe" \
+          MONGO_BIN="$(ls -d "$T"/mongodb-win32-x86_64-*/bin | sed -n 1p)" MONGOSH="$T/mongosh-$MONGOSH_VERSION-win32-x64/bin/mongosh.exe" \
             crates/kernway-orm-mongodb/tests/support/mongo-setup.sh "$T/mongo" >> "$GITHUB_ENV"
 
       - name: MongoDB driver — all tests, live

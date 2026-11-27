@@ -152,7 +152,9 @@ if [ -z "${MONGO_BIN:-}" ]; then
     for _ in $(seq 1 60); do sh_in kernway-mongo-sh mongosh --quiet --port 27120 --eval 'db.runCommand({ping:1}).ok' >/dev/null 2>&1 && break; sleep 1; done
     sh_in kernway-mongo-sh mongosh --quiet --port 27120 --eval 'sh.addShard("sh0/127.0.0.1:27122")' >/dev/null
   fi
-  VERSION="$(docker run --rm "$IMAGE" mongod --version | head -1)"
+  # Whole output first, then its first line: `| head -1` closes the pipe
+  # early and, under pipefail, the writer's "broken pipe" failed CI setup.
+  VERSION="$(docker run --rm "$IMAGE" mongod --version)"; VERSION="${VERSION%%$'\n'*}"
 else
   # ---- native -----------------------------------------------------------------
   MONGOSH="${MONGOSH:-$MONGO_BIN/mongosh$EXE}"
@@ -199,7 +201,7 @@ else
     wait_up --port 27120
     "$MONGOSH" --quiet --port 27120 --eval 'sh.addShard("sh0/127.0.0.1:27122")' >/dev/null
   fi
-  VERSION="$("$MONGO_BIN/mongod$EXE" --version | head -1)"
+  VERSION="$("$MONGO_BIN/mongod$EXE" --version)"; VERSION="${VERSION%%$'\n'*}"
 fi
 
 echo "$VERSION" >&2
