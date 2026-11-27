@@ -5,20 +5,20 @@
 
 | | |
 |---|---|
-| generated | 2026-11-27 02:03 UTC |
+| generated | 2026-11-27 02:23 UTC |
 | server | postgres (PostgreSQL) 18.7 |
 | image | postgres:18-alpine |
 | container | kernway-postgres |
-| driver commit | a9e37c9 on feat/postgres-full (uncommitted changes) |
+| driver commit | 7c15b1c on feat/postgres-full |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
-| command | `cargo test -p kernway-orm-postgres --features postgres --lib --tests -- --test-threads=1 --nocapture  --skip unix_domain_socket; unix_domain_socket inside kernway-postgres; CI run 45922402024 (Linux / macOS / Windows)` |
+| command | `cargo test -p kernway-orm-postgres --features postgres --lib --tests -- --test-threads=1 --nocapture  --skip unix_domain_socket; unix_domain_socket inside kernway-postgres; CI run 45927564050 (Linux / macOS / Windows)` |
 
-## Verdict: implemented features **FAILED** · completeness **28/37** — NOT complete
+## Verdict: implemented features **PASSED** · completeness **31/37** — NOT complete
 
 - *Implemented features* passes only if every test ran and passed (no skips) in this run.
 - *Completeness* counts 🚧 gaps (listed below) against the full feature catalog.
-- Features verified: **28 / 37** (6 not implemented yet, 3 failing; 1 not applicable to PostgreSQL).
-- Tests run: 37 — 37 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
+- Features verified: **31 / 37** (6 not implemented yet, 0 failing; 1 not applicable to PostgreSQL).
+- Tests run: 40 — 40 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
 - A feature is ✅ only when every test listed as its evidence ran and passed in this run.
 
 ## Connection & security
@@ -31,7 +31,7 @@
 | MD5, clear-text password, trust; wrong passwords refused (28P01) for each; a missing password explained | ✅ PASS | `auth::tests::md5_matches_postgres`<br>`every_authentication_method` |
 | TLS: sslmode disable / prefer / require / verify-ca / verify-full — the name check, the chain check, a missing CA file; TLS-only roles (hostssl) | ✅ PASS | `tls_modes_check_what_they_promise`<br>`every_authentication_method` |
 | Client-certificate authentication (cert auth, mutual TLS) | ✅ PASS | `every_authentication_method` |
-| Unix-domain socket (inside the PostgreSQL container, and on Linux / macOS CI) | ❌ FAIL | `unix_domain_socket`<br>`ci::postgres_ubuntu_latest` **NOT RUN**<br>`ci::postgres_macos_latest` **NOT RUN** |
+| Unix-domain socket (inside the PostgreSQL container, and on Linux / macOS CI) | ✅ PASS | `unix_domain_socket`<br>`ci::postgres_ubuntu_latest`<br>`ci::postgres_macos_latest` |
 | Several hosts tried in turn (a refused one first), every address of a name, target_session_attrs (primary / standby / read-write / read-only / prefer-standby), connect timeout against an address that never answers | ✅ PASS | `hosts_tried_in_turn_and_session_attrs` |
 | Start-up settings (application_name, search_path, statement_timeout), server parameters, version, backend pid | ✅ PASS | `hosts_tried_in_turn_and_session_attrs` |
 | GSSAPI / Kerberos / SSPI authentication | 🚧 GAP | refused with a clear error; only password, SCRAM, trust and certificate methods are spoken |
@@ -86,8 +86,8 @@
 | Feature | Status | Evidence / note |
 |---|---|---|
 | Fully async on kernway's reactor: DNS and certificate reads on the blocking pool, no blocking call on a shard (source scan) | ✅ PASS | `no_blocking_call_runs_on_the_reactor`<br>`host_names_resolve_off_the_reactor` |
-| Linux, macOS and Windows (CI on each, against a real server) | ❌ FAIL | `ci::postgres_ubuntu_latest` **NOT RUN**<br>`ci::postgres_macos_latest` **NOT RUN**<br>`ci::postgres_windows_latest` **NOT RUN** |
-| PostgreSQL 14 (oldest supported) as well as 18 | ❌ FAIL | `ci::postgres_ubuntu_latest` **NOT RUN** |
+| Linux, macOS and Windows (CI on each, against a real server) | ✅ PASS | `ci::postgres_ubuntu_latest`<br>`ci::postgres_macos_latest`<br>`ci::postgres_windows_latest` |
+| PostgreSQL 14 (oldest supported) as well as 18 | ✅ PASS | `ci::postgres_ubuntu_latest` |
 
 ## All tests in this run
 
@@ -124,10 +124,13 @@
 | `values_of_every_common_type` | PASS | yes |
 | `unix_domain_socket` | PASS | yes |
 | `ci::oracle_live_ubuntu_latest` | PASS | no |
-| `ci::drivers_macos_latest` | PASS | no |
-| `ci::redis_ubuntu_latest` | PASS | no |
+| `ci::postgres_windows_latest` | PASS | yes |
 | `ci::redis_windows_latest` | PASS | no |
-| `ci::redis_macos_latest` | PASS | no |
 | `ci::drivers_ubuntu_latest` | PASS | no |
+| `ci::drivers_macos_latest` | PASS | no |
+| `ci::postgres_macos_latest` | PASS | yes |
+| `ci::redis_macos_latest` | PASS | no |
+| `ci::redis_ubuntu_latest` | PASS | no |
 | `ci::drivers_windows_latest` | PASS | no |
+| `ci::postgres_ubuntu_latest` | PASS | yes |
 
