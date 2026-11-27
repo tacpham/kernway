@@ -10,7 +10,8 @@
 #   tls_first   localhost:4226   TLS before INFO (handshake_first)
 #   mtls        localhost:4227   TLS + a client certificate (client.crt/key)
 #   cluster     127.0.0.1:4230-4232  three routed nodes, JetStream, each
-#                                advertising 127.0.0.1:<its port>
+#                                advertising 127.0.0.1:<its port>; health
+#                                (monitoring) on 8230-8232
 #
 #   crates/kernway-nats/tests/support/nats-setup.sh [dir]
 #
@@ -98,6 +99,7 @@ for i in 0 1 2; do
 server_name: kw-n$i
 listen: 127.0.0.1:$port
 client_advertise: "127.0.0.1:$port"
+http: 127.0.0.1:$((8230 + i))
 jetstream { store_dir: "$(P js-n$i)" }
 cluster {
   name: kw-cluster
@@ -130,8 +132,16 @@ wait_port() {
   exit 1
 }
 for p in 4222 4223 4224 4225 4226 4227 4230 4231 4232; do wait_port $p; done
-# JetStream in the cluster needs a meta leader before streams can be made.
-sleep 3
+# JetStream in the cluster needs a meta leader before streams can be made:
+# wait until every node's health check says JetStream is current.
+for i in 0 1 2; do
+  ok=""
+  for _ in $(seq 1 120); do
+    if curl -fs "http://127.0.0.1:$((8230 + i))/healthz" >/dev/null 2>&1; then ok=1; break; fi
+    sleep 0.5
+  done
+  [ -n "$ok" ] || { echo "cluster node $i: JetStream not healthy; logs in $DIR" >&2; exit 1; }
+done
 
 echo "KERNWAY_NATS_URL=nats://127.0.0.1:4222"
 echo "KERNWAY_NATS_DIR=$(native_path "$DIR")"
