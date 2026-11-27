@@ -12,13 +12,14 @@
 #   acceptance/run.sh mssql    (SQL Server 2022 with a test CA, in Docker)
 #   acceptance/run.sh nats     (nats-server natively: plain, auth, TLS / mTLS, a JetStream cluster)
 #   acceptance/run.sh rabbitmq (RabbitMQ 4.1 with TLS and EXTERNAL auth, in Docker)
+#   acceptance/run.sh meilisearch (the official Meilisearch binary, natively)
 #
 # Containers (created if missing; existing ones and their data are reused):
 #   kernway-mysql   mysql:8.0                  host port 3307, root password "secret"
 #   kernway-oracle  gvenzl/oracle-free:23-slim host ports 1521 / 2484 (TCPS)
 # Oracle TCPS needs a wallet once: crates/kernway-orm-oracle/tests/support/oracle-tcps-setup.sh
 set -euo pipefail
-DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb|mssql|nats|rabbitmq}"
+DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb|mssql|nats|rabbitmq|meilisearch}"
 # CI workflow whose jobs for this commit are the cross-OS evidence.
 WORKFLOW=drivers.yml; IMAGE=""; EXTRA=()
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -192,7 +193,17 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     VERSION="RabbitMQ $KERNWAY_RABBITMQ_VERSION"
     CRATE=kernway-rabbitmq; FEATURES=(); TITLE=RabbitMQ; SKIP=()
     ;;
-  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql | nats | rabbitmq)" >&2; exit 2 ;;
+  meilisearch)
+    # The official release binary, natively, with a fresh data dir.
+    log "Meilisearch (native release binary)"
+    "$ROOT/crates/kernway-orm-meilisearch/tests/support/meili-setup.sh" "$ROOT/target/meili" > "$WORK/meili.env"
+    set -a; . "$WORK/meili.env"; set +a
+    VERSION="Meilisearch $MEILI_VERSION"; IMAGE="official release binary (native)"; C="none (native meilisearch process)"
+    CRATE=kernway-orm-meilisearch; FEATURES=(--features meilisearch); TITLE=Meilisearch; SKIP=()
+    # Its live tests are #[ignore]d for plain `cargo test`: run them here.
+    EXTRA=(--include-ignored)
+    ;;
+  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql | nats | rabbitmq | meilisearch)" >&2; exit 2 ;;
 esac
 
 CMD="cargo test -p $CRATE ${FEATURES[*]+${FEATURES[*]}} --lib --tests -- --test-threads=1 --nocapture ${EXTRA[*]+${EXTRA[*]}} ${SKIP[*]+${SKIP[*]}}"

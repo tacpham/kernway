@@ -364,6 +364,37 @@ jobs:
             grep -q "^test $t " rabbitmq.log || { echo "did not run: $t"; exit 1; }
           done
 
+  # Meilisearch is one binary on every OS: the setup script downloads the
+  # official release and runs it natively.
+  meilisearch:
+    name: meilisearch (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Meilisearch (official release binary)
+        shell: bash
+        run: crates/kernway-orm-meilisearch/tests/support/meili-setup.sh "$RUNNER_TEMP/meili" >> "$GITHUB_ENV"
+
+      - name: Meilisearch driver — all tests, live
+        shell: bash
+        run: cargo test -p kernway-orm-meilisearch --features meilisearch --lib --tests -- --include-ignored --test-threads=1 --nocapture 2>&1 | tee meili.log
+
+      - name: The live tests ran
+        shell: bash
+        run: |
+          for t in test_ping test_vietnamese_search_ignores_diacritics test_errors_are_reported; do
+            grep -q "^test $t " meili.log || { echo "did not run: $t"; exit 1; }
+          done
+
   # SQL Server runs on Linux in Docker (Microsoft ships no macOS build, and a
   # Windows runner has no TCP-enabled instance); the client code is the same
   # on every OS — it builds and its unit tests pass in the drivers job above.

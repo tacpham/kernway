@@ -1,0 +1,27 @@
+# Meilisearch feature catalog for the acceptance report.
+# area | feature | evidence
+# evidence = comma-separated test names (all must pass), or
+#            GAP: <why>  (not implemented / not verified — counted against completeness)
+#            N/A: <why>  (Meilisearch has no such feature)
+#
+# The driver maps the ORM's Repository onto Meilisearch's REST API through
+# kernway-http-client. Every live test runs against the official
+# Meilisearch release binary, natively, set up by
+# crates/kernway-orm-meilisearch/tests/support/meili-setup.sh (a master key,
+# a fresh data dir). CI runs the same suite on Linux, macOS and Windows.
+
+Repository | Ping; save / find by id (missing: none); save all / find all; count; exists; delete by id; find / delete many by ids | test_ping, test_save_and_find_by_id, test_find_by_id_missing, test_save_all_and_find_all, test_count, test_exists_by_id, test_delete_by_id, test_find_all_by_ids, test_delete_all_by_ids
+Repository | Primary keys: integers, strings, composite keys (synthesized into one) | test_custom_string_id, test_composite_primary_key
+Queries | Filters: eq / ne, gt / lt / gte / lte, between, in, null checks, AND, specifications with OR — rendered to Meilisearch filter syntax, values quoted / escaped | test_filterable_attributes_and_filter_eq, test_filter_gt_lt, test_filter_gte_lte, test_filter_between, test_filter_in, test_combined_filters, test_filter_spec_or, query::tests::spec_renders_to_a_parenthesised_meili_filter, query::tests::quote_strings_get_double_quoted, query::tests::quote_integers_are_unquoted, query::tests::quote_floats_are_unquoted, query::tests::quote_escapes_inner_double_quote, query::tests::no_filters_gives_none, query::tests::filter_eq_string, query::tests::filter_ne, query::tests::filter_gt_numeric, query::tests::filter_gte, query::tests::filter_lte, query::tests::filter_in_strings, query::tests::filter_in_numbers, query::tests::filter_between, query::tests::filter_is_null, query::tests::filter_is_not_null, query::tests::multiple_filters_joined_with_and, query::tests::filter_like_sets_q_not_filter, query::tests::filter_like_on_concrete_sets_search_query, query::tests::order_by_appends_sort_expressions, query::tests::limit_and_offset_stored
+Queries | Sort (sortable attributes), limit / offset, pagination's max total hits | test_sortable_attributes_and_order_by, test_limit_and_offset, test_set_pagination_max_total_hits
+Search | Full-text search through the query builder (filter_like) | test_filter_like_fulltext
+Search | Vietnamese typed without its accents finds the accented name ("luong" → "Lương", "duc" → "Đức"), and with them | test_vietnamese_search_ignores_diacritics
+Search | Typo tolerance off per attribute (phone numbers, codes): only the exact number, names keep their typo tolerance | test_vietnamese_search_ignores_diacritics
+Search | Highlighting / cropping, facet distributions, ranking-rule / synonym / stop-word settings, multi-search, hybrid / vector search | GAP: not exposed by the driver (the Repository returns documents)
+Settings & tasks | Filterable / searchable / sortable attributes, pagination, faceting set and their tasks awaited | test_filterable_attributes_and_filter_eq, test_sortable_attributes_and_order_by, test_set_pagination_max_total_hits
+Errors | A wrong API key and an unreachable server come back as errors (not hangs, not panics) | test_errors_are_reported
+Security | API keys with scopes, tenant tokens | GAP: one key per driver (the master or an application key); key management not exposed
+Security | HTTPS with a private CA / self-signed certificate | GAP: https is verified against the public web roots only (no CA option)
+
+Reliability | Fully async on kernway's reactor: no blocking call on a shard (source scan) | no_blocking_call_runs_on_the_reactor
+Reliability | Linux, macOS and Windows (CI on each, against a real server) | ci::meilisearch_ubuntu_latest, ci::meilisearch_macos_latest, ci::meilisearch_windows_latest

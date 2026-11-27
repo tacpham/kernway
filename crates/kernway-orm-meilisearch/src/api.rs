@@ -365,6 +365,31 @@ pub async fn set_filterable_attributes(
     wait_for_task(base_url, api_key, task.task_uid).await
 }
 
+/// Turn typo tolerance off for `attributes` — identifiers such as phone
+/// numbers, codes and SKUs, where a near match is a different record
+/// (`4805550101` must not match `4805550102`). Other attributes keep it.
+///
+/// Triggers an index rebuild — waits for the task. The server's refusal
+/// comes back as an error with its reason.
+pub async fn set_typo_tolerance(base_url: &str, api_key: &str, index: &str, disable_on_attributes: &[&str]) -> Result<(), OrmError> {
+    let url = format!("{}/indexes/{}/settings/typo-tolerance", base_url, index);
+    let json = serde_json::to_vec(&serde_json::json!({ "disableOnAttributes": disable_on_attributes })).map_err(|e| OrmError::TypeConversion(e.to_string()))?;
+    let resp = client()
+        .send(
+            Request::new(Method::Patch, Url::parse(&url).map_err(map_http)?)
+                .header("Authorization", bearer(api_key))
+                .body("application/json", json),
+        )
+        .await
+        .map_err(map_http)?;
+    if !(200..300).contains(&resp.status) {
+        return Err(map_status(resp.status, &resp.body));
+    }
+    let task: TaskEnqueued =
+        serde_json::from_slice(&resp.body).map_err(|e| OrmError::TypeConversion(e.to_string()))?;
+    wait_for_task(base_url, api_key, task.task_uid).await
+}
+
 /// Set the **searchable** attributes for an index — the fields a full-text query matches, in
 /// priority order (earlier fields rank higher via the `attribute` ranking rule). Restricting
 /// this to meaningful fields keeps opaque identifiers out of relevance: e.g. leaving a numeric

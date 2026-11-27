@@ -652,3 +652,66 @@ fn test_filter_spec_or() {
         Ok(())
     });
 }
+
+/// A customer, as the POS searches them.
+#[entity(table = "customers_vi_test")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Customer {
+    #[id()]
+    id: u64,
+    name: String,
+    phone: String,
+}
+
+/// Vietnamese names are found typed without their accents (the front desk
+/// types "luong" for "Lương"), and with them.
+#[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
+fn test_vietnamese_search_ignores_diacritics() {
+    run!(async {
+        cleanup("customers_vi_test").await;
+        let repo: Box<dyn Repository<Customer>> = driver().repository();
+        repo.save_all(vec![
+            Customer { id: 1, name: "Nguyễn Thị Lương".into(), phone: "4805550101".into() },
+            Customer { id: 2, name: "Trần Văn Đức".into(), phone: "4805550102".into() },
+            Customer { id: 3, name: "Lê Hoàng Anh".into(), phone: "4805550103".into() },
+        ])
+        .await?;
+        let names = |v: Vec<Customer>| v.into_iter().map(|c| c.name).collect::<Vec<_>>();
+        for (typed, want) in [("luong", "Nguyễn Thị Lương"), ("Lương", "Nguyễn Thị Lương"), ("nguyen", "Nguyễn Thị Lương"), ("hoang", "Lê Hoàng Anh"), ("duc", "Trần Văn Đức"), ("Đức", "Trần Văn Đức")] {
+            let got = names(repo.query().filter_like("name", typed).fetch_all().await?);
+            assert_eq!(got, [want], "typed {typed:?}");
+        }
+        // A phone number: by default a near number matches too (typo
+        // tolerance) — ranked after the exact one, but a different customer.
+        let got = names(repo.query().filter_like("phone", "4805550102").fetch_all().await?);
+        assert_eq!(got.first().map(String::as_str), Some("Trần Văn Đức"), "the exact number first");
+        assert!(got.len() > 1, "near numbers match while typo tolerance is on: {got:?}");
+        // With typo tolerance off for the phone, only the exact number.
+        api::set_typo_tolerance(&meili_url(), &meili_key(), "customers_vi_test", &["phone"]).await?;
+        let got = names(repo.query().filter_like("phone", "4805550102").fetch_all().await?);
+        assert_eq!(got, ["Trần Văn Đức"]);
+        // Names keep it: one typo still finds her.
+        let got = names(repo.query().filter_like("name", "luongg").fetch_all().await?);
+        assert_eq!(got, ["Nguyễn Thị Lương"]);
+        cleanup("customers_vi_test").await;
+        Ok(())
+    });
+}
+
+/// Failures come back as errors with the server's reason — not hangs, not panics.
+#[test]
+#[ignore = "requires a live Meilisearch (see module docs); run with --ignored"]
+fn test_errors_are_reported() {
+    run!(async {
+        // A wrong key.
+        let bad = MeilisearchDriver::connect(meili_url(), "not-the-key");
+        let repo: Box<dyn Repository<Product>> = bad.repository();
+        let e = repo.find_all().await.err().expect("a wrong key fails");
+        assert!(e.to_string().contains("403") || e.to_string().contains("401") || e.to_string().contains("invalid_api_key"), "{e}");
+        // Nothing listening.
+        let gone = MeilisearchDriver::connect("http://127.0.0.1:9", meili_key());
+        assert!(matches!(gone.ping().await, Err(OrmError::Connection(_))));
+        Ok(())
+    });
+}
