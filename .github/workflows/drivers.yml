@@ -65,6 +65,78 @@ jobs:
         shell: bash
         run: cargo test -p kernway-orm-oracle --lib --test no_blocking -- --test-threads=1
 
+  # The Redis client on every OS against real servers. Linux and macOS run the
+  # whole suite — single node (TCP + Unix socket), TLS with mutual TLS,
+  # Sentinel with a real failover, Cluster with a live slot migration and a
+  # failover — from local redis-server processes. Windows has no official
+  # Redis: Memurai (the Redis-compatible server for Windows) serves the
+  # connection and command suites over TCP.
+  redis:
+    name: redis (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Redis servers (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq redis-server redis-sentinel >/dev/null
+          sudo systemctl stop redis-server redis-sentinel 2>/dev/null || true
+          redis-server --version
+          .github/scripts/redis-local.sh "$RUNNER_TEMP/redis"
+
+      - name: Redis servers (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install redis >/dev/null
+          redis-server --version
+          .github/scripts/redis-local.sh "$RUNNER_TEMP/redis"
+
+      - name: Memurai (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          choco install memurai-developer -y --no-progress >/dev/null
+          for _ in $(seq 1 30); do
+            "/c/Program Files/Memurai/memurai-cli.exe" PING 2>/dev/null | grep -q PONG && break
+            sleep 2
+          done
+          "/c/Program Files/Memurai/memurai-cli.exe" INFO server | grep -i version
+          "/c/Program Files/Memurai/memurai-cli.exe" ACL SETUSER kernway on '>kernway_pw' '~*' '&*' '+@all'
+          for v in "KERNWAY_REDIS_URL=redis://127.0.0.1:6379" "KW_REDIS_ADDR=127.0.0.1:6379" "KERNWAY_REDIS_ADDR=127.0.0.1:6379" \
+                   "KERNWAY_REDIS_USER=kernway" "KERNWAY_REDIS_PASS=kernway_pw"; do
+            echo "$v" >> "$GITHUB_ENV"
+          done
+
+      - name: Redis client — all tests, live
+        shell: bash
+        run: cargo test -p kernway-redis -- --include-ignored --test-threads=1 --nocapture 2>&1 | tee redis.log
+
+      - name: Nothing was skipped
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            # TLS, Sentinel and Cluster run on Linux and macOS; here the
+            # connection and command suites must have run, none skipped.
+            cargo test -p kernway-redis --test connection --test commands -- --test-threads=1 --nocapture 2>&1 | tee win.log
+            ! grep -q "skip:" win.log
+            grep -q "test result: ok. 12 passed" win.log  # connection (the Unix-socket test is not built here)
+            grep -q "test result: ok. 8 passed" win.log
+          else
+            ! grep -q "skip:" redis.log
+          fi
+
   # Oracle Database ships a server image for Linux only (no macOS / Windows
   # runner can host one), so the live suite runs here; the client code it
   # exercises is the same on every OS (above: it builds and its unit tests pass

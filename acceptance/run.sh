@@ -6,15 +6,16 @@
 #   acceptance/run.sh mysql
 #   acceptance/run.sh oracle
 #   acceptance/run.sh sqlite   (embedded: no container, real database files)
+#   acceptance/run.sh redis    (single node, TLS, Sentinel, Cluster — all in Docker)
 #
 # Containers (created if missing; existing ones and their data are reused):
 #   kernway-mysql   mysql:8.0                  host port 3307, root password "secret"
 #   kernway-oracle  gvenzl/oracle-free:23-slim host ports 1521 / 2484 (TCPS)
 # Oracle TCPS needs a wallet once: crates/kernway-orm-oracle/tests/support/oracle-tcps-setup.sh
 set -euo pipefail
-DB="${1:?usage: $0 mysql|oracle|sqlite}"
+DB="${1:?usage: $0 mysql|oracle|sqlite|redis}"
 # CI workflow whose jobs for this commit are the cross-OS evidence.
-WORKFLOW=drivers.yml; IMAGE=""
+WORKFLOW=drivers.yml; IMAGE=""; EXTRA=()
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/docs/acceptance"
 WORK="$(mktemp -d)"
@@ -103,12 +104,38 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     # The workspace CI runs every crate's tests on Linux, macOS and Windows.
     WORKFLOW=workspace.yml
     ;;
-  *) echo "unknown database: $DB (mysql | oracle | sqlite)" >&2; exit 2 ;;
+  redis)
+    # Four deployments: a single node (with a Unix socket), TLS-only (with
+    # client certificates), Sentinel (master + replica + 3 sentinels) and a
+    # 3-master / 3-replica Cluster. The TLS, Sentinel and Cluster containers
+    # are recreated each run (test data only).
+    C="${REDIS_CONTAINER:-kernway-redis}"; IMAGE_TAG="${REDIS_IMAGE:-redis:7.4-alpine}"
+    S="$ROOT/crates/kernway-redis/tests/support"
+    ensure_container "$C" -p 6380:6379 "$IMAGE_TAG" redis-server --unixsocket /tmp/redis.sock --unixsocketperm 777
+    wait_for "Redis" docker exec "$C" redis-cli PING
+    # The ACL user the pub/sub and cache tests authenticate as.
+    docker exec "$C" redis-cli ACL SETUSER kernway on '>kernway_pw' '~*' '&*' '+@all' >/dev/null
+    export KERNWAY_REDIS_USER=kernway KERNWAY_REDIS_PASS=kernway_pw
+    log "TLS, Sentinel and Cluster deployments"
+    "$S/redis-tls-setup.sh" "$WORK/redis-tls" >/dev/null
+    "$S/redis-sentinel-setup.sh" >/dev/null
+    "$S/redis-cluster-setup.sh" >/dev/null
+    export KERNWAY_REDIS_URL=redis://127.0.0.1:6380 KW_REDIS_ADDR=127.0.0.1:6380 KERNWAY_REDIS_ADDR=127.0.0.1:6380
+    export KERNWAY_REDIS_TLS_URL=rediss://localhost:6381 KERNWAY_REDIS_TLS_DIR="$WORK/redis-tls"
+    export KERNWAY_REDIS_SENTINEL_URL=redis+sentinel://127.0.0.1:26390,127.0.0.1:26391,127.0.0.1:26392/kwmaster
+    export KERNWAY_REDIS_CLUSTER_URL=redis+cluster://127.0.0.1:7000,127.0.0.1:7001
+    VERSION="$(docker exec "$C" redis-server --version | sed 's/ sha=.*//')"
+    CRATE=kernway-redis; FEATURES=(); TITLE=Redis
+    # The tests marked #[ignore] need a server: run them. The Unix-socket
+    # test runs inside the Redis container (in_container_tests).
+    EXTRA=(--include-ignored); SKIP=(--skip unix_socket_)
+    ;;
+  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis)" >&2; exit 2 ;;
 esac
 
-CMD="cargo test -p $CRATE ${FEATURES[*]+${FEATURES[*]}} --lib --tests -- --test-threads=1 --nocapture ${SKIP[*]+${SKIP[*]}}"
+CMD="cargo test -p $CRATE ${FEATURES[*]+${FEATURES[*]}} --lib --tests -- --test-threads=1 --nocapture ${EXTRA[*]+${EXTRA[*]}} ${SKIP[*]+${SKIP[*]}}"
 log "running: $CMD"
-( cd "$ROOT" && cargo test -p "$CRATE" ${FEATURES[@]+"${FEATURES[@]}"} --lib --tests -- --test-threads=1 --nocapture ${SKIP[@]+"${SKIP[@]}"} ) > "$WORK/test.log" 2>&1 || true
+( cd "$ROOT" && cargo test -p "$CRATE" ${FEATURES[@]+"${FEATURES[@]}"} --lib --tests -- --test-threads=1 --nocapture ${EXTRA[@]+"${EXTRA[@]}"} ${SKIP[@]+"${SKIP[@]}"} ) > "$WORK/test.log" 2>&1 || true
 if ! grep -q "^test result:" "$WORK/test.log"; then
   log "cargo test did not run any test binary:"; tail -20 "$WORK/test.log" >&2
 fi
@@ -138,6 +165,10 @@ in_container_tests() { # test target, name filter, env...
   docker exec "${envs[@]}" "$C" "/tmp/kernway-$target" "$filter" --test-threads=1 --nocapture >> "$WORK/test.log" 2>&1 || true
   docker exec "$C" rm -f "/tmp/kernway-$target"
 }
+if [ "$DB" = redis ]; then
+  in_container_tests connection unix_socket_ KERNWAY_REDIS_SOCKET=/tmp/redis.sock
+  CMD="$CMD; unix_socket_* inside $C"
+fi
 if [ "$DB" = mysql ]; then
   in_container_tests connection local_socket_ \
     KERNWAY_MYSQL_SOCKET=/var/run/mysqld/mysqld.sock KERNWAY_MYSQL_ROOT_PASSWORD="$RPW"
