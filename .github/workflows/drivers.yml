@@ -332,10 +332,18 @@ jobs:
           choco install rabbitmq -y --no-progress >/dev/null
           sc.exe stop RabbitMQ >/dev/null 2>&1 || true
           sleep 5
-          ERLANG_HOME="$(ls -d "/c/Program Files/Erlang OTP" "/c/Program Files"/erl* 2>/dev/null | head -1)"
+          # Where Chocolatey put Erlang and RabbitMQ (pipefail: no `ls` of a missing glob).
+          for d in "/c/Program Files/Erlang OTP" "/c/Program Files"/erl*; do
+            if [ -d "$d/bin" ]; then ERLANG_HOME="$d"; break; fi
+          done
+          [ -n "${ERLANG_HOME:-}" ] || { echo "Erlang not found"; ls "/c/Program Files"; exit 1; }
           export ERLANG_HOME="$(cygpath -w "$ERLANG_HOME")"
           echo "ERLANG_HOME=$ERLANG_HOME" >> "$GITHUB_ENV"
-          SBIN="$(ls -d "/c/Program Files/RabbitMQ Server"/rabbitmq_server-*/sbin | head -1)"
+          for d in "/c/Program Files/RabbitMQ Server"/rabbitmq_server-*/sbin; do
+            if [ -d "$d" ]; then SBIN="$d"; fi
+          done
+          [ -n "${SBIN:-}" ] || { echo "RabbitMQ not found"; ls "/c/Program Files"; exit 1; }
+          echo "Erlang: $ERLANG_HOME, RabbitMQ: $SBIN"
           RABBITMQ_SBIN="$SBIN" crates/kernway-rabbitmq/tests/support/rabbitmq-setup.sh "$(cygpath -u "$RUNNER_TEMP")/rabbitmq" >> "$GITHUB_ENV"
 
       - name: RabbitMQ client — all tests, live

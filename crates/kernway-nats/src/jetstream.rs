@@ -414,21 +414,42 @@ impl Broker for NatsBroker {
         self.ensure_topic(&sub.topic).await?;
         let stream = stream_name(&sub.topic);
         let durable = stream_name(&sub.group);
-        let config = json!({
-            "durable_name": durable,
-            "ack_policy": "explicit",
-            "deliver_policy": if sub.start == StartAt::Earliest { "all" } else { "new" },
-            "ack_wait": sub.ack_wait.as_nanos() as u64,
-            "max_deliver": -1,
-            "max_ack_pending": 10_000,
-            "max_waiting": 512,
-            "filter_subject": sub.topic,
-        });
-        match self.js.create_consumer(&stream, &config).await {
+        // An existing group is joined as it is (its position is its own).
+        match self.js.consumer_info(&stream, &durable).await {
             Ok(_) => {}
-            // It exists with another start / settings: join it as it is.
-            Err(MsgError::Broker(m)) if m.contains("err_code 10148") || m.contains("err_code 10012") || m.contains("err_code 10105") => {
-                self.js.consumer_info(&stream, &durable).await?;
+            Err(MsgError::Broker(m)) if m.contains("err_code 10014") => {
+                // A new group. "Latest" is pinned to the stream's last
+                // sequence as its leader reports it — every publish confirmed
+                // so far is behind it. (`deliver_policy: new` is resolved by
+                // the consumer's own leader, which on a replicated stream may
+                // not have applied the newest messages yet.)
+                let start = if sub.start == StartAt::Earliest {
+                    json!({ "deliver_policy": "all" })
+                } else {
+                    let info = self.js.stream_info(&stream).await?;
+                    let last = info["state"]["last_seq"].as_u64().unwrap_or(0);
+                    json!({ "deliver_policy": "by_start_sequence", "opt_start_seq": last + 1 })
+                };
+                let mut config = json!({
+                    "durable_name": durable,
+                    "ack_policy": "explicit",
+                    "ack_wait": sub.ack_wait.as_nanos() as u64,
+                    "max_deliver": -1,
+                    "max_ack_pending": 10_000,
+                    "max_waiting": 512,
+                    "filter_subject": sub.topic,
+                });
+                for (k, v) in start.as_object().into_iter().flatten() {
+                    config[k] = v.clone();
+                }
+                match self.js.create_consumer(&stream, &config).await {
+                    Ok(_) => {}
+                    // Another member created it meanwhile: join it.
+                    Err(MsgError::Broker(m)) if m.contains("err_code 10148") || m.contains("err_code 10012") || m.contains("err_code 10105") => {
+                        self.js.consumer_info(&stream, &durable).await?;
+                    }
+                    Err(e) => return Err(e),
+                }
             }
             Err(e) => return Err(e),
         }
