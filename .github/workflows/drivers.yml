@@ -256,6 +256,42 @@ jobs:
           ! grep -q "skip:" mongo.log
           grep -q "^test transactions_and_no_lost_update" mongo.log
 
+  # NATS is one static binary on every OS: the setup script downloads the
+  # official release and starts plain / auth / token / TLS / mTLS servers and
+  # a three-node JetStream cluster natively — no Docker anywhere.
+  nats:
+    name: nats (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: NATS servers (official release binary)
+        shell: bash
+        run: crates/kernway-nats/tests/support/nats-setup.sh "$RUNNER_TEMP/nats" >> "$GITHUB_ENV"
+
+      - name: Messaging contract and NATS client — all tests, live
+        shell: bash
+        run: cargo test -p kernway-messaging --features conformance -p kernway-nats -- --test-threads=1 --nocapture 2>&1 | tee nats.log
+
+      - name: Every scenario ran (nothing skipped or n/a)
+        shell: bash
+        run: |
+          ! grep -q "skip:" nats.log
+          # The one capability JetStream lacks (a GAP in the acceptance report).
+          ! grep "^n/a" nats.log | grep -v "^n/a: key order across members$"
+          grep -q "^test the_memory_broker_conforms ... ok" nats.log
+          grep -q "^test nats_jetstream_conforms ... ok" nats.log
+          grep -q "^test the_cluster_runs_the_conformance_scenarios_too ... ok" nats.log
+          grep -q "^test cluster_urls_are_learned_and_used_for_failover ... ok" nats.log
+
   # SQL Server runs on Linux in Docker (Microsoft ships no macOS build, and a
   # Windows runner has no TCP-enabled instance); the client code is the same
   # on every OS — it builds and its unit tests pass in the drivers job above.

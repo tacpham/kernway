@@ -10,13 +10,14 @@
 #   acceptance/run.sh postgres (PostgreSQL 18 with every auth method and TLS, in Docker)
 #   acceptance/run.sh mongodb  (MongoDB 8.0: standalone, TLS / X.509, replica set, sharded — in Docker)
 #   acceptance/run.sh mssql    (SQL Server 2022 with a test CA, in Docker)
+#   acceptance/run.sh nats     (nats-server natively: plain, auth, TLS / mTLS, a JetStream cluster)
 #
 # Containers (created if missing; existing ones and their data are reused):
 #   kernway-mysql   mysql:8.0                  host port 3307, root password "secret"
 #   kernway-oracle  gvenzl/oracle-free:23-slim host ports 1521 / 2484 (TCPS)
 # Oracle TCPS needs a wallet once: crates/kernway-orm-oracle/tests/support/oracle-tcps-setup.sh
 set -euo pipefail
-DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb|mssql}"
+DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb|mssql|nats}"
 # CI workflow whose jobs for this commit are the cross-OS evidence.
 WORKFLOW=drivers.yml; IMAGE=""; EXTRA=()
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -168,7 +169,17 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     VERSION="$(docker exec "$C" /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Kernway_pw1!' -h -1 -Q 'SET NOCOUNT ON; SELECT @@VERSION' | head -1 | sed 's/ *$//')"
     CRATE=kernway-orm-mssql; FEATURES=(--features mssql); TITLE="SQL Server"; SKIP=()
     ;;
-  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql)" >&2; exit 2 ;;
+  nats)
+    # Native nats-server processes (the official release binary, as in CI):
+    # plain JetStream, auth (user / NKey), token, TLS, TLS-first, mutual TLS
+    # and a three-node JetStream cluster. Recreated each run.
+    log "nats-server (native): plain, auth, token, TLS, mTLS, 3-node JetStream cluster"
+    "$ROOT/crates/kernway-nats/tests/support/nats-setup.sh" "$ROOT/target/nats" > "$WORK/nats.env"
+    set -a; . "$WORK/nats.env"; set +a
+    VERSION="nats-server $KERNWAY_NATS_VERSION"; IMAGE="official release binary (native)"; C="none (native nats-server processes)"
+    CRATE=kernway-nats; FEATURES=(); TITLE="NATS / JetStream"; SKIP=()
+    ;;
+  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql | nats)" >&2; exit 2 ;;
 esac
 
 CMD="cargo test -p $CRATE ${FEATURES[*]+${FEATURES[*]}} --lib --tests -- --test-threads=1 --nocapture ${EXTRA[*]+${EXTRA[*]}} ${SKIP[*]+${SKIP[*]}}"

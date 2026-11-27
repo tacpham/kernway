@@ -1,0 +1,19 @@
+[package]
+name        = "kernway-messaging"
+description = "The Kernway message-bus contract: durable at-least-once producers and group consumers (ack / nack / redelivery / dead letters / per-key order), a conformance suite every broker backend passes, and an in-process broker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rt-core = { workspace = true }
+
+[features]
+default = []
+# The conformance suite backends run against a live broker.
+conformance = []
+
+[dev-dependencies]
+
+[lints]
+workspace = true

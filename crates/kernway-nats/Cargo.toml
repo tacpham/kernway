@@ -1,0 +1,22 @@
+[package]
+name        = "kernway-nats"
+description = "A self-written async NATS client for Kernway — core NATS (pub/sub, queue groups, request-reply, headers, TLS, NKey/JWT auth, reconnect) and JetStream (streams, durable pull consumers, confirmed publishes, acks) — and the kernway-messaging broker backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kernway-messaging = { workspace = true }
+kernway-tls       = { workspace = true }
+kernway-wire      = { workspace = true, features = ["scram"] }
+rt-core           = { workspace = true }
+serde_json        = { workspace = true }
+# Ed25519 for NKey signatures (already in the tree as rustls's provider).
+ring              = "0.17"
+
+[dev-dependencies]
+kernway-messaging = { workspace = true, features = ["conformance"] }
+rt-core           = { workspace = true }
+
+[lints]
+workspace = true

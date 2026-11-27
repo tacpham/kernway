@@ -904,6 +904,13 @@ name = "kernway-log"
 version = "0.1.0"
 
 [[package]]
+name = "kernway-messaging"
+version = "0.1.0"
+dependencies = [
+ "rt-core",
+]
+
+[[package]]
 name = "kernway-metrics"
 version = "0.1.0"
 dependencies = [
@@ -920,6 +927,18 @@ name = "kernway-multipart"
 version = "0.1.0"
 dependencies = [
  "kernway-core",
+]
+
+[[package]]
+name = "kernway-nats"
+version = "0.1.0"
+dependencies = [
+ "kernway-messaging",
+ "kernway-tls",
+ "kernway-wire",
+ "ring",
+ "rt-core",
+ "serde_json",
 ]
 
 [[package]]

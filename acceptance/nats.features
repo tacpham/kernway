@@ -1,0 +1,59 @@
+# NATS / JetStream feature catalog for the acceptance report.
+# area | feature | evidence
+# evidence = comma-separated test names (all must pass), or
+#            GAP: <why>  (not implemented / not verified — counted against completeness)
+#            N/A: <why>  (NATS has no such feature)
+#
+# Every live test runs against the official nats-server release binary,
+# started natively by crates/kernway-nats/tests/support/nats-setup.sh:
+# a JetStream server, an auth server (user / password and an NKey user), a
+# token server, TLS / TLS-first / mutual-TLS servers with a test CA, and a
+# three-node routed JetStream cluster. CI runs the same suite on Linux,
+# macOS and Windows.
+
+Messaging contract | Confirmed publish (PubAck): payloads binary / empty / 900 KiB / UTF-8, headers intact; every message once | nats_jetstream_conforms
+Messaging contract | Groups: every group sees every message, members of one group split them | nats_jetstream_conforms
+Messaging contract | Redelivery: nack (-NAK) comes again flagged as redelivered; a member that closes hands its unacknowledged deliveries to the others at once | nats_jetstream_conforms
+Messaging contract | Acks are durable (double ack, confirmed by the server) across members leaving and joining | nats_jetstream_conforms
+Messaging contract | Per-key order for a member; key travels with the message | nats_jetstream_conforms
+Messaging contract | New groups start at the earliest or the latest message | nats_jetstream_conforms
+Messaging contract | A delivery left unacknowledged past ack_wait is redelivered while its consumer stays connected | nats_jetstream_conforms
+Messaging contract | Rejected deliveries reach the dead-letter topic with their headers (published, confirmed, then +TERM) | nats_jetstream_conforms
+Messaging contract | The whole contract on a replicated (R3) stream in a three-node cluster | the_cluster_runs_the_conformance_scenarios_too
+Messaging contract | Per-key order across the members of a group (a key's next message held back while an earlier one is in flight elsewhere) | GAP: one JetStream consumer feeds every member, so two members can hold one key at once (the conformance scenario reports n/a); needs key-partitioned consumers
+
+Core NATS | Publish / subscribe with `*` and `>` wildcards, empty payloads, unsubscribe on drop; subjects validated | publish_subscribe_wildcards_and_headers
+Core NATS | Headers (HPUB / HMSG): repeated names, case-insensitive lookup, status lines (404 / 408 / 409 / 503) | publish_subscribe_wildcards_and_headers, client::tests::headers_round_trip
+Core NATS | Queue groups: each message to one member, plain subscribers see all | queue_groups_split_the_messages
+Core NATS | Request / reply over one shared inbox (50 concurrent requests, each answer to its own caller); no-responders is immediate | request_reply_and_no_responders
+Core NATS | Server max_payload enforced before sending; the connection survives | payload_limit_is_enforced_before_sending
+Core NATS | Flush (PING / PONG round trip) — PONGs matched to their PINGs in order, keep-alives included | request_reply_and_no_responders, reconnect_resubscribes_and_sends_what_waited
+
+Connection & security | URLs: nats:// and tls://, several servers, IPv6, percent-decoded credentials, every option validated | options::tests::urls
+Connection & security | User / password and token authentication; wrong credentials are an authentication error | authentication_user_password_token_and_nkey
+Connection & security | NKey authentication: seed decoded (base32 + CRC-16), the server nonce signed with Ed25519; unknown keys refused | authentication_user_password_token_and_nkey, options::nkey::tests::seeds_decode_to_their_public_key
+Connection & security | JWT / .creds (decentralized auth, operator mode) | GAP: parsed and signed like NKeys, but not verified against an operator-mode server
+Connection & security | TLS when the server requires it, CA checked, host name checked; insecure mode for tests | tls_required_handshake_first_and_mutual
+Connection & security | TLS before INFO (handshake_first servers) | tls_required_handshake_first_and_mutual
+Connection & security | Mutual TLS (client certificate required by the server) | tls_required_handshake_first_and_mutual
+Connection & security | WebSocket transport | GAP: not implemented (TCP only)
+Connection & security | Unix-domain sockets | N/A: nats-server listens on TCP only
+
+Resilience | Reconnect after a server outage: subscriptions renewed (queue groups too), what was published while down is sent after reconnecting | reconnect_resubscribes_and_sends_what_waited
+Resilience | A cut connection (no clean close) is healed; requests work across it | reconnect_resubscribes_and_sends_what_waited
+Resilience | A silent server is detected by missing PONGs and the connection replaced | a_dead_server_is_detected_by_missing_pongs
+Resilience | Cluster discovery: the members' advertised URLs are learned from INFO and used when the configured server is gone; interest crosses routes | cluster_urls_are_learned_and_used_for_failover
+Resilience | JetStream pull consumers keep working across a reconnect; acknowledged messages stay acknowledged | consumers_survive_a_reconnect
+Resilience | Lame-duck mode (server draining) handled before the disconnect | GAP: the INFO update is merged, but the client does not move early — it reconnects when the server closes
+
+JetStream | Streams: create (idempotent), info, purge, delete (absent is fine) | jetstream_dedup_purge_info_and_direct_reads
+JetStream | Publish de-duplication with Nats-Msg-Id inside the duplicate window | jetstream_dedup_purge_info_and_direct_reads
+JetStream | Direct read of a stored message (last by subject) | jetstream_dedup_purge_info_and_direct_reads
+JetStream | A publish no stream captures is a clear error, not a hang | jetstream_dedup_purge_info_and_direct_reads
+JetStream | Ack subjects (v1 and v2 with domain / account hash) parsed into delivery count and sequences | jetstream::tests::ack_subjects
+JetStream | Push consumers, ordered consumers, flow control | GAP: pull consumers only
+JetStream | Key-value and object stores | GAP: not implemented
+JetStream | Domains / leaf nodes (js_domain option) | GAP: the API prefix is configurable, not verified against a leaf-node setup
+
+Reliability | Fully async on kernway's reactor: DNS and file reads on the blocking pool; no blocking call on a shard (source scan) | no_blocking_call_runs_on_the_reactor
+Reliability | Linux, macOS and Windows (CI on each, against real servers) | ci::nats_ubuntu_latest, ci::nats_macos_latest, ci::nats_windows_latest
