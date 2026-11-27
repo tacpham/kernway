@@ -1,0 +1,49 @@
+# Valkey feature catalog for the acceptance report — the Redis client
+# (kernway-redis) against Valkey, the open-source fork of Redis 7.2 (BSD),
+# with the same suite and deployments as acceptance/redis.features:
+# a single node (Unix socket, ACL user), TLS with client certificates,
+# Sentinel and a 3-master / 3-replica Cluster — all on the Valkey 8.1
+# image, set up by tests/support/redis-*-setup.sh with REDIS_IMAGE.
+# area | feature | evidence
+# evidence = comma-separated test names (all must pass), or
+#            GAP: <why>  (not implemented / not verified — counted against completeness)
+#            N/A: <why>  (Valkey has no such feature)
+
+Connection & security | URLs: redis://, rediss://, redis+unix://, redis+sentinel://, redis+cluster:// with user / password (percent-decoded), database, client name, protocol, timeouts, TLS options; bad ones explained | options::tests::plain_urls, options::tests::tls_and_unix_urls, options::tests::sentinel_urls, options::tests::bad_urls_say_why
+Connection & security | ACL users and passwords over RESP3 (HELLO … AUTH) and RESP2 (AUTH); a wrong password refused at open | acl_users_passwords_databases_and_client_names, wrong_password_is_rejected, publish_subscribe_roundtrip_with_auth, redis_cache_roundtrip_with_auth
+Connection & security | TLS: full certificate check, wrong name refused / CA-only / explicit server name, public roots refuse a private CA, no-check mode, bad CA file; megabytes over TLS | tls_certificate_checks
+Connection & security | Mutual TLS: required by the server, refused without a client certificate, accepted with one; plaintext against a TLS port fails without hanging | mutual_tls_and_plaintext_against_a_tls_port
+Connection & security | Unix-domain socket with options (database, client name) — inside the Valkey container, and on Linux / macOS CI | unix_socket_connects_with_options
+Connection & security | Host names resolved off the reactor; an unknown host is a clear error | host_names_resolve_off_the_reactor
+Connection & security | Database selection, client names | acl_users_passwords_databases_and_client_names
+Protocol | RESP2 and RESP3 parsed in full (maps, sets, doubles incl. inf/nan, booleans, big numbers, verbatim strings, pushes, attributes), binary-safe, partial input at every cut, garbage and hostile nesting refused without panicking or over-allocating | resp::tests::resp2_types, resp::tests::resp3_types, resp::tests::partial_input_asks_for_more_at_every_cut, resp::tests::several_replies_in_one_buffer_parse_one_at_a_time, resp::tests::garbage_is_a_protocol_error_not_a_panic, resp::tests::encodes_a_command_as_bulk_strings
+Protocol | RESP3 negotiated with HELLO 3 (typed replies), RESP2 on request; every command helper works on both | resp3_is_negotiated_and_resp2_on_request, hashes_lists_sets_and_sorted_sets, strings_keys_and_expiry
+Protocol | A server error leaves the connection in step (on main, a connection stayed stuck on the first error forever); errors inside EXEC replies are values | a_server_error_leaves_the_connection_in_step, resp::tests::errors_are_values_consumed_whole_even_inside_arrays, transactions_are_atomic_and_watch_detects_races
+Protocol | RESP3 pushes (client-side caching invalidations) queued, never taken for replies | resp3_pushes_are_queued_not_mistaken_for_replies
+Protocol | Pipelining: 1000 commands in one round trip, errors per command, order kept | pipelines_send_everything_then_read_in_order
+Protocol | Large and binary values (12 MB, CRLF / NUL bytes, UTF-8 keys and values) | large_and_binary_values_round_trip
+Reliability | Reply timeout: the late reply would desync the connection, so it is dropped; the pool replaces it | a_reply_timeout_drops_the_connection_and_the_pool_replaces_it
+Reliability | Connect timeout; refused connections and unsupported transports fail clearly | connect_timeout, bad_endpoints_fail_clearly
+Reliability | The pool keeps a connection after a server error, drops a broken one, never shares one across shards | the_pool_keeps_a_connection_after_a_server_error, a_reply_timeout_drops_the_connection_and_the_pool_replaces_it, cache::concurrency_tests::concurrent_operations_do_not_hold_the_pool_borrow_across_await
+Reliability | Fully async on kernway's reactor: DNS and certificate reads on the blocking pool, no blocking call on a shard (source scan) | no_blocking_call_runs_on_the_reactor, host_names_resolve_off_the_reactor
+Commands | Any command typed through query / Cmd / FromValue, tolerant of RESP2 vs RESP3 shapes; a mismatch is a clear error | any_command_typed_through_query, cmd::tests::arguments, cmd::tests::conversions_across_resp2_and_resp3
+Commands | Strings and keys: SET with PX / NX / XX / KEEPTTL, MGET / MSET, INCRBY / INCRBYFLOAT, GETDEL, EXISTS, UNLINK, PEXPIRE / PTTL / PERSIST, TYPE, RENAME | strings_keys_and_expiry, set_get_del_round_trip
+Commands | Hashes, lists, sets, sorted sets (fractional and infinite scores, ranks, WITHSCORES pairs) | hashes_lists_sets_and_sorted_sets, set_membership_round_trip
+Commands | Transactions: MULTI / EXEC atomic, run-time errors per command, EXECABORT on queuing errors, WATCH optimistic locking (EXEC → None), UNWATCH | transactions_are_atomic_and_watch_detects_races
+Commands | Lua: EVAL, Script via EVALSHA (loaded once, reloaded after SCRIPT FLUSH), script errors; FCALL | lua_scripts_load_once_and_survive_a_script_flush
+Commands | Cursor scans: SCAN / HSCAN / SSCAN / ZSCAN in pages, full scans | scans_walk_everything_in_pages
+Commands | Blocking pops (BLPOP / BRPOP): the wait is added to the reply timeout, woken by another client's push | blocking_pops_wait_and_extend_the_reply_timeout
+Commands | Server: INFO, DBSIZE | server_info_and_sizes
+Commands | Streams: XADD with MAXLEN, consumer groups (XGROUP / XREADGROUP / XACK / XPENDING / XAUTOCLAIM / XTRIM), RESP2 and RESP3 replies | stream::tests::parses_a_multi_stream_read_reply, stream::tests::parses_an_entry_with_fields_in_order, stream::tests::parses_autoclaim_reply_redis6_and_redis7, stream::tests::parses_pending_summary_count, stream::tests::recognises_busygroup, stream::tests::xadd_args_with_and_without_maxlen, stream::tests::xreadgroup_args_put_all_keys_before_all_ids, stream::tests::a_malformed_entry_is_an_error, stream::tests::a_nil_read_reply_is_empty, stream::tests::an_entry_with_nil_fields_is_empty
+Pub/sub | Channels and patterns (SUBSCRIBE / PSUBSCRIBE / UNSUBSCRIBE / PUNSUBSCRIBE) on RESP2 and RESP3, back to normal mode after unsubscribing | pubsub_channels_and_patterns_on_both_protocols, publish_subscribe_roundtrip_with_auth
+Pub/sub | Sharded pub/sub (SSUBSCRIBE / SPUBLISH) on the channel's cluster node | cluster_routing_redirections_and_failover
+High availability | Sentinel: master found through several sentinels (a dead one skipped), its ROLE verified, replicas for reads (refusing writes without breaking), unknown groups explained | sentinel_master_replica_and_failover
+High availability | Sentinel failover: a real SENTINEL FAILOVER; the pool drops the demoted master's connection (READONLY / closed) and reaches the new master | sentinel_master_replica_and_failover
+High availability | Cluster: CRC16 slots with hash tags (checked against Redis), routing keys per command, keys on every master, SCAN over all masters | cluster::tests::slots_match_redis, cluster::tests::routing_keys, cluster_routing_redirections_and_failover
+High availability | Cluster redirections: a live slot migration — ASK during it (map untouched), MOVED after it (map updated); TRYAGAIN / CLUSTERDOWN retried; dead seeds skipped | cluster::tests::redirections, cluster_routing_redirections_and_failover
+High availability | Cluster: multi-key commands and transactions with hash tags, CROSSSLOT surfaced, cross-slot transactions refused before sending; pipelines split per node with order kept; Lua routed by key | cluster_routing_redirections_and_failover
+High availability | Cluster failover followed; reads from replicas (READONLY, round robin) | cluster_routing_redirections_and_failover
+Platform & runtime | Unix sockets on Windows | N/A: Redis listens on Unix sockets on Unix only
+Platform & runtime | Runs on Linux: the whole suite against Valkey 8.1 — single node, Unix socket, TLS, Sentinel, Cluster (CI) | ci::valkey_ubuntu_latest
+Platform & runtime | The client on macOS / Windows: the same code, run there against Redis / Memurai | ci::redis_macos_latest, ci::redis_windows_latest
+Platform & runtime | Live against Valkey on macOS / Windows | GAP: Valkey runs in Docker on Linux only here

@@ -127,7 +127,10 @@ fn a_row_that_fails_to_decode_does_not_desync_the_connection() {
     let Some(url) = url() else { return eprintln!("skip: KERNWAY_MYSQL_URL not set") };
     run(async move {
         let mut c = Conn::connect(&MysqlConfig::from_url(&url).unwrap()).await.unwrap();
-        c.query("SET SESSION cte_max_recursion_depth = 10000").await.unwrap();
+        // The recursion limit's name: MySQL's, else MariaDB's.
+        if c.query("SET SESSION cte_max_recursion_depth = 10000").await.is_err() {
+            c.query("SET SESSION max_recursive_iterations = 10000").await.unwrap();
+        }
         let sql = "WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 3000) \
                    SELECT n FROM s";
         // The row function fails on row 2 of 3000: the error is returned only

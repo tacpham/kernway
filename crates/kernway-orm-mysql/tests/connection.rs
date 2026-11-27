@@ -98,7 +98,8 @@ impl Relay {
 
 fn session_status(r: QueryResult) -> String {
     match r {
-        QueryResult::Rows { rows, .. } => rows[0][1].clone().unwrap_or_default(),
+        // No row: the server has no such status variable (MariaDB lacks some of MySQL's).
+        QueryResult::Rows { rows, .. } => rows.first().and_then(|r| r[1].clone()).unwrap_or_default(),
         QueryResult::Ok { .. } => String::new(),
     }
 }
@@ -113,7 +114,9 @@ fn compressed_protocol_is_negotiated_and_carries_every_kind_of_traffic() {
         let mut conn = Conn::connect(&cfg).await.unwrap();
         assert!(conn.is_compressed());
         assert_eq!(session_status(conn.query("SHOW SESSION STATUS LIKE 'Compression'").await.unwrap()), "ON");
-        assert_eq!(session_status(conn.query("SHOW SESSION STATUS LIKE 'Compression_algorithm'").await.unwrap()), "zlib");
+        // MySQL 8.0.18+ names the algorithm; MariaDB (zlib only) has no such variable.
+        let algo = session_status(conn.query("SHOW SESSION STATUS LIKE 'Compression_algorithm'").await.unwrap());
+        assert!(algo == "zlib" || algo.is_empty(), "{algo}");
 
         let sep = if url.contains('?') { '&' } else { '?' };
         let plain = MySqlDriver::connect(&url).await.unwrap();
@@ -243,7 +246,10 @@ fn server_side_cursor_fetches_on_demand_and_leaves_the_connection_usable() {
     let Some(url) = url() else { return eprintln!("skip: KERNWAY_MYSQL_URL not set") };
     run(async move {
         let mut conn = Conn::connect(&MysqlConfig::from_url(&url).unwrap()).await.unwrap();
-        conn.query("SET SESSION cte_max_recursion_depth = 10000").await.unwrap();
+        // The recursion limit's name: MySQL's, else MariaDB's.
+        if conn.query("SET SESSION cte_max_recursion_depth = 10000").await.is_err() {
+            conn.query("SET SESSION max_recursive_iterations = 10000").await.unwrap();
+        }
         conn.query("DROP TABLE IF EXISTS kwc_c").await.unwrap();
         conn.query("CREATE TABLE kwc_c (n INT PRIMARY KEY)").await.unwrap();
         conn.query("INSERT INTO kwc_c WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 5000) SELECT n FROM s")

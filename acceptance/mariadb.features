@@ -1,0 +1,61 @@
+# MariaDB feature catalog for the acceptance report — the MySQL driver
+# (kernway-orm-mysql) against MariaDB, the same suite as acceptance/mysql.features.
+# area | feature | evidence
+# evidence = comma-separated test names (all must pass), or
+#            GAP: <why>  (not implemented / not verified — counted against completeness)
+#            N/A: <why>  (MariaDB has no such feature)
+#
+# Every live test runs against MariaDB 11.4 (LTS) in Docker, set up by
+# crates/kernway-orm-mysql/tests/support/mariadb-setup.sh (TLS from a test CA,
+# max_allowed_packet 64M as MySQL 8). The local-channel tests run inside the
+# MariaDB container.
+
+Connection & security | Login with mysql_native_password | crud_roundtrip
+Connection & security | caching_sha2_password: fast auth, and full auth over TLS | N/A: MariaDB has no caching_sha2_password (mysql_native_password, ed25519, parsec)
+Connection & security | caching_sha2_password full auth without TLS (RSA-OAEP with the server key, file or opt-in fetch) | N/A: MariaDB has no caching_sha2_password (mysql_native_password, ed25519, parsec)
+Connection & security | TLS ssl-mode disabled / preferred / required / verify_ca / verify_identity | protocol::tests::ssl_modes_against_a_live_server, protocol::tests::url_options_set_the_ssl_mode_and_ca
+Connection & security | Mutual TLS (client certificate, REQUIRE X509) | mutual_tls_presents_the_client_certificate
+Connection & security | MariaDB ed25519 and PARSEC authentication | GAP: not implemented (mysql_native_password, MariaDB's default, is)
+Connection & security | Connection URL parsing | protocol::tests::url_parsing
+Connection & security | Host names resolved off the reactor (blocking pool); IP literals skip DNS | host_names_resolve_without_blocking_and_ip_literals_skip_dns
+Connection & security | Auth scramble (native SHA-1) matches the reference construction | protocol::tests::native_scramble_shape
+Connection & security | Local channel: Unix socket file / Windows named pipe (server reports the transport; TLS-requiring ssl-mode refused) — here inside the MariaDB container, on Windows over a named pipe in CI | local_socket_connects_over_the_servers_local_channel, local_socket_carries_a_caching_sha2_full_authentication, local_socket_refuses_an_ssl_mode_that_requires_tls, ci::drivers_windows_latest
+Connection & security | Compressed protocol (zlib): server reports Compression=ON; >16 MiB values, TLS, binary/text, streaming, pipelining, cursors over it; the wire carries far fewer bytes | compressed_protocol_is_negotiated_and_carries_every_kind_of_traffic, compression_shrinks_what_crosses_the_wire
+Connection & security | zstd compression algorithm | N/A: the client picks the algorithm; zlib is offered by every MySQL / MariaDB server
+Protocol | Prepared statements cached per connection; re-prepared after server reset / DDL | protocol::tests::a_cached_statement_runs_in_one_round_trip_and_survives_a_server_reset, protocol::tests::a_full_statement_cache_evicts_and_closes_the_oldest
+Protocol | Binary protocol decodes numbers natively | protocol::tests::binary_cells_keep_numbers_as_numbers
+Protocol | Values over 16 MiB (packet splitting / reassembly) | writes_small_medium_and_large_values_byte_exact, protocol::tests::a_large_packet_grows_the_read_buffer_then_it_shrinks_back
+Protocol | Packet framing: length-encoded ints / strings, OK / ERR / EOF status flags, text rows with NULL | protocol::tests::lenenc_int_widths, protocol::tests::lenenc_str_reads_payload, protocol::tests::ok_and_err_packets, protocol::tests::status_flags_are_read_from_ok_and_eof_packets, protocol::tests::text_row_handles_null_and_values
+Protocol | MariaDB extended capabilities negotiated (CLIENT_MYSQL cleared, extended metadata asked for) | protocol::tests::mariadb_extended_metadata_marks_json_columns
+Protocol | Multi-result responses read to the end; errors never desync the connection | call_returns_every_result_set_then_the_call_status, an_error_inside_a_procedure_leaves_the_connection_usable, a_row_that_fails_to_decode_does_not_desync_the_connection
+Protocol | Injection safety: values always bound, stacked statements refused | prepared_binds_special_values, scripts_run_several_statements_but_ordinary_calls_never_stack, protocol::tests::escape_blocks_injection
+Protocol | Server-side cursors (COM_STMT_FETCH): batches on demand, other statements in between, closed with the transaction | server_side_cursor_fetches_on_demand_and_leaves_the_connection_usable, mysql_conforms
+Types | Every column type typed correctly and identical over text and binary protocols (ints incl. unsigned 64-bit, FLOAT/DOUBLE, DECIMAL, DATE/DATETIME/TIMESTAMP/TIME with fractions, YEAR, CHAR/VARCHAR/TEXT, BINARY/VARBINARY/BLOB, JSON, BIT, ENUM/SET, GEOMETRY, BOOLEAN) | every_column_type_decodes_to_its_typed_value_on_both_protocols
+Types | JSON columns (a LONGTEXT on MariaDB's wire) decoded as JSON from the extended metadata's format | every_column_type_decodes_to_its_typed_value_on_both_protocols, protocol::tests::mariadb_extended_metadata_marks_json_columns
+Types | Bound parameters of every kind (i64 min, u64 max, floats, bytes, NULL, decimals and datetimes as text) | bound_parameters_round_trip_every_kind, prepared_binds_special_values
+Types | LONGTEXT / LONGBLOB 0 B – 20 MiB byte-exact, over TLS and plaintext | large_text_and_binary_round_trip_over_tls_and_plaintext, writes_small_medium_and_large_values_byte_exact
+ORM (shared layer) | A transaction abandoned half-way (timeout) commits nothing and never hands an open transaction to the next caller (without the fix MySQL silently committed it) | mysql_conforms
+ORM (shared layer) | Shared conformance suite (CRUD, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL, joins/aggregates, execute_many failure semantics, server cursors, cancelled transactions) | mysql_conforms
+ORM (shared layer) | CRUD repository; DDL from entities; row -> entity decoding | crud_roundtrip, mysql_conforms, value::tests::create_table_is_mysql_flavoured, value::tests::row_roundtrips_into_entity
+ORM (shared layer) | Batch insert with generated keys | batch_insert_select_delete
+ORM (shared layer) | Transactions: commit, rollback on error | transaction_commit_with_row_lock, transaction_rolls_back_on_error
+ORM (shared layer) | SELECT … FOR UPDATE under concurrency (no lost update) | concurrent_for_update_no_lost_update
+ORM (shared layer) | Select builder: INNER / LEFT JOIN, WHERE on any joined entity, GROUP BY, COUNT/COUNT DISTINCT/SUM/AVG/MIN/MAX, HAVING, ORDER BY, LIMIT, counting groups, entity pairs from a join | mysql_conforms
+ORM (shared layer) | Results into any struct / tuple by column name (no entity needed), per-field conversion | mysql_conforms
+Hand-written SQL | Any query with bound params; joins, GROUP BY, CTE, window functions mapped onto an entity by name | joins_and_aggregates_map_onto_an_entity_by_column_name
+Hand-written SQL | Streaming large results (200k rows) without collecting; callback errors stop cleanly | large_results_stream_without_being_collected
+Hand-written SQL | Raw SQL inside transactions (commit / rollback) | raw_sql_inside_a_transaction_commits_or_rolls_back_with_it
+Hand-written SQL | execute_many (one statement per row) | mysql_conforms
+Hand-written SQL | execute_many pipelined (1200 rows in a handful of round trips, counted on the wire), same outcome as row by row on a failure part-way | execute_many_is_pipelined_into_a_few_round_trips, mysql_conforms
+Stored programs | CALL: every result set + call status; procedure names never SQL | call_returns_every_result_set_then_the_call_status, protocol::tests::call_sql_quotes_identifiers_and_refuses_anything_else
+Stored programs | CALL with OUT / INOUT arguments, typed | typed_call_maps_results_by_name_and_returns_out_arguments
+Stored programs | Stored functions (call_function) | stored_functions_and_delimiter_scripts
+Stored programs | Named arguments | N/A: MariaDB has no named arguments (refused with a clear error — stored_functions_and_delimiter_scripts)
+Stored programs | Scripts: multi-statement (server-split, BEGIN … END bodies) | scripts_run_several_statements_but_ordinary_calls_never_stack, stored_functions_and_delimiter_scripts
+Stored programs | Scripts with DELIMITER (mysqldump / mysql client style), triggers | stored_functions_and_delimiter_scripts, backend::tests::delimiter_scripts_split_like_the_mysql_client
+Stored programs | LOAD DATA LOCAL INFILE from caller bytes only | load_data_local_infile_sends_only_the_given_bytes
+Performance | Smoke benchmark (prepared, cached, decoded in place) | perf_smoke
+Platform & runtime | Fully async on kernway's reactor: no blocking call on a shard (DNS, files, sockets, sleeps only on the blocking pool; large zlib frames too) — enforced by a source scan | no_blocking_call_runs_on_the_reactor, host_names_resolve_without_blocking_and_ip_literals_skip_dns
+Platform & runtime | Runs on Linux: whole driver suite against MariaDB 11.4 (CI) | ci::mariadb_ubuntu_latest
+Platform & runtime | The client on macOS / Windows: the same code, run there against MySQL | ci::drivers_macos_latest, ci::drivers_windows_latest
+Platform & runtime | Live against MariaDB on macOS / Windows | GAP: MariaDB runs in Docker on Linux only here

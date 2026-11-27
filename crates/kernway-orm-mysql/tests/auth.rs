@@ -29,27 +29,31 @@ fn run<F: std::future::Future<Output = ()>>(f: F) {
 
 const RSA_PW: &str = "rsa-pw-with-a-long-tail-0123456789-abcdefghijklmnopqrstuvwxyz-ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
-/// Create the test accounts once per run (tests run in parallel).
+/// Create a test account once per run (tests run in parallel). Each test
+/// creates only its own: MariaDB has no `caching_sha2_password`, so the RSA
+/// account cannot exist there, while the X509 one can.
 /// (Each test runs on its own thread with its own executor, so holding the
-/// lock across the await only serializes the two setups.)
+/// lock across the await only serializes the setups.)
 #[allow(clippy::await_holding_lock)]
-async fn setup(admin: &MySqlDriver) {
-    static DONE: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+async fn setup(admin: &MySqlDriver, script: &str) {
+    static DONE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
     let mut done = DONE.lock().unwrap();
-    if *done {
+    if done.iter().any(|s| s == script) {
         return;
     }
-    *done = true;
-    admin
-        .execute_script(&format!(
-            "DROP USER IF EXISTS 'kw_rsa'@'%'; CREATE USER 'kw_rsa'@'%' IDENTIFIED WITH caching_sha2_password BY '{RSA_PW}';
-             GRANT SELECT ON kernway_test.* TO 'kw_rsa'@'%';
-             DROP USER IF EXISTS 'kw_x509'@'%'; CREATE USER 'kw_x509'@'%' IDENTIFIED BY 'x509_pw' REQUIRE X509;
-             GRANT SELECT ON kernway_test.* TO 'kw_x509'@'%';"
-        ))
-        .await
-        .unwrap();
+    done.push(script.to_string());
+    admin.execute_script(script).await.unwrap();
 }
+
+fn rsa_account() -> String {
+    format!(
+        "DROP USER IF EXISTS 'kw_rsa'@'%'; CREATE USER 'kw_rsa'@'%' IDENTIFIED WITH caching_sha2_password BY '{RSA_PW}';
+         GRANT SELECT ON kernway_test.* TO 'kw_rsa'@'%';"
+    )
+}
+
+const X509_ACCOUNT: &str = "DROP USER IF EXISTS 'kw_x509'@'%'; CREATE USER 'kw_x509'@'%' IDENTIFIED BY 'x509_pw' REQUIRE X509;
+     GRANT SELECT ON kernway_test.* TO 'kw_x509'@'%';";
 
 /// Empty the server's `caching_sha2_password` cache so the next login must
 /// do a full authentication.
@@ -67,7 +71,7 @@ fn caching_sha2_full_auth_without_tls_uses_the_servers_rsa_key() {
     let Some(e) = env() else { return eprintln!("skip: KERNWAY_MYSQL_ROOT_URL / KERNWAY_MYSQL_CERTS not set") };
     run(async move {
         let admin = MySqlDriver::connect(&e.root).await.unwrap();
-        setup(&admin).await;
+        setup(&admin, &rsa_account()).await;
         let base = format!("mysql://kw_rsa:{RSA_PW}@{}/kernway_test?ssl-mode=disabled", e.host);
 
         // Without a key and without permission to fetch one: a clear error.
@@ -100,7 +104,7 @@ fn mutual_tls_presents_the_client_certificate() {
     let Some(e) = env() else { return eprintln!("skip: KERNWAY_MYSQL_ROOT_URL / KERNWAY_MYSQL_CERTS not set") };
     run(async move {
         let admin = MySqlDriver::connect(&e.root).await.unwrap();
-        setup(&admin).await;
+        setup(&admin, X509_ACCOUNT).await;
         let c = |f: &str| e.certs.join(f).display().to_string();
         let base = format!("mysql://kw_x509:x509_pw@{}/kernway_test?ssl-mode=verify_ca&ssl-ca={}", e.host, c("ca.pem"));
         // REQUIRE X509 without a certificate: refused.

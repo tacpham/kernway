@@ -465,6 +465,77 @@ jobs:
             grep -q "^test $t " kafka.log || { echo "did not run: $t"; exit 1; }
           done
 
+  # MariaDB through the MySQL driver (Docker on Linux; the client itself is
+  # the MySQL job's, tested there on every OS).
+  mariadb:
+    name: mariadb (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: MariaDB 11.4 (LTS)
+        shell: bash
+        run: crates/kernway-orm-mysql/tests/support/mariadb-setup.sh "$RUNNER_TEMP/mariadb" >> "$GITHUB_ENV"
+
+      - name: MySQL driver — all tests against MariaDB, live
+        shell: bash
+        # caching_sha2_password is MySQL's; the local channel is the mysql job's.
+        run: cargo test -p kernway-orm-mysql --features mysql --lib --tests -- --test-threads=1 --skip local_socket_ --skip caching_sha2 2>&1 | tee mariadb.log
+
+      - name: Nothing was skipped
+        shell: bash
+        run: |
+          ! grep -q "skip:" mariadb.log
+          grep -q "^test mysql_conforms " mariadb.log
+
+  # Valkey (the BSD fork of Redis 7.2) through the Redis client: the same
+  # single / TLS / Sentinel / Cluster deployments as the acceptance run, on
+  # the Valkey image in Docker. The Unix-socket test runs in the container
+  # during the acceptance run.
+  valkey:
+    name: valkey (ubuntu-latest)
+    runs-on: ubuntu-latest
+    env:
+      REDIS_IMAGE: valkey/valkey:8.1-alpine
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Valkey deployments (Docker)
+        shell: bash
+        run: |
+          S=crates/kernway-redis/tests/support
+          docker run -d --name kernway-valkey -p 6380:6379 "$REDIS_IMAGE" redis-server >/dev/null
+          for _ in $(seq 1 30); do docker exec kernway-valkey redis-cli PING 2>/dev/null | grep -q PONG && break; sleep 1; done
+          docker exec kernway-valkey redis-server --version
+          docker exec kernway-valkey redis-cli ACL SETUSER kernway on '>kernway_pw' '~*' '&*' '+@all' >/dev/null
+          "$S/redis-tls-setup.sh" "$RUNNER_TEMP/valkey-tls" >/dev/null
+          "$S/redis-sentinel-setup.sh" >/dev/null
+          "$S/redis-cluster-setup.sh" >/dev/null
+          for v in KERNWAY_REDIS_URL=redis://127.0.0.1:6380 KW_REDIS_ADDR=127.0.0.1:6380 KERNWAY_REDIS_ADDR=127.0.0.1:6380 \
+                   KERNWAY_REDIS_USER=kernway KERNWAY_REDIS_PASS=kernway_pw \
+                   KERNWAY_REDIS_TLS_URL=rediss://localhost:6381 "KERNWAY_REDIS_TLS_DIR=$RUNNER_TEMP/valkey-tls" \
+                   KERNWAY_REDIS_SENTINEL_URL=redis+sentinel://127.0.0.1:26390,127.0.0.1:26391,127.0.0.1:26392/kwmaster \
+                   KERNWAY_REDIS_CLUSTER_URL=redis+cluster://127.0.0.1:7000,127.0.0.1:7001; do
+            echo "$v" >> "$GITHUB_ENV"
+          done
+
+      - name: Redis client — all tests against Valkey, live
+        shell: bash
+        run: cargo test -p kernway-redis -- --include-ignored --test-threads=1 --nocapture --skip unix_socket_ 2>&1 | tee valkey.log
+
+      - name: Nothing was skipped
+        shell: bash
+        run: |
+          ! grep -q "skip:" valkey.log
+
   # SQL Server runs on Linux in Docker (Microsoft ships no macOS build, and a
   # Windows runner has no TCP-enabled instance); the client code is the same
   # on every OS — it builds and its unit tests pass in the drivers job above.

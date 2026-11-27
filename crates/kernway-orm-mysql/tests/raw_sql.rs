@@ -232,7 +232,9 @@ fn large_results_stream_without_being_collected() {
     run(async move {
         let db = MySqlDriver::connect(&url).await.unwrap();
         let sql = "WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < ?) SELECT n, REPEAT('x', 100) FROM s";
+        // MySQL's name, else MariaDB's (whichever this server has).
         db.execute("SET SESSION cte_max_recursion_depth = 1000000").await.ok();
+        db.execute("SET SESSION max_recursive_iterations = 1000000").await.ok();
         // Each pooled connection has its own session: run on one via a transaction-free script.
         let (mut count, mut sum) = (0u64, 0i64);
         let res = db

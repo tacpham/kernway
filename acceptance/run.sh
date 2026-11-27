@@ -10,6 +10,8 @@
 #   acceptance/run.sh postgres (PostgreSQL 18 with every auth method and TLS, in Docker)
 #   acceptance/run.sh mongodb  (MongoDB 8.0: standalone, TLS / X.509, replica set, sharded — in Docker)
 #   acceptance/run.sh mssql    (SQL Server 2022 with a test CA, in Docker)
+#   acceptance/run.sh mariadb  (MariaDB 11.4 LTS through the MySQL driver, in Docker)
+#   acceptance/run.sh valkey   (Valkey 8.1 through the Redis client: single, TLS, Sentinel, Cluster — in Docker)
 #   acceptance/run.sh nats     (nats-server natively: plain, auth, TLS / mTLS, a JetStream cluster)
 #   acceptance/run.sh rabbitmq (RabbitMQ 4.1 with TLS and EXTERNAL auth, in Docker)
 #   acceptance/run.sh meilisearch (the official Meilisearch binary, natively)
@@ -20,7 +22,7 @@
 #   kernway-oracle  gvenzl/oracle-free:23-slim host ports 1521 / 2484 (TCPS)
 # Oracle TCPS needs a wallet once: crates/kernway-orm-oracle/tests/support/oracle-tcps-setup.sh
 set -euo pipefail
-DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb|mssql|nats|rabbitmq|meilisearch|kafka}"
+DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb|mssql|nats|rabbitmq|meilisearch|kafka|mariadb|valkey}"
 # CI workflow whose jobs for this commit are the cross-OS evidence.
 WORKFLOW=drivers.yml; IMAGE=""; EXTRA=()
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -111,12 +113,18 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     # The workspace CI runs every crate's tests on Linux, macOS and Windows.
     WORKFLOW=workspace.yml
     ;;
-  redis)
+  redis|valkey)
     # Four deployments: a single node (with a Unix socket), TLS-only (with
     # client certificates), Sentinel (master + replica + 3 sentinels) and a
     # 3-master / 3-replica Cluster. The TLS, Sentinel and Cluster containers
-    # are recreated each run (test data only).
-    C="${REDIS_CONTAINER:-kernway-redis}"; IMAGE_TAG="${REDIS_IMAGE:-redis:7.4-alpine}"
+    # are recreated each run (test data only). Valkey: the same, on its image
+    # (it keeps redis-server / redis-cli as names).
+    if [ "$DB" = valkey ]; then
+      export REDIS_IMAGE="${VALKEY_IMAGE:-valkey/valkey:8.1-alpine}"
+      C="${VALKEY_CONTAINER:-kernway-valkey}"; IMAGE_TAG="$REDIS_IMAGE"
+    else
+      C="${REDIS_CONTAINER:-kernway-redis}"; IMAGE_TAG="${REDIS_IMAGE:-redis:7.4-alpine}"
+    fi
     S="$ROOT/crates/kernway-redis/tests/support"
     ensure_container "$C" -p 6380:6379 "$IMAGE_TAG" redis-server --unixsocket /tmp/redis.sock --unixsocketperm 777
     wait_for "Redis" docker exec "$C" redis-cli PING
@@ -133,6 +141,7 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     export KERNWAY_REDIS_CLUSTER_URL=redis+cluster://127.0.0.1:7000,127.0.0.1:7001
     VERSION="$(docker exec "$C" redis-server --version | sed 's/ sha=.*//')"
     CRATE=kernway-redis; FEATURES=(); TITLE=Redis
+    if [ "$DB" = valkey ]; then TITLE="Valkey (Redis client)"; fi
     # The tests marked #[ignore] need a server: run them. The Unix-socket
     # test runs inside the Redis container (in_container_tests).
     EXTRA=(--include-ignored); SKIP=(--skip unix_socket_)
@@ -215,7 +224,19 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     VERSION="Kafka $KERNWAY_KAFKA_VERSION (KRaft)"
     CRATE=kernway-kafka; FEATURES=(); TITLE=Kafka; SKIP=()
     ;;
-  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql | nats | rabbitmq | meilisearch | kafka)" >&2; exit 2 ;;
+  mariadb)
+    # Recreated each run (test data only): MariaDB with a test CA, the MySQL
+    # driver's accounts and database.
+    C=kernway-mariadb
+    log "MariaDB (${MARIADB_IMAGE:-mariadb:11.4}) through the MySQL driver"
+    "$ROOT/crates/kernway-orm-mysql/tests/support/mariadb-setup.sh" "$ROOT/target/mariadb" > "$WORK/mariadb.env"
+    set -a; . "$WORK/mariadb.env"; set +a
+    VERSION="MariaDB $KERNWAY_MARIADB_VERSION"
+    CRATE=kernway-orm-mysql; FEATURES=(--features mysql); TITLE="MariaDB (MySQL driver)"
+    # caching_sha2_password is MySQL's; the local channel runs in the container.
+    SKIP=(--skip local_socket_ --skip caching_sha2)
+    ;;
+  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql | nats | rabbitmq | meilisearch | kafka | mariadb | valkey)" >&2; exit 2 ;;
 esac
 
 CMD="cargo test -p $CRATE ${FEATURES[*]+${FEATURES[*]}} --lib --tests -- --test-threads=1 --nocapture ${EXTRA[*]+${EXTRA[*]}} ${SKIP[*]+${SKIP[*]}}"
@@ -250,7 +271,7 @@ in_container_tests() { # test target, name filter, env...
   docker exec "${envs[@]}" "$C" "/tmp/kernway-$target" "$filter" --test-threads=1 --nocapture >> "$WORK/test.log" 2>&1 || true
   docker exec "$C" rm -f "/tmp/kernway-$target"
 }
-if [ "$DB" = redis ]; then
+if [ "$DB" = redis ] || [ "$DB" = valkey ]; then
   in_container_tests connection unix_socket_ KERNWAY_REDIS_SOCKET=/tmp/redis.sock
   CMD="$CMD; unix_socket_* inside $C"
 fi
@@ -265,6 +286,11 @@ fi
 if [ "$DB" = mysql ]; then
   in_container_tests connection local_socket_ \
     KERNWAY_MYSQL_SOCKET=/var/run/mysqld/mysqld.sock KERNWAY_MYSQL_ROOT_PASSWORD="$RPW"
+  CMD="$CMD; local_socket_* inside $C"
+fi
+if [ "$DB" = mariadb ]; then
+  in_container_tests connection local_socket_ \
+    KERNWAY_MYSQL_SOCKET=/run/mysqld/mysqld.sock KERNWAY_MYSQL_ROOT_PASSWORD=secret
   CMD="$CMD; local_socket_* inside $C"
 fi
 

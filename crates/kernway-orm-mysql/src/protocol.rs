@@ -59,6 +59,16 @@ const SERVER_PS_OUT_PARAMS: u16 = 0x1000;
 const CLIENT_LOCAL_FILES: u32 = 0x0000_0080;
 /// Compressed protocol (zlib), switched on after authentication.
 const CLIENT_COMPRESS: u32 = 0x0000_0020;
+/// Bit 0 is `CLIENT_MYSQL` to MariaDB: a server without it is MariaDB, and
+/// a client that clears it may use MariaDB's extended capabilities (the
+/// last four reserved bytes of the greeting and of the response).
+const CLIENT_MYSQL: u32 = CLIENT_LONG_PASSWORD;
+/// MariaDB extended capability: column definitions carry the type's name
+/// and format (`json`, `uuid`, `inet6` …) — how MariaDB's JSON, a
+/// LONGTEXT on the wire, is known for JSON.
+const MARIADB_CLIENT_EXTENDED_METADATA: u32 = 1 << 3;
+/// `MYSQL_TYPE_JSON`: a JSON column (MySQL's own type; MariaDB's by its format).
+const MYSQL_TYPE_JSON: u8 = 0xf5;
 /// Payloads shorter than this travel uncompressed inside a compressed frame,
 /// as the official client does.
 const MIN_COMPRESS_LENGTH: usize = 50;
@@ -353,6 +363,8 @@ pub struct Conn {
     /// Open server-side cursors by id (`SqlConn::cursor_open`).
     pub(crate) cursors: std::collections::HashMap<u64, CursorState>,
     pub(crate) next_cursor: u64,
+    /// MariaDB extended metadata negotiated: column definitions carry it.
+    ext_meta: bool,
 }
 
 /// Compressed protocol state: decompressed bytes not yet consumed by the
@@ -435,6 +447,7 @@ impl Conn {
             status: 0,
             cursors: std::collections::HashMap::new(),
             next_cursor: 1,
+            ext_meta: false,
         }
     }
 
@@ -629,10 +642,12 @@ impl Conn {
         let use_tls = cfg.ssl_mode != SslMode::Disabled && server_tls && !self.io.is_local();
         let compress = cfg.compress && hello.capabilities & CLIENT_COMPRESS != 0;
         let compress_cap = if compress { CLIENT_COMPRESS } else { 0 };
+        // MariaDB: ask for extended column metadata (JSON columns known as such).
+        let mariadb_caps = hello.mariadb_caps & MARIADB_CLIENT_EXTENDED_METADATA;
         if use_tls {
             // The SSLRequest must announce the same capabilities as the
             // handshake response that follows (the server keeps these).
-            self.write_packet(&handshake_header(cfg, CLIENT_SSL | compress_cap)).await?;
+            self.write_packet(&handshake_header(cfg, CLIENT_SSL | compress_cap, mariadb_caps)).await?;
             self.upgrade_to_tls(cfg).await?;
         }
 
@@ -644,8 +659,9 @@ impl Conn {
         };
         let auth = auth_response(plugin, cfg.password.as_bytes(), &hello.salt);
         let extra = if use_tls { CLIENT_SSL } else { 0 } | compress_cap;
-        self.write_packet(&build_handshake_response(cfg, &auth, plugin, extra))
+        self.write_packet(&build_handshake_response(cfg, &auth, plugin, extra, mariadb_caps))
             .await?;
+        self.ext_meta = mariadb_caps != 0;
         // The server accepts the clear-text password of a caching_sha2 full
         // authentication over TLS or a Unix socket — not over a named pipe,
         // where the RSA exchange is used instead.
@@ -1012,7 +1028,8 @@ impl Conn {
     {
         let mut metas = Vec::with_capacity(col_count);
         for _ in 0..col_count {
-            metas.push(parse_col_meta(self.read_packet_ref().await?));
+            let ext = self.ext_meta;
+            metas.push(parse_col_meta(self.read_packet_ref().await?, ext));
         }
         let columns: Vec<String> = metas.iter().map(|m| m.name.clone()).collect();
 
@@ -1417,7 +1434,8 @@ impl Conn {
                     .ok_or_else(|| OrmError::Query("bad column count packet".into()))?;
                 let mut metas = Vec::with_capacity(col_count as usize);
                 for _ in 0..col_count {
-                    metas.push(parse_col_meta(self.read_packet_ref().await?));
+                    let ext = self.ext_meta;
+                    metas.push(parse_col_meta(self.read_packet_ref().await?, ext));
                 }
                 let eof = self.read_packet().await?;
                 if !is_eof(&eof) {
@@ -1636,6 +1654,8 @@ struct Hello {
     plugin: String,
     /// Server capability flags (lower and upper halves joined).
     capabilities: u32,
+    /// MariaDB's extended capabilities (0 from MySQL).
+    mariadb_caps: u32,
 }
 
 /// Parse HandshakeV10.
@@ -1665,7 +1685,7 @@ fn parse_handshake(p: &[u8]) -> Result<Hello, OrmError> {
         .ok_or_else(|| conn_err("short handshake (capabilities)"))?;
     i += 2;
     if p.len() <= i {
-        return Ok(Hello { salt, plugin: String::new(), capabilities: caps_lower });
+        return Ok(Hello { salt, plugin: String::new(), capabilities: caps_lower, mariadb_caps: 0 });
     }
     i += 1; // charset
     i += 2; // status flags
@@ -1675,7 +1695,14 @@ fn parse_handshake(p: &[u8]) -> Result<Hello, OrmError> {
         .unwrap_or(0);
     i += 2;
     i += 1; // length of auth-plugin-data
-    i += 10; // reserved
+    // Reserved; from a MariaDB server (no CLIENT_MYSQL) its last four bytes
+    // are the extended capabilities.
+    let mariadb_caps = if caps_lower & CLIENT_MYSQL == 0 {
+        p.get(i + 6..i + 10).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    } else {
+        0
+    };
+    i += 10;
     // salt part 2 — up to 12 bytes then a NUL.
     let salt2: Vec<u8> = p
         .get(i..)
@@ -1694,12 +1721,12 @@ fn parse_handshake(p: &[u8]) -> Result<Hello, OrmError> {
     } else {
         String::new()
     };
-    Ok(Hello { salt, plugin, capabilities: caps_lower | caps_upper << 16 })
+    Ok(Hello { salt, plugin, capabilities: caps_lower | caps_upper << 16, mariadb_caps })
 }
 
 /// The handshake response's fixed 32-byte header: capabilities, max packet,
 /// charset, reserved. On its own (with `CLIENT_SSL`) it is the `SSLRequest`.
-fn handshake_header(cfg: &MysqlConfig, extra_caps: u32) -> Vec<u8> {
+fn handshake_header(cfg: &MysqlConfig, extra_caps: u32, mariadb_caps: u32) -> Vec<u8> {
     let mut caps = CLIENT_LONG_PASSWORD
         | CLIENT_FOUND_ROWS
         | CLIENT_LONG_FLAG
@@ -1714,11 +1741,16 @@ fn handshake_header(cfg: &MysqlConfig, extra_caps: u32) -> Vec<u8> {
     if cfg.database.is_some() {
         caps |= CLIENT_CONNECT_WITH_DB;
     }
+    if mariadb_caps != 0 {
+        // Clearing CLIENT_MYSQL tells MariaDB to read the extended ones.
+        caps &= !CLIENT_MYSQL;
+    }
     let mut out = Vec::with_capacity(96);
     out.extend_from_slice(&caps.to_le_bytes());
     out.extend_from_slice(&MAX_PACKET.to_le_bytes());
     out.push(UTF8MB4_GENERAL_CI);
-    out.extend_from_slice(&[0u8; 23]); // reserved
+    out.extend_from_slice(&[0u8; 19]); // reserved
+    out.extend_from_slice(&mariadb_caps.to_le_bytes()); // MariaDB's extended (0: none)
     out
 }
 
@@ -1727,8 +1759,9 @@ fn build_handshake_response(
     auth: &[u8],
     plugin: &str,
     extra_caps: u32,
+    mariadb_caps: u32,
 ) -> Vec<u8> {
-    let mut out = handshake_header(cfg, extra_caps);
+    let mut out = handshake_header(cfg, extra_caps, mariadb_caps);
     out.extend_from_slice(cfg.user.as_bytes());
     out.push(0);
     // CLIENT_SECURE_CONNECTION: 1-byte length-prefixed auth response.
@@ -2107,7 +2140,7 @@ pub(crate) struct ColMeta {
     pub(crate) decimals: u8,
 }
 
-fn parse_col_meta(def: &[u8]) -> ColMeta {
+fn parse_col_meta(def: &[u8], ext_meta: bool) -> ColMeta {
     // 6 lenenc strings: catalog, schema, table, org_table, name, org_name.
     let mut i = 0usize;
     let mut name = String::new();
@@ -2122,13 +2155,32 @@ fn parse_col_meta(def: &[u8]) -> ColMeta {
             None => return ColMeta { name, col_type: MYSQL_TYPE_VAR_STRING, ..ColMeta::default() },
         }
     }
+    // MariaDB extended metadata: (kind, lenenc value) pairs — 0 the type's
+    // name, 1 its format. A JSON column (a LONGTEXT on the wire) says `json`.
+    let mut json = false;
+    if ext_meta {
+        if let Some((info, next)) = read_lenenc_str(def, i) {
+            i = next;
+            let mut j = 0;
+            while j < info.len() {
+                let kind = info[j];
+                match read_lenenc_str(info, j + 1) {
+                    Some((v, n)) => {
+                        json |= (kind == 0 || kind == 1) && v == b"json";
+                        j = n;
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
     // lenenc fixed-length (0x0c), charset(2), column_length(4), type(1),
     // flags(2), decimals(1).
     let (_fixed, consumed) = read_lenenc_int(def, i).unwrap_or((0, 1));
     i += consumed;
     let charset = def.get(i..i + 2).map_or(0, |b| u16::from_le_bytes([b[0], b[1]]));
     i += 2 + 4;
-    let col_type = *def.get(i).unwrap_or(&MYSQL_TYPE_VAR_STRING);
+    let col_type = if json { MYSQL_TYPE_JSON } else { *def.get(i).unwrap_or(&MYSQL_TYPE_VAR_STRING) };
     let flags = def
         .get(i + 1..i + 3)
         .map(|b| u16::from_le_bytes([b[0], b[1]]))
@@ -2445,6 +2497,49 @@ mod tests {
     }
 
     #[test]
+    fn mariadb_extended_metadata_marks_json_columns() {
+        // catalog, schema, table, org_table, name, org_name; then (with
+        // extended metadata) the (kind, value) pairs; then the fixed part.
+        let mut def = Vec::new();
+        for s in ["def", "db", "t", "t", "js", "js"] {
+            def.push(s.len() as u8);
+            def.extend_from_slice(s.as_bytes());
+        }
+        let fixed = [0x0c, 0xe0, 0x00, 0xff, 0xff, 0xff, 0xff, 0xfc, 0x10, 0x00, 0x00, 0x00, 0x00];
+        let mut with_ext = def.clone();
+        with_ext.extend_from_slice(&[6, 1, 4, b'j', b's', b'o', b'n']); // format "json"
+        with_ext.extend_from_slice(&fixed);
+        let m = parse_col_meta(&with_ext, true);
+        assert_eq!((m.name.as_str(), m.col_type), ("js", MYSQL_TYPE_JSON));
+        // Without extended metadata: the wire type (a BLOB / LONGTEXT) stays.
+        let mut plain = def;
+        plain.extend_from_slice(&fixed);
+        assert_eq!(parse_col_meta(&plain, false).col_type, 0xfc);
+        // A greeting from MariaDB: CLIENT_MYSQL clear, extended caps in the reserved bytes.
+        let mut g = vec![0x0a];
+        g.extend_from_slice(b"11.4.13-MariaDB\0");
+        g.extend_from_slice(&[1, 0, 0, 0]);
+        g.extend_from_slice(b"abcdefgh");
+        g.push(0);
+        g.extend_from_slice(&[0xfe, 0xf7]); // lower caps: bit 0 clear
+        g.push(45);
+        g.extend_from_slice(&[2, 0]);
+        g.extend_from_slice(&[0xff, 0x81]); // upper caps
+        g.push(21);
+        g.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+        g.extend_from_slice(&0x1du32.to_le_bytes()); // MariaDB extended caps
+        g.extend_from_slice(b"ijklmnopqrst\0mysql_native_password\0");
+        let h = parse_handshake(&g).unwrap();
+        assert_eq!(h.mariadb_caps & MARIADB_CLIENT_EXTENDED_METADATA, MARIADB_CLIENT_EXTENDED_METADATA);
+        assert_eq!(h.salt.len(), 20);
+        let cfg = MysqlConfig::from_url("mysql://u:p@127.0.0.1/db").unwrap();
+        let resp = handshake_header(&cfg, 0, MARIADB_CLIENT_EXTENDED_METADATA);
+        assert_eq!(resp[0] & 1, 0, "CLIENT_MYSQL cleared for MariaDB");
+        assert_eq!(&resp[28..32], &MARIADB_CLIENT_EXTENDED_METADATA.to_le_bytes());
+        assert_eq!(handshake_header(&cfg, 0, 0)[0] & 1, 1, "MySQL: unchanged");
+    }
+
+    #[test]
     fn a_large_packet_grows_the_read_buffer_then_it_shrinks_back() {
         live("large_packet", |mut conn| async move {
             let big = 1024 * 1024 + 7;
@@ -2454,7 +2549,10 @@ mod tests {
 
             // Many small rows in one response, then a normal query: the stream
             // stays in sync across buffer refills.
-            conn.query("SET SESSION cte_max_recursion_depth = 10000").await.unwrap();
+            // The recursion limit's name: MySQL's, else MariaDB's.
+            if conn.query("SET SESSION cte_max_recursion_depth = 10000").await.is_err() {
+                conn.query("SET SESSION max_recursive_iterations = 10000").await.unwrap();
+            }
             let r = conn
                 .query("SELECT seq FROM (WITH RECURSIVE s(seq) AS (SELECT 1 UNION ALL \
                         SELECT seq + 1 FROM s WHERE seq < 5000) SELECT seq FROM s) t")
@@ -2570,8 +2668,9 @@ mod tests {
                 .unwrap();
             assert_ne!(server_cipher(&mut c).await, "");
 
-            // MySQL's auto-generated server certificate names no host, so a
-            // strict identity check against an IP must refuse it.
+            // The server certificate does not name the IP connected to
+            // (MySQL's auto-generated one names no host; the MariaDB test
+            // setup's names only localhost): a strict identity check refuses it.
             let err = Conn::connect(&with_mode(base.clone(), SslMode::VerifyIdentity, Some(&ca)))
                 .await
                 .err()
