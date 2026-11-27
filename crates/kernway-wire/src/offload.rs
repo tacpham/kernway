@@ -63,6 +63,16 @@ mod tests {
     }
 
     #[test]
+    fn resolve_all_gives_every_address_and_parses_literals_in_place() {
+        let all = run(resolve_all("localhost", 6379)).unwrap();
+        assert!(!all.is_empty());
+        assert!(all.iter().all(|a| a.ip().is_loopback() && a.port() == 6379), "{all:?}");
+        assert_eq!(run(resolve_all("[::1]", 1)).unwrap(), vec!["[::1]:1".parse().unwrap()]);
+        assert_eq!(run(resolve_all("10.0.0.1", 2)).unwrap(), vec!["10.0.0.1:2".parse().unwrap()]);
+        assert!(run(resolve_all("kernway-no-such-host.invalid", 3)).is_err());
+    }
+
+    #[test]
     fn ip_literals_are_parsed_and_names_resolved() {
         assert_eq!(run(resolve("127.0.0.1", 5)).unwrap(), "127.0.0.1:5".parse().unwrap());
         assert_eq!(run(resolve("[::1]", 6)).unwrap(), "[::1]:6".parse().unwrap());
