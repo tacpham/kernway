@@ -291,3 +291,52 @@ END;
         assert_eq!(db.query_scalar("SELECT 3 FROM dual", &[]).await.unwrap(), Value::Int(3));
     });
 }
+
+/// An object column next to LOB columns: the LOBs make the driver define
+/// the columns again, and the object must still be read in its own format
+/// (it was read as plain bytes, which threw the response out of step —
+/// "unexpected TTC message type 36" — e.g. on `SELECT *` of an AQ queue
+/// table: USER_DATA BLOB next to USER_PROP SYS.ANYDATA).
+#[test]
+fn objects_next_to_lob_columns_decode() {
+    let Some(url) = url() else { return eprintln!("skip: KERNWAY_ORACLE_HOST not set") };
+    run(async move {
+        let db = OracleDriver::connect_with(kernway_orm_oracle::OracleConfig::from_url(&url).unwrap(), 1).await.unwrap();
+        db.execute_script(
+            "BEGIN
+               FOR t IN (SELECT table_name FROM user_tables WHERE table_name = 'KWO_LOBMIX_T') LOOP EXECUTE IMMEDIATE 'DROP TABLE kwo_lobmix_t'; END LOOP;
+               FOR t IN (SELECT type_name FROM user_types WHERE type_name = 'KWO_LOBMIX_PT') LOOP EXECUTE IMMEDIATE 'DROP TYPE kwo_lobmix_pt FORCE'; END LOOP;
+             END;
+             /
+             CREATE TYPE kwo_lobmix_pt AS OBJECT (x NUMBER, label VARCHAR2(20))
+             /
+             CREATE TABLE kwo_lobmix_t (id NUMBER, data BLOB, p kwo_lobmix_pt, note CLOB, tail VARCHAR2(10))
+             /
+             INSERT INTO kwo_lobmix_t VALUES (1, HEXTORAW('DEADBEEF'), kwo_lobmix_pt(7, 'seven'), 'first', 'a')
+             /
+             INSERT INTO kwo_lobmix_t VALUES (2, NULL, NULL, NULL, 'b')
+             /
+             INSERT INTO kwo_lobmix_t VALUES (3, HEXTORAW('00'), kwo_lobmix_pt(NULL, 'three'), RPAD('x', 5000, 'x'), 'c')
+             /",
+        )
+        .await
+        .unwrap();
+        for sql in ["SELECT * FROM kwo_lobmix_t ORDER BY id", "SELECT p, data, tail FROM kwo_lobmix_t ORDER BY id"] {
+            let r = db.query(sql, &[]).await.unwrap_or_else(|e| panic!("{sql}: {e}"));
+            assert_eq!(r.rows.len(), 3, "{sql}");
+            let col = |row: usize, name: &str| r.get(row, name).cloned().unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(col(0, "P"), Value::Object(vec![("X".into(), Value::Int(7)), ("LABEL".into(), Value::Text("seven".into()))]), "{sql}");
+            assert_eq!(col(1, "P"), Value::Null);
+            assert_eq!(col(2, "P"), Value::Object(vec![("X".into(), Value::Null), ("LABEL".into(), Value::Text("three".into()))]));
+            assert_eq!(col(0, "DATA"), Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+            assert_eq!(col(2, "TAIL"), Value::Text("c".into()), "the columns after the object stay in step");
+        }
+        // Through a cursor too, in small batches.
+        let mut cur = db.cursor("SELECT * FROM kwo_lobmix_t ORDER BY id", &[]).await.unwrap();
+        let mut n = 0;
+        while let Some(b) = cur.next_batch(2).await.unwrap() {
+            n += b.rows.len();
+        }
+        assert_eq!(n, 3);
+    });
+}

@@ -29,6 +29,7 @@ Types | CLOB / NCLOB / BLOB read and written, 0 B – 1 MB | clob_and_blob_read_
 Types | Nested CURSOR(...) columns: each fetched to the end as a result set (120 rows x their own cursors) | nested_cursor_columns_come_back_as_result_sets
 Types | BFILE columns: the server file read through its locator (open / read / close), byte-exact vs the server's length; a missing file is the server's error | bfile_columns_are_read_from_the_server_file
 Types | Object types (nested), VARRAY / nested tables (of scalars and objects, with NULLs), XMLType (inline and as a CLOB) in query results; LOB / date / BOOLEAN attributes; mapped onto nested structs | objects_collections_and_xmltype_columns_decode
+Types | An object column next to LOB columns (the LOBs redefine every column): still read as an object, the row in step — e.g. SELECT * of an AQ queue table (USER_DATA BLOB, USER_PROP SYS.ANYDATA), also right after a failed statement | objects_next_to_lob_columns_decode, advanced_queuing_raw_json_and_object_queues
 Types | TIMESTAMP WITH TIME ZONE in a named region: local time, offset at that instant (daylight saving) and IANA region name, computed by the server (region ids from V$TIMEZONE_NAMES); columns and PL/SQL results — beyond python-oracledb thin, which refuses them | timestamps_in_named_regions_come_back_as_the_server_computes_them
 
 ORM (shared layer) | A transaction abandoned half-way (timeout) commits nothing and never hands an open transaction to the next caller | oracle_conforms

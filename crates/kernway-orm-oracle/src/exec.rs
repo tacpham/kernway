@@ -147,6 +147,10 @@ pub struct Column {
     /// For an object / collection / XMLType column: its type
     /// (`SCHEMA.NAME`).
     pub type_name: Option<String>,
+    /// The type's OID and version, as described (sent back when the
+    /// columns are defined again, e.g. next to a LOB column).
+    pub(crate) type_oid: Vec<u8>,
+    pub(crate) type_version: u32,
 }
 
 impl Column {
@@ -748,7 +752,15 @@ fn write_define(w: &mut Writer, fv: u8, cursor_id: u16, cols: &[Column], scrolla
         };
         let cont_flag = if prefetch > 0 { LOB_PREFETCH_FLAG } else { 0 };
         w.u8(t).u8(BIND_USE_INDICATORS).u8(0).u8(0);
-        w.ub(size).ub(0).ub(cont_flag).ub(0).ub(0); // size, max elements, cont flag, OID, version
+        w.ub(size).ub(0).ub(cont_flag); // size, max elements, cont flag
+        // An object column is defined with its type (OID, version), as the
+        // server described it; without them the server answers with a
+        // message the rows cannot be read from.
+        if t == ora_type::OBJECT && !c.type_oid.is_empty() {
+            w.bytes_2l(&c.type_oid).ub(u64::from(c.type_version));
+        } else {
+            w.ub(0).ub(0);
+        }
         w.ub(if csfrm != 0 { 873 } else { 0 }).u8(csfrm).ub(prefetch);
         if fv >= 8 {
             w.ub(0);
@@ -991,9 +1003,12 @@ fn read_column(r: &mut Reader<'_>, c: &Column, fv: u8, nested: &mut Vec<(u16, Ve
     if c.buffer_size == 0 && !matches!(t, LONG | LONG_RAW | UROWID) {
         return Ok(Value::Null);
     }
-    if c.wire_type == 0 {
-        // Types this driver refuses are still read past exactly, so the
-        // response stays in step; the caller then reports them.
+    // Not converted by a define (a define of other columns — a LOB next to
+    // it — keeps this one's own type): objects, BFILEs and nested cursors
+    // are read in their own formats. Types this driver refuses are still
+    // read past exactly, so the response stays in step.
+    if c.wire_type == 0 || c.wire_type == c.ora_type {
+        // (The caller reports refused types.)
         match c.ora_type {
             OBJECT => {
                 // Type OID, OID, snapshot, version, image length, flags,
@@ -1117,8 +1132,10 @@ fn parse_describe(r: &mut Reader<'_>, fv: u8) -> PResult<Vec<Column>> {
         c.buffer_size = r.ub4()?;
         r.skip_ub()?; // max array elements
         r.skip_ub()?; // cont flags
-        r.skip_bytes_2l()?; // OID
-        r.skip_ub()?; // version
+        if r.ub4()? > 0 {
+            c.type_oid = r.bytes()?.unwrap_or_default(); // OID
+        }
+        c.type_version = r.ub2()? as u32; // version
         r.skip_ub()?; // charset id
         c.csfrm = r.u8()?;
         r.skip_ub()?; // max size

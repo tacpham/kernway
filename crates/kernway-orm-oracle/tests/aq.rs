@@ -50,6 +50,15 @@ fn advanced_queuing_raw_json_and_object_queues() {
         let mut m2 = AqMessage::new(Value::Raw(vec![0xFF; 2000]));
         m2.correlation = Some("second".into());
         c.aq_enqueue("kwo_q_raw", &AqPayload::Raw, &m2, true).await.unwrap();
+        // The queue table itself reads with every column — USER_DATA (BLOB)
+        // next to USER_PROP (SYS.ANYDATA) — also right after a failed statement.
+        assert!(c.execute("SELECT * FROM kwo_no_such_table", &[]).await.is_err());
+        let mut first = Vec::new();
+        let (cols, _) = c.open_cursor("SELECT * FROM kwo_q_raw_t ORDER BY enq_time", &[], &mut first).await.unwrap();
+        assert!(cols.iter().any(|c| c.name == "USER_PROP") && cols.iter().any(|c| c.name == "USER_DATA"));
+        assert_eq!(first.len(), 2, "both messages are rows of the queue table");
+        let data = cols.iter().position(|c| c.name == "USER_DATA").unwrap();
+        assert_eq!(first[0][data], Value::Raw(vec![1, 2, 3]));
         let got = c
             .aq_dequeue("kwo_q_raw", &AqPayload::Raw, &AqDequeue { correlation: Some("second".into()), ..now.clone() })
             .await
