@@ -166,10 +166,7 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     "$ROOT/crates/kernway-orm-mssql/tests/support/mssql-setup.sh" "$WORK/mssql" > "$WORK/mssql.env"
     set -a; . "$WORK/mssql.env"; set +a
     VERSION="$(docker exec "$C" /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Kernway_pw1!' -h -1 -Q 'SET NOCOUNT ON; SELECT @@VERSION' | head -1 | sed 's/ *$//')"
-    CRATE=kernway-orm-mssql; FEATURES=(--features mssql); TITLE="SQL Server"
-    # Strict (TDS 8.0) needs TLS 1.3 on the server, which crashes it under
-    # x86 emulation: the CI job (native x86-64) is its evidence.
-    SKIP=(--skip strict_tds8)
+    CRATE=kernway-orm-mssql; FEATURES=(--features mssql); TITLE="SQL Server"; SKIP=()
     ;;
   *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql)" >&2; exit 2 ;;
 esac

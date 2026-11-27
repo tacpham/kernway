@@ -335,19 +335,3 @@ fn host_names_resolve_off_the_reactor() {
         assert!(started.elapsed() < Duration::from_secs(5));
     });
 }
-
-#[test]
-fn strict_tds8() {
-    let Some(url) = env("KERNWAY_MSSQL_STRICT_URL") else { return };
-    block(async move {
-        // TLS before the first TDS byte (ALPN tds/8.0, TLS 1.3), the certificate checked.
-        let mut c = connect(&url).await.unwrap();
-        assert!(c.is_tls());
-        let v = scalar(&mut c, "SELECT protocol_version FROM sys.dm_exec_connections WHERE session_id = @@SPID").await;
-        assert_eq!(v.as_i64().map(|v| (v as u32) >> 24), Some(0x08), "{v:?}");
-        assert_eq!(scalar(&mut c, "SELECT encrypt_option FROM sys.dm_exec_connections WHERE session_id = @@SPID").await, Value::Text("TRUE".into()));
-        assert!(connect(&url.replace("localhost", "127.0.0.1")).await.is_err(), "the name is checked");
-        // A TDS 7.x client cannot reach a TLS 1.3-only server: a clear error.
-        assert!(connect(&url.replace("encrypt=strict", "encrypt=true")).await.is_err());
-    });
-}

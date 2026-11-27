@@ -259,8 +259,6 @@ jobs:
   # SQL Server runs on Linux in Docker (Microsoft ships no macOS build, and a
   # Windows runner has no TCP-enabled instance); the client code is the same
   # on every OS — it builds and its unit tests pass in the drivers job above.
-  # On this native x86-64 host the server gets TLS 1.3, so TDS 8.0 strict
-  # connections are tested too.
   mssql:
     name: mssql live (ubuntu-latest)
     runs-on: ubuntu-latest

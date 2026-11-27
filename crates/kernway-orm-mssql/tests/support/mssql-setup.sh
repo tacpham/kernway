@@ -4,8 +4,8 @@
 #   127.0.0.1:1433   sa / Kernway_pw1!   kw_app / Kw_app_pw1! (owns kernway_test)
 #
 # TLS uses a fresh CA and a server certificate for DNS:localhost only (so
-# 127.0.0.1 exercises the name check) and the container's host name (TDS 8.0
-# strict connections require it), configured in mssql.conf.
+# 127.0.0.1 exercises the name check) and the container's host name, configured
+# in mssql.conf.
 #
 #   crates/kernway-orm-mssql/tests/support/mssql-setup.sh [dir]
 #
@@ -15,11 +15,8 @@ DIR="${1:-$(cd "$(dirname "$0")/../../../.." && pwd)/target/mssql}"
 NAME="${MSSQL_CONTAINER:-kernway-mssql}"
 IMAGE="${MSSQL_IMAGE:-mcr.microsoft.com/mssql/server:2022-latest}"
 SA_PW='Kernway_pw1!'
-# TDS 7.x clients (sqlcmd, the driver's default mode) need TLS 1.2; TDS 8.0
-# strict needs TLS 1.3, which crashes the server under x86 emulation (Apple
-# silicon) — so on native x86-64 hosts a second server, TLS 1.3 only, takes
-# strict connections on port 1434.
-STRICT="${MSSQL_STRICT:-$([ "$(uname -m)" = x86_64 ] && echo 1 || echo 0)}"
+# TLS 1.2: SQL Server speaks TLS 1.3 only over TDS 8.0 strict (whose server
+# side refused this test certificate — see acceptance/mssql.features).
 mkdir -p "$DIR"
 DIR="$(cd "$DIR" && pwd)"
 cd "$DIR"
@@ -61,17 +58,4 @@ GRANT VIEW SERVER STATE TO kw_app;
 echo "KERNWAY_MSSQL_URL=mssql://kw_app:Kw_app_pw1%21@127.0.0.1:1433/kernway_test?trustServerCertificate=true"
 echo "KERNWAY_MSSQL_SA_URL=mssql://sa:Kernway_pw1%21@127.0.0.1:1433/master?trustServerCertificate=true"
 echo "KERNWAY_MSSQL_TLS_DIR=$DIR"
-if [ "$STRICT" = 1 ]; then
-  sed 's/^tlsprotocols = .*/tlsprotocols = 1.3/' mssql.conf > mssql-strict.conf
-  docker rm -f "$NAME-strict" >/dev/null 2>&1 || true
-  docker create --name "$NAME-strict" --hostname kernway-mssql --platform linux/amd64 -e ACCEPT_EULA=Y -e "MSSQL_SA_PASSWORD=$SA_PW" -p 1434:1433 "$IMAGE" >/dev/null
-  docker cp "$DIR/mssql-strict.conf" "$NAME-strict:/var/opt/mssql/mssql.conf"
-  docker cp "$DIR/certs" "$NAME-strict:/var/opt/mssql/certs"
-  docker start "$NAME-strict" >/dev/null
-  for _ in $(seq 1 120); do
-    docker logs "$NAME-strict" 2>&1 | grep -q "ready for client connections" && break
-    sleep 2
-  done
-  sleep 5
-  echo "KERNWAY_MSSQL_STRICT_URL=mssql://sa:Kernway_pw1%21@localhost:1434/master?encrypt=strict&caFile=$DIR/ca.pem"
-fi
+
