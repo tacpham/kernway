@@ -90,8 +90,22 @@ if [ -z "${MONGO_BIN:-}" ]; then
       mkdir -p "$MONGO_SOCKET_DIR" && chmod 777 "$MONGO_SOCKET_DIR"
       SOCKMOUNT=(-v "$MONGO_SOCKET_DIR:/tmp")
     fi
-    run kernway-mongo -p 27100:27017 ${SOCKMOUNT[@]+"${SOCKMOUNT[@]}"} "$IMAGE" mongod --auth --bind_ip_all --filePermissions 0777
-    for _ in $(seq 1 60); do sh_in kernway-mongo mongosh --quiet --eval 'db.runCommand({ping:1}).ok' >/dev/null 2>&1 && break; sleep 1; done
+    # CI saw this container exit during start-up, cause unknown: show its log
+    # and start it once more before giving up.
+    for attempt in 1 2; do
+      run kernway-mongo -p 27100:27017 ${SOCKMOUNT[@]+"${SOCKMOUNT[@]}"} "$IMAGE" mongod --auth --bind_ip_all --filePermissions 0777
+      for _ in $(seq 1 60); do
+        [ "$(docker inspect -f '{{.State.Running}}' kernway-mongo)" = true ] || break
+        sh_in kernway-mongo mongosh --quiet --eval 'db.runCommand({ping:1}).ok' >/dev/null 2>&1 && break
+        sleep 1
+      done
+      [ "$(docker inspect -f '{{.State.Running}}' kernway-mongo)" = true ] && break
+      echo "kernway-mongo exited during start-up (attempt $attempt):" >&2
+      docker inspect -f 'exit code {{.State.ExitCode}}, OOM killed {{.State.OOMKilled}}, error "{{.State.Error}}"' kernway-mongo >&2 || true
+      docker logs --tail 40 kernway-mongo >&2 || true
+      docker rm -f kernway-mongo >/dev/null 2>&1 || true
+      [ "$attempt" = 2 ] && exit 1
+    done
     # The localhost exception creates the first user.
     sh_in kernway-mongo mongosh --quiet admin --eval 'db.createUser({user:"root",pwd:"root_pw",roles:["root"]})' >/dev/null
     sh_in kernway-mongo mongosh --quiet -u root -p root_pw < users.js >/dev/null
