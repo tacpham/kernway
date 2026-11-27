@@ -18,8 +18,9 @@ async fn node_id(c: &ClusterClient, (h, p): &(String, u16)) -> String {
     c.query_node(h, *p, Cmd::new("CLUSTER").arg("MYID")).await.unwrap()
 }
 
-/// Move `slot` (holding `key`) from `src` to `dst` the way redis-cli does,
-/// pausing after the key moved (the ASK window) to run `during`.
+/// Move `slot` (holding `key`) from `src` to `dst` the way redis-cli does —
+/// every key of the slot, since other test keys may share it — pausing after
+/// the keys moved (the ASK window) to run `during`.
 async fn migrate_slot<F>(c: &ClusterClient, slot: u16, key: &str, src: &(String, u16), dst: &(String, u16), during: F)
 where
     F: std::future::Future<Output = ()>,
@@ -31,7 +32,10 @@ where
     };
     q(dst, Cmd::new("CLUSTER").arg("SETSLOT").arg(slot).arg("IMPORTING").arg(&src_id)).await;
     q(src, Cmd::new("CLUSTER").arg("SETSLOT").arg(slot).arg("MIGRATING").arg(&dst_id)).await;
-    q(src, Cmd::new("MIGRATE").arg(dst.0.as_str()).arg(dst.1).arg("").arg(0).arg(5000).arg("KEYS").arg(key)).await;
+    let held = q(src, Cmd::new("CLUSTER").arg("GETKEYSINSLOT").arg(slot).arg(10_000)).await;
+    let keys: Vec<String> = held.as_items().unwrap_or_default().iter().filter_map(Value::as_text).collect();
+    assert!(keys.iter().any(|k| k == key), "{key} is in slot {slot}: {keys:?}");
+    q(src, Cmd::new("MIGRATE").arg(dst.0.as_str()).arg(dst.1).arg("").arg(0).arg(5000).arg("KEYS").args(&keys)).await;
     during.await;
     for shard in c.shards() {
         q(&shard.master, Cmd::new("CLUSTER").arg("SETSLOT").arg(slot).arg("NODE").arg(&dst_id)).await;
@@ -142,6 +146,9 @@ fn cluster_routing_redirections_and_failover() {
         let k = &keys[3];
         let slot = key_slot(k.as_bytes());
         let src = c.node_for(k.as_bytes()).unwrap();
+        // Another key in the same slot: a slot moves with all its keys.
+        let neighbour = (0..).map(|i| format!("kwcl:{pid}:n{i}")).find(|n| key_slot(n.as_bytes()) == slot).unwrap();
+        c.query::<()>(Cmd::new("SET").arg(&neighbour).arg("next door")).await.unwrap();
         let dst = shards.iter().find(|s| s.master != src).unwrap().master.clone();
         let fresh = ClusterClient::from_url(&url).await.unwrap(); // a client with the old map
         migrate_slot(&c, slot, k, &src, &dst, async {
@@ -151,6 +158,7 @@ fn cluster_routing_redirections_and_failover() {
         .await;
         assert_eq!(fresh.query::<String>(Cmd::new("GET").arg(k)).await.unwrap(), *k, "followed MOVED");
         assert_eq!(fresh.node_for(k.as_bytes()).unwrap(), dst, "MOVED updated the map");
+        assert_eq!(fresh.query::<String>(Cmd::new("GET").arg(&neighbour)).await.unwrap(), "next door", "moved with the slot");
         // Put the slot back where it was, and check it is.
         migrate_slot(&c, slot, k, &dst, &src, async {}).await;
         let check = ClusterClient::from_url(&url).await.unwrap();
