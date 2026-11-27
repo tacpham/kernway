@@ -5,20 +5,20 @@
 
 | | |
 |---|---|
-| generated | 2026-11-27 06:07 UTC |
+| generated | 2026-11-27 06:58 UTC |
 | server | nats-server v2.10.29 |
 | image | official release binary (native) |
 | container | none (native nats-server processes) |
-| driver commit | acaf485 on feat/messaging (uncommitted changes) |
+| driver commit | b972aba on feat/rabbitmq (uncommitted changes) |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
-| command | `cargo test -p kernway-nats  --lib --tests -- --test-threads=1 --nocapture  ; CI run 45949064295 (Linux / macOS / Windows)` |
+| command | `cargo test -p kernway-nats  --lib --tests -- --test-threads=1 --nocapture  ; CI run 45954163730 (Linux / macOS / Windows)` |
 
-## Verdict: implemented features **PASSED** · completeness **33/40** — NOT complete
+## Verdict: implemented features **PASSED** · completeness **36/43** — NOT complete
 
 - *Implemented features* passes only if every test ran and passed (no skips) in this run.
 - *Completeness* counts 🚧 gaps (listed below) against the full feature catalog.
-- Features verified: **33 / 40** (7 not implemented yet, 0 failing; 1 not applicable to NATS / JetStream).
-- Tests run: 35 — 35 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
+- Features verified: **36 / 43** (7 not implemented yet, 0 failing; 1 not applicable to NATS / JetStream).
+- Tests run: 38 — 38 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
 - A feature is ✅ only when every test listed as its evidence ran and passed in this run.
 
 ## Messaging contract
@@ -34,6 +34,9 @@
 | A delivery left unacknowledged past ack_wait is redelivered while its consumer stays connected | ✅ PASS | `nats_jetstream_conforms` |
 | Rejected deliveries reach the dead-letter topic with their headers (published, confirmed, then +TERM) | ✅ PASS | `nats_jetstream_conforms` |
 | The whole contract on a replicated (R3) stream in a three-node cluster | ✅ PASS | `the_cluster_runs_the_conformance_scenarios_too` |
+| Data sent and received byte-exact: every byte value, empty / one-byte / 900 KiB payloads, UTF-8 of many scripts, JSON; headers with Unicode, empty, 4 KiB and punctuated values, 40 headers, repeated names, case-insensitive lookup; binary keys, an empty key apart from none | ✅ PASS | `nats_jetstream_conforms`<br>`the_cluster_runs_the_conformance_scenarios_too` |
+| Volume: 3 producers at once, 1,200 keyed messages, two members — every message exactly once, intact, a key's messages in order at each member | ✅ PASS | `nats_jetstream_conforms`<br>`the_cluster_runs_the_conformance_scenarios_too` |
+| Payload, key and headers unchanged after a nack and on the dead-letter topic | ✅ PASS | `nats_jetstream_conforms`<br>`the_cluster_runs_the_conformance_scenarios_too` |
 | Per-key order across the members of a group (a key's next message held back while an earlier one is in flight elsewhere) | 🚧 GAP | one JetStream consumer feeds every member, so two members can hold one key at once (the conformance scenario reports n/a); needs key-partitioned consumers |
 
 ## Core NATS
@@ -115,20 +118,23 @@
 | `tls_required_handshake_first_and_mutual` | PASS | yes |
 | `no_blocking_call_runs_on_the_reactor` | PASS | yes |
 | `ci::mssql_live_ubuntu_latest` | PASS | no |
-| `ci::nats_windows_latest` | PASS | yes |
-| `ci::drivers_ubuntu_latest` | PASS | no |
-| `ci::redis_macos_latest` | PASS | no |
-| `ci::postgres_ubuntu_latest` | PASS | no |
-| `ci::nats_macos_latest` | PASS | yes |
-| `ci::postgres_windows_latest` | PASS | no |
 | `ci::mongodb_ubuntu_latest` | PASS | no |
 | `ci::mongodb_windows_latest` | PASS | no |
-| `ci::oracle_live_ubuntu_latest` | PASS | no |
-| `ci::nats_ubuntu_latest` | PASS | yes |
-| `ci::postgres_macos_latest` | PASS | no |
+| `ci::rabbitmq_macos_latest` | PASS | no |
 | `ci::drivers_windows_latest` | PASS | no |
+| `ci::drivers_macos_latest` | PASS | no |
+| `ci::drivers_ubuntu_latest` | PASS | no |
+| `ci::postgres_macos_latest` | PASS | no |
+| `ci::postgres_ubuntu_latest` | PASS | no |
+| `ci::rabbitmq_windows_latest` | PASS | no |
+| `ci::postgres_windows_latest` | PASS | no |
 | `ci::redis_ubuntu_latest` | PASS | no |
 | `ci::mongodb_macos_latest` | PASS | no |
-| `ci::drivers_macos_latest` | PASS | no |
+| `ci::nats_ubuntu_latest` | PASS | yes |
+| `ci::oracle_live_ubuntu_latest` | PASS | no |
+| `ci::rabbitmq_ubuntu_latest` | PASS | no |
+| `ci::nats_windows_latest` | PASS | yes |
 | `ci::redis_windows_latest` | PASS | no |
+| `ci::nats_macos_latest` | PASS | yes |
+| `ci::redis_macos_latest` | PASS | no |
 

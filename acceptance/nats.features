@@ -20,6 +20,9 @@ Messaging contract | New groups start at the earliest or the latest message | na
 Messaging contract | A delivery left unacknowledged past ack_wait is redelivered while its consumer stays connected | nats_jetstream_conforms
 Messaging contract | Rejected deliveries reach the dead-letter topic with their headers (published, confirmed, then +TERM) | nats_jetstream_conforms
 Messaging contract | The whole contract on a replicated (R3) stream in a three-node cluster | the_cluster_runs_the_conformance_scenarios_too
+Messaging contract | Data sent and received byte-exact: every byte value, empty / one-byte / 900 KiB payloads, UTF-8 of many scripts, JSON; headers with Unicode, empty, 4 KiB and punctuated values, 40 headers, repeated names, case-insensitive lookup; binary keys, an empty key apart from none | nats_jetstream_conforms, the_cluster_runs_the_conformance_scenarios_too
+Messaging contract | Volume: 3 producers at once, 1,200 keyed messages, two members — every message exactly once, intact, a key's messages in order at each member | nats_jetstream_conforms, the_cluster_runs_the_conformance_scenarios_too
+Messaging contract | Payload, key and headers unchanged after a nack and on the dead-letter topic | nats_jetstream_conforms, the_cluster_runs_the_conformance_scenarios_too
 Messaging contract | Per-key order across the members of a group (a key's next message held back while an earlier one is in flight elsewhere) | GAP: one JetStream consumer feeds every member, so two members can hold one key at once (the conformance scenario reports n/a); needs key-partitioned consumers
 
 Core NATS | Publish / subscribe with `*` and `>` wildcards, empty payloads, unsubscribe on drop; subjects validated | publish_subscribe_wildcards_and_headers

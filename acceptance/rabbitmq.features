@@ -19,6 +19,9 @@ Messaging contract | Per-key order for a member; key travels with the message | 
 Messaging contract | A group that exists keeps what arrives while no member is connected; a new group starts after the newest message | rabbitmq_conforms
 Messaging contract | A delivery left unacknowledged past ack_wait is redelivered while its consumer stays connected (kept by the client: RabbitMQ has no per-delivery timeout) | rabbitmq_conforms
 Messaging contract | Rejected deliveries reach the dead-letter topic with their headers (x-dead-letter-exchange, at-least-once strategy) | rabbitmq_conforms
+Messaging contract | Data sent and received byte-exact: every byte value, empty / one-byte / 900 KiB payloads, UTF-8 of many scripts, JSON; headers with Unicode, empty, 4 KiB and punctuated values, 40 headers, repeated names, case-insensitive lookup; binary keys, an empty key apart from none | rabbitmq_conforms
+Messaging contract | Volume: 3 producers at once, 1,200 keyed messages, two members — every message exactly once, intact, a key's messages in order at each member | rabbitmq_conforms
+Messaging contract | Payload, key and headers unchanged after a nack and on the dead-letter topic | rabbitmq_conforms
 Messaging contract | A new group replaying messages published before it existed | GAP: a queue only receives what arrives after it is bound (needs RabbitMQ streams)
 Messaging contract | Per-key order across the members of a group | GAP: one queue feeds every member (needs single-active-consumer or consistent-hash partitions)
 
