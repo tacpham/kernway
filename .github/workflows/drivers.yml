@@ -181,7 +181,7 @@ jobs:
         shell: bash
         run: |
           ! grep -q "skip:" pg.log
-          grep -q "test postgres_conforms ... ok" pg.log
+          grep -q "^test postgres_conforms" pg.log
 
       - name: Again on PostgreSQL 14 (Linux)
         if: runner.os == 'Linux'

@@ -42,6 +42,7 @@ openssl req -newkey rsa:2048 -nodes -subj "/CN=kw_cert" -keyout client.key -out 
 printf 'extendedKeyUsage=clientAuth\n' > client.ext
 openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 30 -extfile client.ext -out client.crt 2>/dev/null
 chmod 600 client.key
+unset MSYS_NO_PATHCONV
 
 # ---- roles and access rules ----------------------------------------------
 cat > roles.sql <<'SQL'
@@ -72,7 +73,10 @@ if [ -n "${PG_BIN:-}" ]; then
   case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) EXE=".exe" ;; esac
   DATA="$DIR/data"
   rm -rf "$DATA"
-  "$PG_BIN/initdb$EXE" -D "$DATA" -U postgres --auth=trust -E UTF8 >/dev/null
+  # Native Windows programs take C:/… paths.
+  NDATA="$DATA"; NLOG="$DIR/server.log"
+  if [ -n "$EXE" ]; then NDATA="$(cygpath -m "$DATA")"; NLOG="$(cygpath -m "$NLOG")"; fi
+  "$PG_BIN/initdb$EXE" -D "$NDATA" -U postgres --auth=trust -E UTF8 >/dev/null
   cp server.crt server.key ca.crt "$DATA/"
   chmod 600 "$DATA/server.key"
   SOCKET_LINE="unix_socket_directories = ''"
@@ -91,12 +95,12 @@ ssl_key_file = 'server.key'
 ssl_ca_file = 'ca.crt'
 $SOCKET_LINE
 CONF
-  "$PG_BIN/pg_ctl$EXE" -D "$DATA" -l "$DIR/server.log" -w start >/dev/null || { cat "$DIR/server.log"; exit 1; }
+  "$PG_BIN/pg_ctl$EXE" -D "$NDATA" -l "$NLOG" -w start >/dev/null || { cat "$DIR/server.log"; exit 1; }
   # Roles while everything is still trusted, then the real access rules.
   "$PG_BIN/psql$EXE" -v ON_ERROR_STOP=1 -q -h 127.0.0.1 -p "$PORT" -U postgres -d postgres -f roles.sql >/dev/null
   "$PG_BIN/psql$EXE" -h 127.0.0.1 -p "$PORT" -U postgres -d postgres -tAc 'SELECT version()' >&2
   cp pg_hba.conf "$DATA/pg_hba.conf"
-  "$PG_BIN/pg_ctl$EXE" -D "$DATA" reload >/dev/null
+  "$PG_BIN/pg_ctl$EXE" -D "$NDATA" reload >/dev/null
 else
   # ---- Docker -------------------------------------------------------------
   cat > init.sh <<'INIT'
