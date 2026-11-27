@@ -83,9 +83,10 @@ else
   mkdir -p "$DIR/mnesia" "$DIR/log"
   "$SBIN/rabbitmq-server$EXE" > "$DIR/server.out" 2>&1 &
   echo $! > "$DIR/pid"
-  ctl() { "$SBIN/rabbitmqctl$EXE" -n kw@localhost "$@"; }
+  # MSYS_NO_PATHCONV: Git Bash would turn the vhost "/" into a Windows path.
+  ctl() { MSYS_NO_PATHCONV=1 "$SBIN/rabbitmqctl$EXE" -n kw@localhost "$@"; }
   # Quoted: the install path may hold spaces (Program Files).
-  CTL_CMD="\"$SBIN/rabbitmqctl$EXE\" -n kw@localhost"
+  CTL_CMD="MSYS_NO_PATHCONV=1 \"$SBIN/rabbitmqctl$EXE\" -n kw@localhost"
 fi
 for _ in $(seq 1 120); do
   if ctl await_startup >/dev/null 2>&1; then break; fi
