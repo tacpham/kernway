@@ -19,6 +19,25 @@ pub enum Endpoint {
     },
     /// A Unix-domain socket file (Unix only; Redis has none on Windows).
     Unix(PathBuf),
+    /// Ask Redis Sentinel where the master (or a replica) of a named group
+    /// is, then connect there. TLS, credentials, database and timeouts of
+    /// these options apply to that data connection.
+    Sentinel(SentinelOptions),
+}
+
+/// Where the sentinels are and what to ask them for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SentinelOptions {
+    /// The monitored group's name (`sentinel monitor <name> …`).
+    pub master: String,
+    /// Sentinel addresses, tried in order.
+    pub sentinels: Vec<(String, u16)>,
+    /// Connect to a replica instead of the master (reads only).
+    pub replica: bool,
+    /// ACL user for the sentinels (`None`: default user).
+    pub username: Option<String>,
+    /// Password for the sentinels (`None`: no authentication).
+    pub password: Option<String>,
 }
 
 /// The protocol version to speak.
@@ -102,6 +121,9 @@ impl Options {
     /// - `redis://[[user]:password@]host[:port][/db][?options]` (port 6379)
     /// - `rediss://…` — the same over TLS
     /// - `redis+unix:///path/to/redis.sock[?db=N&…]` (also `unix://`)
+    /// - `redis+sentinel://[[user]:password@]host1[:port1],host2[:port2]/master_name[/db]`
+    ///   (sentinel port 26379; `rediss+sentinel://` for TLS) with options
+    ///   `replica=true`, `sentinel_username`, `sentinel_password`
     ///
     /// Options: `db`, `protocol=2|3`, `client_name`, `timeout` and
     /// `connect_timeout` (milliseconds), and for TLS `ssl_verify=full|ca|none`,
@@ -140,6 +162,48 @@ impl Options {
                 }
                 o
             }
+            "redis+sentinel" | "rediss+sentinel" => {
+                let (auth, rest) = match rest.rsplit_once('@') {
+                    Some((a, r)) => (Some(a), r),
+                    None => (None, rest),
+                };
+                let mut parts = rest.split('/');
+                let hosts = parts.next().unwrap_or("");
+                let master = parts.next().filter(|m| !m.is_empty()).ok_or_else(|| bad("missing master name: redis+sentinel://h:p,h:p/<master>".into()))?;
+                let db = parts.next().unwrap_or("");
+                let mut sentinels = Vec::new();
+                for h in hosts.split(',').filter(|h| !h.is_empty()) {
+                    let (host, port) = split_host_port(h).map_err(bad)?;
+                    sentinels.push((host, port.unwrap_or(26379)));
+                }
+                if sentinels.is_empty() {
+                    return Err(bad("no sentinel address".into()));
+                }
+                let mut o = Self::tcp("", 0);
+                o.endpoint = Endpoint::Sentinel(SentinelOptions {
+                    master: decode(master).map_err(bad)?,
+                    sentinels,
+                    replica: false,
+                    username: None,
+                    password: None,
+                });
+                if let Some(auth) = auth {
+                    let (user, pass) = auth.split_once(':').unwrap_or(("", auth));
+                    if !user.is_empty() {
+                        o.username = Some(decode(user).map_err(bad)?);
+                    }
+                    if !pass.is_empty() {
+                        o.password = Some(decode(pass).map_err(bad)?);
+                    }
+                }
+                if !db.is_empty() {
+                    o.database = db.parse().map_err(|_| bad(format!("database must be a number, not {db:?}")))?;
+                }
+                if scheme == "rediss+sentinel" {
+                    o.tls = Some(TlsOptions::default());
+                }
+                o
+            }
             "redis+unix" | "unix" => {
                 if rest.is_empty() {
                     return Err(bad("missing socket path".into()));
@@ -172,6 +236,16 @@ impl Options {
                 "client_name" => o.client_name = Some(v),
                 "timeout" => o.command_timeout = Some(ms(&v)?),
                 "connect_timeout" => o.connect_timeout = ms(&v)?,
+                "replica" | "sentinel_username" | "sentinel_password" => {
+                    let Endpoint::Sentinel(sen) = &mut o.endpoint else {
+                        return Err(bad(format!("{k} needs a redis+sentinel:// URL")));
+                    };
+                    match k {
+                        "replica" => sen.replica = matches!(v.as_str(), "true" | "1" | "yes"),
+                        "sentinel_username" => sen.username = Some(v),
+                        _ => sen.password = Some(v),
+                    }
+                }
                 "ssl_verify" => {
                     tls(&mut o)?;
                     let check = match v.as_str() {
@@ -257,6 +331,7 @@ impl Options {
         match &self.endpoint {
             Endpoint::Tcp { host, port } => format!("{host}:{port}"),
             Endpoint::Unix(p) => p.display().to_string(),
+            Endpoint::Sentinel(s) => format!("sentinel master {}", s.master),
         }
     }
 }
@@ -333,6 +408,20 @@ mod tests {
         // A password with @ and : inside, unescaped in the user part split.
         let o = Options::from_url("redis://u:p%3Aw%40d@h").unwrap();
         assert_eq!(o.password.as_deref(), Some("p:w@d"));
+    }
+
+    #[test]
+    fn sentinel_urls() {
+        let o = Options::from_url("redis+sentinel://:pw@s1:26390,s2,[::1]:5/mymaster/2?replica=true&sentinel_password=sp&sentinel_username=su").unwrap();
+        let Endpoint::Sentinel(s) = &o.endpoint else { panic!("{o:?}") };
+        assert_eq!(s.master, "mymaster");
+        assert_eq!(s.sentinels, [("s1".to_string(), 26390), ("s2".to_string(), 26379), ("::1".to_string(), 5)]);
+        assert!(s.replica);
+        assert_eq!((s.username.as_deref(), s.password.as_deref()), (Some("su"), Some("sp")));
+        assert_eq!((o.password.as_deref(), o.database), (Some("pw"), 2));
+        assert!(Options::from_url("rediss+sentinel://s1/m").unwrap().tls.is_some());
+        assert!(Options::from_url("redis+sentinel://s1").is_err(), "master name required");
+        assert!(Options::from_url("redis://h?replica=true").is_err());
     }
 
     #[test]

@@ -33,6 +33,7 @@ pub mod error;
 pub mod options;
 pub mod pubsub;
 pub mod resp;
+mod sentinel;
 pub mod stream;
 
 use std::collections::HashMap;
@@ -44,7 +45,7 @@ pub use cache::RedisCache;
 pub use cmd::{pairs, Cmd, FromValue, ToArg};
 pub use commands::{ScanPage, Script, SetCondition, SetOptions};
 pub use conn::{Connection, PubSubMessage};
-pub use options::{Endpoint, Options, Protocol, TlsOptions};
+pub use options::{Endpoint, Options, Protocol, SentinelOptions, TlsOptions};
 pub use error::RedisError;
 pub use pubsub::{RedisConfig, RedisPubSub};
 pub use resp::Value;

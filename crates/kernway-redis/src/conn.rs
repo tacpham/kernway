@@ -79,6 +79,9 @@ pub struct Connection {
     broken: bool,
     /// In subscribe mode (RESP2: only (un)subscribe / ping are allowed).
     subscribed: bool,
+    /// Reached through Sentinel: a `READONLY` error means the node was
+    /// demoted by a failover, so the connection is dropped to re-resolve.
+    pub(crate) sentinel_managed: bool,
 }
 
 impl Connection {
@@ -100,6 +103,7 @@ impl Connection {
             pushes: VecDeque::new(),
             broken: false,
             subscribed: false,
+            sentinel_managed: false,
         }
     }
 
@@ -109,13 +113,18 @@ impl Connection {
     /// server has no `HELLO`), then `SELECT` the database.
     pub async fn open(opts: &Options) -> Result<Self, RedisError> {
         let what = opts.describe();
-        match rt_core::timeout(opts.connect_timeout, Self::open_inner(opts)).await {
+        // Boxed: the setup future (TLS, handshake, Sentinel) is large, and a
+        // caller deep in an async stack should not carry it inline.
+        match rt_core::timeout(opts.connect_timeout, Box::pin(Self::open_inner(opts))).await {
             Ok(r) => r,
             Err(_) => Err(RedisError::Timeout(format!("connecting to {what} took over {:?}", opts.connect_timeout))),
         }
     }
 
     async fn open_inner(opts: &Options) -> Result<Self, RedisError> {
+        if let Endpoint::Sentinel(sen) = &opts.endpoint {
+            return Box::pin(crate::sentinel::open(opts, sen)).await;
+        }
         let io = match &opts.endpoint {
             Endpoint::Tcp { host, port } => {
                 let addr = kernway_wire::offload::resolve(host, *port)
@@ -167,6 +176,7 @@ impl Connection {
             Endpoint::Unix(_) => {
                 return Err(RedisError::Config("Unix sockets are not available on this platform; use TCP".into()));
             }
+            Endpoint::Sentinel(_) => unreachable!("handled above"),
         };
         let mut conn = Self::over(io, Protocol::Resp2, opts.command_timeout);
         conn.handshake(opts).await?;
@@ -245,8 +255,19 @@ impl Connection {
         self.send(&out).await?;
         let v = self.read_reply().await?;
         match v {
-            Value::Error(m) => Err(RedisError::Server(m)),
+            Value::Error(m) => {
+                self.note_error(&m);
+                Err(RedisError::Server(m))
+            }
             other => Ok(other),
+        }
+    }
+
+    /// A master demoted by a failover answers writes with `READONLY`: when
+    /// the connection came from Sentinel, drop it so the next one asks again.
+    fn note_error(&mut self, message: &str) {
+        if self.sentinel_managed && message.starts_with("READONLY") {
+            self.broken = true;
         }
     }
 
