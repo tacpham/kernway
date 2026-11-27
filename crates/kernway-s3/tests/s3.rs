@@ -190,7 +190,10 @@ fn presigned_urls_work_without_credentials() {
         assert!(r.is_success(), "presigned GET: {} {}", r.status, r.text());
         assert_eq!(r.body, b"jpeg bytes");
         // A tampered signature, or no signature at all, is refused.
-        let tampered = format!("{}0", &get[..get.len() - 1]);
+        // Change the signature's last hex digit (to a different one).
+        let last = if get.ends_with('0') { '1' } else { '0' };
+        let tampered = format!("{}{last}", &get[..get.len() - 1]);
+        assert_ne!(tampered, get);
         assert_eq!(http.get(&tampered).await.unwrap().status, 403);
         let plain = get.split('?').next().unwrap();
         assert_eq!(http.get(plain).await.unwrap().status, 403);
