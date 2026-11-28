@@ -259,8 +259,8 @@ jobs:
         run: |
           ! grep -q "skip:" mongo.log
           grep -q "^test transactions_and_no_lost_update" mongo.log
-          grep -q "^bson-corpus top: " mongo.log
-          grep -q "^connection-string/credential-disclosure.json: " mongo.log
+          grep -q "bson-corpus top: 119 assertions, 0 failed" mongo.log
+          grep -q "connection-string/credential-disclosure.json: 102 passed, 0 failed" mongo.log
 
   # NATS is one static binary on every OS: the setup script downloads the
   # official release and starts plain / auth / token / TLS / mTLS servers and
