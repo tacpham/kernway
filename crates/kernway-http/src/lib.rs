@@ -3,9 +3,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod chunked;
 pub mod parser;
 pub mod writer;
-pub use parser::{parse_bytes, parse_head, parse_request, Parsed, ParsedHead};
+pub use parser::{parse_bytes, parse_head, parse_request, ParseError, Parsed, ParsedHead};
 pub use writer::{
     encode_head, encode_head_chunked, encode_response, encode_response_with, write_response,
     Connection,

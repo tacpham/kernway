@@ -53,6 +53,8 @@ pub mod compression;
 pub mod cors;
 /// Cross-origin isolation (COOP/COEP/CORP) for `SharedArrayBuffer` / threaded wasm.
 pub mod cross_origin;
+/// CSRF protection for every state-changing request.
+pub mod csrf;
 /// Typed argument extraction for `#[controller]` methods.
 pub mod extract;
 /// Synchronous middleware chain and the built-in layers.
@@ -94,6 +96,7 @@ pub use app::serve_file;
 pub use compression::Compression;
 pub use cors::Cors;
 pub use cross_origin::{Corp, CrossOriginIsolation};
+pub use csrf::CsrfProtection;
 pub use kernway_security::SecurityHeaders;
 pub use rate_limit::RateLimit;
 pub use security::{Access, HttpSecurity, SecurityLayer};

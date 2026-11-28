@@ -22,6 +22,8 @@ kernway-compress = { workspace = true }
 kernway-dns = { workspace = true }
 # Shared wire helpers (base64).
 kernway-wire = { workspace = true }
+# The HTTP/1.1 codec shared with the server: the chunked decoder.
+kernway-http = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

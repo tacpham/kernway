@@ -37,6 +37,7 @@ compression = ["dep:kernway-compress"]
 
 [dev-dependencies]
 criterion = { workspace = true }
+kernway-core = { workspace = true }
 # Benchmark-only: the radix-trie router axum uses, as the incumbent to measure
 # our own router against (KEP-0000 §2, the per-core loop). Never a real dep.
 matchit   = "0.8"

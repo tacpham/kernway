@@ -727,16 +727,19 @@ async fn serve_connection(
         let (mut request, consumed) = {
             // Read until the head (request line + headers) is buffered. The body is
             // handled separately below, so a multi-GB upload never grows this buffer.
-            let (head_req, head_end, content_length) = loop {
+            let (head_req, head_end, content_length, chunked) = loop {
                 match parse_head(&buf) {
                     Ok(ParsedHead::Complete {
                         request,
                         head_end,
                         content_length,
-                    }) => break (request, head_end, content_length),
+                        chunked,
+                    }) => break (request, head_end, content_length, chunked),
                     Ok(ParsedHead::Incomplete) => {}
                     Err(err) => {
-                        let response = Response::new(StatusCode::BAD_REQUEST)
+                        // 400, 431, 501 or 505, then close: a stream whose framing is
+                        // in doubt cannot be read further.
+                        let response = Response::new(StatusCode(err.status()))
                             .content_type("text/plain")
                             .body(err.to_string().into_bytes());
                         let _ = stream.write_all(&encode_response(&response)).await;
@@ -776,16 +779,33 @@ async fn serve_connection(
                 }
             };
 
-            // Refuse an oversized upload before reading (or spooling) any of its body.
-            if content_length as u64 > upload.max_upload_size {
+            if chunked {
+                // A chunked body: decode it as it arrives — in memory up to
+                // `max_inmemory_body`, spooled beyond that, refused past the ceiling.
+                match read_chunked_body(&mut stream, &mut buf, head_end, &upload, file_chunk, keep_alive.idle_timeout).await {
+                    Ok(body) => {
+                        let mut request = head_req;
+                        match body {
+                            ChunkedBody::Memory(b) => request.body = b,
+                            ChunkedBody::Spooled(s) => request.body_spool = Some(s),
+                        }
+                        (request, 0) // `buf` now holds only what follows the body
+                    }
+                    Err(ChunkedFailure::Refuse(status, why)) => {
+                        let response = Response::new(status).content_type("text/plain").body(why.into_bytes());
+                        let _ = stream.write_all(&encode_response(&response)).await;
+                        return close(&mut stream);
+                    }
+                    Err(ChunkedFailure::Gone) => return close(&mut stream),
+                }
+            } else if content_length as u64 > upload.max_upload_size {
+                // Refuse an oversized upload before reading (or spooling) any of its body.
                 let response = Response::new(StatusCode::PAYLOAD_TOO_LARGE)
                     .content_type("text/plain")
                     .body(b"upload exceeds the configured maximum".to_vec());
                 let _ = stream.write_all(&encode_response(&response)).await;
                 return close(&mut stream);
-            }
-
-            if content_length <= upload.max_inmemory_body {
+            } else if content_length <= upload.max_inmemory_body {
                 // Small body: finish buffering it in memory (the fast path).
                 let total = head_end + content_length;
                 while buf.len() < total {
@@ -1009,6 +1029,84 @@ async fn spool_body(
         path,
         len: content_length as u64,
     })
+}
+
+/// A decoded chunked request body.
+enum ChunkedBody {
+    Memory(Vec<u8>),
+    Spooled(kernway_core::request::SpooledBody),
+}
+
+/// Why a chunked body could not be read.
+enum ChunkedFailure {
+    /// Answer with this status and close.
+    Refuse(StatusCode, String),
+    /// The client went away or stalled: just close.
+    Gone,
+}
+
+/// Read and decode a `Transfer-Encoding: chunked` body that starts at `head_end` in
+/// `buf`. On return `buf` holds only the bytes after the body (a pipelined request).
+async fn read_chunked_body(
+    stream: &mut AsyncTcpStream,
+    buf: &mut Vec<u8>,
+    head_end: usize,
+    upload: &UploadConfig,
+    file_chunk: usize,
+    idle_timeout: Duration,
+) -> Result<ChunkedBody, ChunkedFailure> {
+    let mut rest = buf.split_off(head_end);
+    buf.clear();
+    let mut dec = kernway_http::chunked::ChunkDecoder::new();
+    let mut out = Vec::new();
+    // Bytes already written to the spool file (once there is one).
+    let mut spooled: u64 = 0;
+    let mut file: Option<(std::fs::File, std::path::PathBuf)> = None;
+    let mut chunk = vec![0u8; file_chunk.max(8 * 1024)];
+    loop {
+        dec.pull(&mut rest, &mut out).map_err(|e| ChunkedFailure::Refuse(StatusCode::BAD_REQUEST, e.to_string()))?;
+        if spooled + out.len() as u64 > upload.max_upload_size {
+            return Err(ChunkedFailure::Refuse(StatusCode::PAYLOAD_TOO_LARGE, "upload exceeds the configured maximum".into()));
+        }
+        // Past the in-memory threshold: move what we have to a temp file, then keep
+        // appending there.
+        if file.is_none() && out.len() > upload.max_inmemory_body {
+            let path = upload_temp_path(&upload.temp_dir);
+            let p2 = path.clone();
+            let f = match rt_core::spawn_blocking(move || std::fs::File::create(&p2)).await {
+                Some(Ok(f)) => f,
+                _ => return Err(ChunkedFailure::Gone),
+            };
+            file = Some((f, path));
+        }
+        if let Some((f, path)) = file.take() {
+            let f = if out.is_empty() {
+                f
+            } else {
+                let data = std::mem::take(&mut out);
+                spooled += data.len() as u64;
+                write_all_blocking(f, data).await.map_err(|_| ChunkedFailure::Gone)?
+            };
+            file = Some((f, path));
+        }
+        if dec.is_done() {
+            *buf = rest;
+            return match file {
+                None => Ok(ChunkedBody::Memory(out)),
+                Some((mut f, path)) => {
+                    use std::io::Write;
+                    match rt_core::spawn_blocking(move || f.flush()).await {
+                        Some(Ok(())) => Ok(ChunkedBody::Spooled(kernway_core::request::SpooledBody { path, len: spooled })),
+                        _ => Err(ChunkedFailure::Gone),
+                    }
+                }
+            };
+        }
+        match rt_core::timeout(idle_timeout, stream.read(&mut chunk)).await {
+            Ok(Ok(n)) if n > 0 => rest.extend_from_slice(&chunk[..n]),
+            _ => return Err(ChunkedFailure::Gone),
+        }
+    }
 }
 
 /// Append `data` to `file` on the blocking pool, handing the file back to keep writing.

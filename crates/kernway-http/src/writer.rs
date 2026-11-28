@@ -80,10 +80,7 @@ pub fn encode_head_chunked(response: &Response, connection: Connection) -> Vec<u
         {
             continue;
         }
-        out.extend_from_slice(name.as_bytes());
-        out.extend_from_slice(b": ");
-        out.extend_from_slice(value.as_bytes());
-        out.extend_from_slice(b"\r\n");
+        push_field(&mut out, name, value);
     }
     out.extend_from_slice(b"transfer-encoding: chunked\r\nconnection: ");
     out.extend_from_slice(connection.header_value().as_bytes());
@@ -113,10 +110,7 @@ fn encode_head_into(
         if name.eq_ignore_ascii_case("connection") || name.eq_ignore_ascii_case("content-length") {
             continue;
         }
-        out.extend_from_slice(name.as_bytes());
-        out.extend_from_slice(b": ");
-        out.extend_from_slice(value.as_bytes());
-        out.extend_from_slice(b"\r\n");
+        push_field(out, name, value);
     }
     // Content-Length is required (RFC 9112 §6.2) — except on a 1xx protocol
     // switch, which must not carry one (RFC 9110 §8.6).
@@ -149,6 +143,25 @@ pub fn encode_response_with(response: &Response, connection: Connection) -> Vec<
 /// entries, plus a fixed `": "` + `\r\n` per pair. This is the estimate that used
 /// to walk every header — the whole point of the one-buffer layout is not having
 /// to. Over-estimating a few bytes is cheaper than a realloc.
+/// Write one `name: value` line, so that nothing a handler puts in a header can end
+/// it early (response splitting — a value carrying `\r\nSet-Cookie: …` or a whole
+/// second response): a name that is not a token is dropped, and CR, LF and NUL in a
+/// value become spaces, as Go's net/http does.
+fn push_field(out: &mut Vec<u8>, name: &str, value: &str) {
+    let token = |b: u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b);
+    if name.is_empty() || !name.bytes().all(token) {
+        return;
+    }
+    out.extend_from_slice(name.as_bytes());
+    out.extend_from_slice(b": ");
+    if value.bytes().any(|b| matches!(b, b'\r' | b'\n' | 0)) {
+        out.extend(value.bytes().map(|b| if matches!(b, b'\r' | b'\n' | 0) { b' ' } else { b }));
+    } else {
+        out.extend_from_slice(value.as_bytes());
+    }
+    out.extend_from_slice(b"\r\n");
+}
+
 fn head_estimate(response: &Response) -> usize {
     const STATUS_AND_FIXED_HEADERS: usize = 64; // status line + content-length + connection
     const PER_PAIR_OVERHEAD: usize = 4; // ": " + "\r\n"
@@ -194,18 +207,34 @@ fn status_text(code: u16) -> &'static str {
         201 => "Created",
         204 => "No Content",
         206 => "Partial Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
         304 => "Not Modified",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        410 => "Gone",
+        411 => "Length Required",
+        413 => "Content Too Large",
+        415 => "Unsupported Media Type",
         416 => "Range Not Satisfiable",
         426 => "Upgrade Required",
         422 => "Unprocessable Entity",
         429 => "Too Many Requests",
+        431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
         503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        505 => "HTTP Version Not Supported",
         _ => "Unknown",
     }
 }
@@ -342,5 +371,25 @@ mod connection_tests {
         let response = Response::new(StatusCode::OK).body(b"hello".to_vec());
         let bytes = encode_response_with(&response, Connection::KeepAlive);
         assert!(bytes.ends_with(b"\r\n\r\nhello"));
+    }
+
+}
+
+#[cfg(test)]
+mod splitting_tests {
+    use super::*;
+    use kernway_core::{error::StatusCode, response::Response};
+
+    #[test]
+    fn a_header_value_cannot_split_the_response() {
+        let mut r = Response::new(StatusCode::OK);
+        r.headers.insert("location", "/next\r\nSet-Cookie: admin=1\r\n\r\nHTTP/1.1 200 OK");
+        r.headers.insert("bad name", "x");
+        r.headers.insert("x-ok", "fine");
+        let head = String::from_utf8(encode_head(&r, Connection::Close, 0)).unwrap();
+        assert_eq!(head.matches("\r\n").count(), 6, "status, location, x-ok, connection, content-length, blank: {head:?}");
+        assert!(head.contains("location: /next  Set-Cookie: admin=1    HTTP/1.1 200 OK\r\n"), "{head:?}");
+        assert!(!head.contains("bad name"));
+        assert!(head.contains("x-ok: fine\r\n"));
     }
 }

@@ -19,13 +19,14 @@
 #   acceptance/run.sh kafka    (Kafka 3.9 KRaft with SASL PLAIN / SCRAM and TLS, in Docker)
 #   acceptance/run.sh http-client (go-httpbin + Caddy, native; HTTPBIN_DOCKER=1 for Docker)
 #   acceptance/run.sh ssh      (OpenSSH in Docker; SSH_NATIVE=1 for sshd as this user, key logins only)
+#   acceptance/run.sh security (attacks on a live Kernway server; session / ban stores on Redis in Docker)
 #
 # Containers (created if missing; existing ones and their data are reused):
 #   kernway-mysql   mysql:8.0                  host port 3307, root password "secret"
 #   kernway-oracle  gvenzl/oracle-free:23-slim host ports 1521 / 2484 (TCPS)
 # Oracle TCPS needs a wallet once: crates/kernway-orm-oracle/tests/support/oracle-tcps-setup.sh
 set -euo pipefail
-DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb|mssql|nats|rabbitmq|meilisearch|kafka|mariadb|valkey|s3|http-client|ssh}"
+DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb|mssql|nats|rabbitmq|meilisearch|kafka|mariadb|valkey|s3|http-client|ssh|security}"
 # CI workflow whose jobs for this commit are the cross-OS evidence.
 WORKFLOW=drivers.yml; IMAGE=""; EXTRA=()
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -277,7 +278,21 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
       IMAGE="the system's sshd (native)"; C="none (native sshd processes)"; SKIP=(--skip password_)
     fi
     ;;
-  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql | nats | rabbitmq | meilisearch | kafka | mariadb | valkey | s3 | http-client | ssh)" >&2; exit 2 ;;
+  security)
+    # The attack tests start their own Kernway servers; the Redis-backed session,
+    # presence and ban stores get a Redis of their own.
+    C=kernway-security-redis; IMAGE="${SECURITY_REDIS_IMAGE:-redis:7.4-alpine}"
+    log "Redis for the session / ban stores ($IMAGE)"
+    ensure_container "$C" -p 6382:6379 "$IMAGE"
+    wait_for "Redis" docker exec "$C" redis-cli PING
+    export KW_REDIS_ADDR=127.0.0.1:6382
+    VERSION="Kernway server (this commit) + $(docker exec "$C" redis-server --version | cut -d' ' -f3)"
+    CRATE=kernway-server; TITLE="Web security"; SKIP=()
+    FEATURES=(-p kernway-security -p kernway-http --all-features)
+    # The Redis store tests are #[ignore]d for plain `cargo test`: run them here.
+    EXTRA=(--include-ignored)
+    ;;
+  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql | nats | rabbitmq | meilisearch | kafka | mariadb | valkey | s3 | http-client | ssh | security)" >&2; exit 2 ;;
 esac
 
 CMD="cargo test -p $CRATE ${FEATURES[*]+${FEATURES[*]}} --lib --tests -- --test-threads=1 --nocapture ${EXTRA[*]+${EXTRA[*]}} ${SKIP[*]+${SKIP[*]}}"

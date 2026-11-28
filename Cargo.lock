@@ -893,6 +893,7 @@ dependencies = [
  "httparse",
  "kernway-compress",
  "kernway-dns",
+ "kernway-http",
  "kernway-tls",
  "kernway-wire",
  "rt-core",

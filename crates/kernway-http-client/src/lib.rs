@@ -1663,113 +1663,15 @@ fn decode_chunked(bytes: &[u8]) -> Option<Vec<u8>> {
     dec.is_done().then_some(out)
 }
 
-/// The longest chunk-size line accepted (the size plus any extensions).
-const MAX_CHUNK_LINE: usize = 4096;
+/// The chunked decoder shared with the server (`kernway-http`), its errors as ours.
+use kernway_http::chunked::{ChunkDecoder, ChunkError};
 
-/// Where an incremental chunked decode currently sits between reads.
-enum ChunkState {
-    /// Reading the `<hex>\r\n` chunk-size line.
-    Size,
-    /// Reading `n` more bytes of the current chunk's data.
-    Data(usize),
-    /// Expecting the CRLF that follows a chunk's data.
-    DataCrlf,
-    /// Past the terminating `0` chunk: trailer fields, then a blank line.
-    Trailer,
-    /// The terminating chunk and its trailer have been fully consumed.
-    Done,
-}
-
-/// A stateful chunked-transfer decoder (RFC 9112 §7.1) that consumes bytes across many
-/// reads. [`pull`](Self::pull) decodes as much of `buf` as it can, leaving any partial
-/// tail for the next call; it never re-parses from the start. Trailer fields are kept in
-/// [`trailer`](Self::trailer); a malformed size line or a missing CRLF after a chunk is an
-/// error rather than a misread body.
-struct ChunkDecoder {
-    state: ChunkState,
-    /// The trailer field lines (`Name: value\r\n`…) after the last chunk.
-    trailer: Vec<u8>,
-}
-
-impl ChunkDecoder {
-    fn new() -> Self {
-        Self {
-            state: ChunkState::Size,
-            trailer: Vec::new(),
+impl From<ChunkError> for HttpError {
+    fn from(e: ChunkError) -> Self {
+        match e {
+            ChunkError::TooLarge(_) => HttpError::TooLarge(e.to_string()),
+            ChunkError::Malformed(_) => HttpError::Protocol(e.to_string()),
         }
-    }
-
-    /// Whether the terminating zero-length chunk and its trailer have been consumed.
-    fn is_done(&self) -> bool {
-        matches!(self.state, ChunkState::Done)
-    }
-
-    /// Consume as much of `buf` as possible, appending decoded body bytes to `out`.
-    /// Unconsumed partial bytes are left at the front of `buf` for the next call.
-    fn pull(&mut self, buf: &mut Vec<u8>, out: &mut Vec<u8>) -> Result<(), HttpError> {
-        let bad = |what: &str| HttpError::Protocol(format!("malformed chunked body: {what}"));
-        let mut pos = 0;
-        let result = loop {
-            match self.state {
-                ChunkState::Done => break Ok(()),
-                ChunkState::Size => match find(&buf[pos..], b"\r\n") {
-                    Some(i) => {
-                        let line = &buf[pos..pos + i];
-                        let hex = line.split(|&b| b == b';').next().unwrap_or(b"");
-                        let hex = std::str::from_utf8(hex).map(str::trim).unwrap_or("");
-                        if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-                            break Err(bad("a bad chunk size"));
-                        }
-                        let Ok(size) = usize::from_str_radix(hex, 16) else {
-                            break Err(bad("a chunk size too large"));
-                        };
-                        pos += i + 2;
-                        self.state = if size == 0 { ChunkState::Trailer } else { ChunkState::Data(size) };
-                    }
-                    None if buf.len() - pos > MAX_CHUNK_LINE => break Err(bad("a chunk-size line too long")),
-                    None => break Ok(()), // size line not fully arrived
-                },
-                ChunkState::Data(rem) => {
-                    let avail = buf.len() - pos;
-                    if avail == 0 {
-                        break Ok(());
-                    }
-                    let take = rem.min(avail);
-                    out.extend_from_slice(&buf[pos..pos + take]);
-                    pos += take;
-                    self.state = if take == rem { ChunkState::DataCrlf } else { ChunkState::Data(rem - take) };
-                }
-                ChunkState::DataCrlf => {
-                    if buf.len() - pos < 2 {
-                        break Ok(());
-                    }
-                    if &buf[pos..pos + 2] != b"\r\n" {
-                        break Err(bad("no CRLF after a chunk"));
-                    }
-                    pos += 2;
-                    self.state = ChunkState::Size;
-                }
-                ChunkState::Trailer => match find(&buf[pos..], b"\r\n") {
-                    Some(0) => {
-                        pos += 2; // the blank line ending the message
-                        self.state = ChunkState::Done;
-                    }
-                    Some(i) => {
-                        self.trailer.extend_from_slice(&buf[pos..pos + i + 2]);
-                        pos += i + 2;
-                        if self.trailer.len() > MAX_HEAD_SIZE {
-                            break Err(HttpError::TooLarge(format!("trailer over {MAX_HEAD_SIZE} bytes")));
-                        }
-                    }
-                    None if buf.len() - pos > MAX_HEAD_SIZE => {
-                        break Err(HttpError::TooLarge(format!("trailer over {MAX_HEAD_SIZE} bytes")))
-                    }
-                    None => break Ok(()),
-                },
-            }
-        };
-        buf.drain(..pos);
-        result
     }
 }
 
@@ -2789,7 +2691,7 @@ mod tests {
             let mut dec = ChunkDecoder::new();
             assert!(dec.pull(&mut bad.to_vec(), &mut Vec::new()).is_err(), "{:?}", String::from_utf8_lossy(bad));
         }
-        let mut long = vec![b'1'; MAX_CHUNK_LINE + 10];
+        let mut long = vec![b'1'; kernway_http::chunked::MAX_CHUNK_LINE + 10];
         assert!(ChunkDecoder::new().pull(&mut long, &mut Vec::new()).is_err(), "an endless size line");
     }
 

@@ -28,6 +28,31 @@ pub enum ParseError {
     /// Bounded on purpose: an unbounded head is a memory-exhaustion vector.
     #[error("request too large")]
     TooLarge,
+    /// A header line that RFC 9112 says must be refused — whitespace before the colon,
+    /// obsolete line folding, a control character, conflicting or malformed
+    /// `Content-Length`, both `Transfer-Encoding` and `Content-Length`, a repeated `Host`. Each of these is how one request is smuggled inside another
+    /// when a proxy and this server read the framing differently.
+    #[error("bad header: {0}")]
+    BadHeader(String),
+    /// A transfer coding other than `chunked` (RFC 9112 §6.1: answered with 501).
+    #[error("not implemented: {0}")]
+    NotImplemented(String),
+    /// An HTTP version other than 1.0 / 1.1 (answered with 505).
+    #[error("HTTP version not supported: {0}")]
+    VersionNotSupported(String),
+}
+
+impl ParseError {
+    /// The status code to answer with.
+    #[must_use]
+    pub fn status(&self) -> u16 {
+        match self {
+            ParseError::TooLarge => 431,
+            ParseError::NotImplemented(_) => 501,
+            ParseError::VersionNotSupported(_) => 505,
+            _ => 400,
+        }
+    }
 }
 
 /// Largest request head (request line + headers) accepted, in bytes.
@@ -67,8 +92,11 @@ pub enum ParsedHead {
         request: Request,
         /// Byte offset where the body begins (just past the head's blank line).
         head_end: usize,
-        /// The declared `Content-Length` (0 if absent).
+        /// The declared `Content-Length` (0 if absent, or when `chunked`).
         content_length: usize,
+        /// The body is sent with the chunked transfer coding (decode it with
+        /// [`crate::chunked::ChunkDecoder`]); `content_length` is then 0.
+        chunked: bool,
     },
     /// The head has not fully arrived yet — read more and call again.
     Incomplete,
@@ -83,9 +111,24 @@ pub enum ParsedHead {
 /// Accepts LF as well as CRLF line endings, so a request typed by hand through
 /// `nc` parses like one sent by `curl`.
 pub fn parse_bytes(buf: &[u8]) -> Result<Parsed, ParseError> {
-    let Some((mut request, head_end, content_length)) = parse_head_inner(buf)? else {
+    let Some((mut request, head_end, content_length, chunked)) = parse_head_inner(buf)? else {
         return Ok(Parsed::Incomplete);
     };
+    if chunked {
+        let mut rest = buf[head_end..].to_vec();
+        let before = rest.len();
+        let mut body = Vec::new();
+        let mut dec = crate::chunked::ChunkDecoder::new();
+        dec.pull(&mut rest, &mut body).map_err(|e| ParseError::BadHeader(e.to_string()))?;
+        if body.len() > MAX_BODY_BYTES {
+            return Err(ParseError::TooLarge);
+        }
+        if !dec.is_done() {
+            return Ok(Parsed::Incomplete);
+        }
+        request.body = body;
+        return Ok(Parsed::Complete { request, consumed: head_end + before - rest.len() });
+    }
     // The buffered path caps the body: this whole request lives in memory.
     if content_length > MAX_BODY_BYTES {
         return Err(ParseError::TooLarge);
@@ -108,18 +151,20 @@ pub fn parse_bytes(buf: &[u8]) -> Result<Parsed, ParseError> {
 /// the server enforces its own `max_upload_size`.
 pub fn parse_head(buf: &[u8]) -> Result<ParsedHead, ParseError> {
     match parse_head_inner(buf)? {
-        Some((request, head_end, content_length)) => Ok(ParsedHead::Complete {
+        Some((request, head_end, content_length, chunked)) => Ok(ParsedHead::Complete {
             request,
             head_end,
             content_length,
+            chunked,
         }),
         None => Ok(ParsedHead::Incomplete),
     }
 }
 
 /// Head-only decode shared by [`parse_bytes`] and [`parse_head`]. `Ok(None)` means the
-/// head has not fully arrived yet. The returned request carries an empty body.
-fn parse_head_inner(buf: &[u8]) -> Result<Option<(Request, usize, usize)>, ParseError> {
+/// head has not fully arrived yet. The returned request carries an empty body; the
+/// last two values are the `Content-Length` and whether the body is chunked.
+fn parse_head_inner(buf: &[u8]) -> Result<Option<(Request, usize, usize, bool)>, ParseError> {
     let Some((head_end, line_count)) = find_head_end(buf) else {
         // No blank line yet. Bound the wait, or a client that never sends one
         // could grow this buffer without limit.
@@ -144,20 +189,29 @@ fn parse_head_inner(buf: &[u8]) -> Result<Option<(Request, usize, usize)>, Parse
     // `append` rather than `insert`: the head is walked in order, so a repeated
     // header resolves to the last one without a duplicate check per line.
     let mut headers = Headers::with_capacity(head.len(), line_count.saturating_sub(1));
+    let mut lengths: Vec<&str> = Vec::new();
+    let mut codings: Vec<&str> = Vec::new();
+    let mut hosts = 0usize;
     for line in lines {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+        if line.is_empty() {
             break;
         }
-        if let Some((name, value)) = split_header(trimmed) {
-            headers.append(name, value);
+        let (name, value) = checked_field(line)?;
+        if name.eq_ignore_ascii_case("content-length") {
+            lengths.extend(value.split(',').map(|v| v.trim_matches([' ', '\t'])));
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            codings.extend(value.split(',').map(|v| v.trim_matches([' ', '\t'])).filter(|v| !v.is_empty()));
+        } else if name.eq_ignore_ascii_case("host") {
+            hosts += 1;
         }
+        headers.append(name, value);
     }
-
-    let content_length: usize = headers
-        .get("content-length")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+    let (content_length, chunked) = framing(&lengths, &codings, version)?;
+    // Two Hosts let a proxy route by one and this server by the other. (A missing
+    // Host on HTTP/1.1 is accepted, as before: requests typed by hand rely on it.)
+    if hosts > 1 {
+        return Err(ParseError::BadHeader("more than one Host header".into()));
+    }
 
     let request = Request {
         method,
@@ -170,7 +224,58 @@ fn parse_head_inner(buf: &[u8]) -> Result<Option<(Request, usize, usize)>, Parse
         body_spool: None,
         remote_addr: None, // set by the server from the socket peer
     };
-    Ok(Some((request, head_end, content_length)))
+    Ok(Some((request, head_end, content_length, chunked)))
+}
+
+/// One header line, checked as RFC 9112 §5 requires of a server: a token name
+/// directly followed by the colon (whitespace there is refused, §5.1), no obsolete
+/// line folding (§5.2), no control character in the value but HTAB.
+fn checked_field(line: &str) -> Result<(&str, &str), ParseError> {
+    let bad = |why: &str| ParseError::BadHeader(why.to_string());
+    if line.starts_with([' ', '\t']) {
+        return Err(bad("obsolete line folding"));
+    }
+    let colon = line.find(':').ok_or_else(|| bad("a header line without a colon"))?;
+    let name = &line[..colon];
+    let token = |b: u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b);
+    if name.is_empty() || !name.bytes().all(token) {
+        return Err(bad(if name.ends_with([' ', '\t']) { "whitespace before a header's colon" } else { "a header name that is not a token" }));
+    }
+    let value = line[colon + 1..].trim_matches([' ', '\t']);
+    if value.bytes().any(|b| (b < 0x20 && b != b'\t') || b == 0x7f) {
+        return Err(bad("a control character in a header value"));
+    }
+    Ok((name, value))
+}
+
+/// How the body is framed (RFC 9112 §6.3): `Transfer-Encoding: chunked`, or a
+/// `Content-Length` whose every value is the same run of digits. Anything a proxy
+/// might read differently is refused.
+fn framing(lengths: &[&str], codings: &[&str], version: HttpVersion) -> Result<(usize, bool), ParseError> {
+    if !codings.is_empty() {
+        if !lengths.is_empty() {
+            return Err(ParseError::BadHeader("both Transfer-Encoding and Content-Length".into()));
+        }
+        if version == HttpVersion::Http10 {
+            return Err(ParseError::BadHeader("Transfer-Encoding in an HTTP/1.0 request".into()));
+        }
+        if codings.len() == 1 && codings[0].eq_ignore_ascii_case("chunked") {
+            return Ok((0, true));
+        }
+        return Err(ParseError::NotImplemented(format!("transfer coding {:?} (only chunked is accepted)", codings.join(", "))));
+    }
+    let mut length: Option<usize> = None;
+    for v in lengths {
+        if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(ParseError::BadHeader(format!("a bad Content-Length {v:?}")));
+        }
+        let n = v.parse::<usize>().map_err(|_| ParseError::TooLarge)?;
+        if length.is_some_and(|l| l != n) {
+            return Err(ParseError::BadHeader("conflicting Content-Length values".into()));
+        }
+        length = Some(n);
+    }
+    Ok((length.unwrap_or(0), false))
 }
 
 /// Byte offset just past the blank line that ends the head, plus how many lines
@@ -211,12 +316,23 @@ fn parse_request_line(line: &str) -> Result<RequestLine, ParseError> {
         Some(q) => (&full_path[..q], &full_path[q + 1..]),
         None => (full_path, ""),
     };
+    if full_path.is_empty() || full_path.bytes().any(|b| b < 0x21 || b == 0x7f) {
+        return Err(ParseError::BadRequestLine(line.to_string()));
+    }
     // A missing version means HTTP/0.9, which nobody speaks any more; treating
     // it as 1.1 would wrongly hold the connection open, so it falls to 1.0.
-    let version = match parts.next().map(str::trim) {
+    let version = match parts.next() {
         Some("HTTP/1.0") | None => HttpVersion::Http10,
-        _ => HttpVersion::Http11,
+        Some("HTTP/1.1") => HttpVersion::Http11,
+        Some(v) if v.len() == 8 && v.starts_with("HTTP/") && v.as_bytes()[5].is_ascii_digit() && v.as_bytes()[6] == b'.' && v.as_bytes()[7].is_ascii_digit() => {
+            return Err(ParseError::VersionNotSupported(v.to_string()));
+        }
+        Some(_) => return Err(ParseError::BadRequestLine(line.to_string())),
     };
+    let token = |b: u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b);
+    if !method.bytes().all(token) {
+        return Err(ParseError::BadRequestLine(line.to_string()));
+    }
     Ok((
         // ASCII-only: RFC 9110 §9 defines methods as tokens, so the Unicode
         // case tables `to_uppercase` consults can only cost time here.
@@ -432,6 +548,43 @@ mod tests {
 
 #[cfg(test)]
 mod byte_parser_tests {
+    fn err(raw: &str) -> ParseError {
+        match parse_bytes(raw.as_bytes()) {
+            Err(e) => e,
+            Ok(_) => panic!("accepted: {raw:?}"),
+        }
+    }
+
+    #[test]
+    fn rfc_9112_framing_rules_are_enforced() {
+        for raw in [
+            "POST / HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nab",
+            "POST / HTTP/1.1\r\nContent-Length: 1e3\r\n\r\n",
+            "POST / HTTP/1.1\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "POST / HTTP/1.1\r\nContent-Length : 2\r\n\r\nab",
+            "GET / HTTP/1.1\r\nX: 1\r\n folded\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n",
+            "GET / HTTP/1.1\r\nX: a\u{7}b\r\n\r\n",
+            "GET / HTTP/1.1\r\nnocolon\r\n\r\n",
+        ] {
+            assert_eq!(err(raw).status(), 400, "{raw:?}");
+        }
+        assert_eq!(err("POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n").status(), 501);
+        assert_eq!(err("GET / HTTP/3.0\r\n\r\n").status(), 505);
+        assert_eq!(err(&format!("GET / HTTP/1.1\r\nX: {}\r\n\r\n", "a".repeat(MAX_HEAD_BYTES))).status(), 431);
+        // Allowed: equal repeats, OWS around the value, a tab inside it, chunked alone.
+        assert!(matches!(parse_bytes(b"POST / HTTP/1.1\r\nContent-Length: 2, 2\r\n\r\nab").unwrap(), Parsed::Complete { .. }));
+        assert!(matches!(parse_bytes(b"GET / HTTP/1.1\r\nX:\t a\tb \r\n\r\n").unwrap(), Parsed::Complete { .. }));
+        let one = b"POST / HTTP/1.1\r\nTransfer-Encoding: Chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n";
+        match parse_bytes(&[&one[..], b"NEXT"].concat()).unwrap() {
+            Parsed::Complete { request, consumed } => {
+                assert_eq!(request.body, b"abc");
+                assert_eq!(consumed, one.len(), "the next request is left");
+            }
+            Parsed::Incomplete => panic!("complete"),
+        }
+    }
+
     use super::*;
 
     fn complete(raw: &str) -> (Request, usize) {
@@ -465,6 +618,7 @@ mod byte_parser_tests {
                 request,
                 head_end,
                 content_length,
+                ..
             } => {
                 assert_eq!(content_length, 100);
                 assert_eq!(head_end, buf.len());

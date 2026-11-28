@@ -17,7 +17,7 @@ hướng dẫn cuối trang.*
 | Refused with a clear error | Asking for it fails at once with an error that names it; nothing hangs or misbehaves. |
 | Built, not verified | The code exists, but the test setup has no server or platform to prove it against. |
 
-**69 gaps** across 12 drivers.
+**72 gaps** across 13 drivers.
 
 | Driver | Features | Gaps |
 |---|---:|---:|
@@ -34,6 +34,7 @@ hướng dẫn cuối trang.*
 | [RabbitMQ](#rabbitmq) | 38 | 8 |
 | [Redis](#redis) | 37 | — |
 | [S3-compatible object storage](#s3) | 20 | 5 |
+| [Web security](#security) | 32 | 3 |
 | [SQLite](#sqlite) | 47 | — |
 | [SSH and SFTP client](#ssh) | 37 | 9 |
 | [Valkey](#valkey) | 37 | 1 |
@@ -176,6 +177,17 @@ Report: [`docs/acceptance/s3.md`](acceptance/s3.md) · catalog: `acceptance/s3.f
 | Security | Temporary credentials (session tokens) | Built, not verified | signed (x-amz-security-token), not verified against STS-issued credentials |
 | Objects | Batch delete (DeleteObjects), object tagging, versioning, object lock, server-side encryption headers, checksums (CRC32C / SHA256 trailers) | Not built | not implemented (delete_prefix deletes one by one) |
 | Objects | Streaming uploads / downloads without holding the object in memory | Not built | bodies are buffered (multipart splits large uploads) |
+
+<a id="security"></a>
+## Web security
+
+Report: [`docs/acceptance/security.md`](acceptance/security.md) · catalog: `acceptance/security.features`
+
+| Area | Feature | Status | Why / what happens instead |
+|---|---|---|---|
+| Request smuggling | An HTTP/1.1 request without Host is refused (RFC 9112 §3.2) | Not built | accepted, as before (requests typed by hand rely on it); two Host headers are refused |
+| Authentication | Tokens without exp never expire (no "require exp" setting) | Not built | not implemented — issue tokens with exp |
+| Authentication | Argon2 / scrypt password hashes; WebAuthn / TOTP second factors | Not built | not implemented |
 
 <a id="ssh"></a>
 ## SSH and SFTP client

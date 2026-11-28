@@ -659,6 +659,64 @@ jobs:
           fi
           if [ "$RUNNER_OS" = Linux ]; then grep -q "^test password_logins_with_password_and_keyboard_interactive " ssh.log; fi
 
+  # Web security: attacks on a live Kernway server, and every security unit test;
+  # the Redis-backed session / presence / ban stores against a real Redis
+  # (Memurai on Windows).
+  security:
+    name: security (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Redis (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq redis-server >/dev/null
+          sudo systemctl stop redis-server 2>/dev/null || true
+          .github/scripts/redis-local.sh "$RUNNER_TEMP/redis" plain
+
+      - name: Redis (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install redis >/dev/null
+          .github/scripts/redis-local.sh "$RUNNER_TEMP/redis" plain
+
+      - name: Memurai (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          choco install memurai-developer -y --no-progress >/dev/null
+          for _ in $(seq 1 30); do
+            "/c/Program Files/Memurai/memurai-cli.exe" PING 2>/dev/null | grep -q PONG && break
+            sleep 2
+          done
+          echo "KW_REDIS_ADDR=127.0.0.1:6379" >> "$GITHUB_ENV"
+
+      - name: Security — attacks and unit tests, live
+        shell: bash
+        run: cargo test -p kernway-server -p kernway-security -p kernway-http --all-features --lib --tests -- --test-threads=1 --nocapture --include-ignored 2>&1 | tee security.log
+
+      - name: Every attack ran
+        shell: bash
+        run: |
+          ! grep -q "skip:" security.log
+          for t in request_smuggling_vectors_are_refused_and_nothing_behind_them_runs static_files_never_leave_their_root \
+                   a_header_built_from_user_input_cannot_split_the_response forged_cross_site_writes_are_refused \
+                   only_valid_tokens_with_the_right_role_get_in redis::login_flow_redis; do
+            grep -q "^test $t " security.log
+          done
+
   # SQL Server runs on Linux in Docker (Microsoft ships no macOS build, and a
   # Windows runner has no TCP-enabled instance); the client code is the same
   # on every OS — it builds and its unit tests pass in the drivers job above.
