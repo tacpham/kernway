@@ -9,7 +9,7 @@
 //! ```
 //!
 //! A request without the cookie gets one on its response, and the token is put in
-//! the request scope as a [`CsrfToken`] for the page to embed (kernleaf injects it
+//! the request scope as a [`CsrfToken`](kernway_security::csrf::CsrfToken) for the page to embed (kernleaf injects it
 //! into every state-changing `<form>`). Requests carrying an `Authorization`
 //! header are not checked: a browser never adds one to a cross-site request on its
 //! own, so they are API calls, not forgeries.
