@@ -711,6 +711,14 @@ fn repeated_statements_reuse_their_parsed_cursor() {
         };
         let _ = db.execute("DROP TABLE kwo_sc").await;
         db.execute("CREATE TABLE kwo_sc (n NUMBER, c CLOB)").await.unwrap();
+        // Warm up first: the server's own first-use parses (dictionary
+        // lookups, PL/SQL loading) vary with how warm it is, and are not
+        // what is measured here.
+        for i in 0..5i64 {
+            db.execute_with("INSERT INTO kwo_sc VALUES (:1, :2)", params![-1 - i, "warm-up"]).await.unwrap();
+            db.query("SELECT n, c FROM kwo_sc WHERE n = :1", params![-1 - i]).await.unwrap();
+            let _ = db.call_function("kwo_api.total", OutKind::Number, &[i.into()]).await;
+        }
         let (parse0, exec0) = (stat("parse count (total)").await, stat("execute count").await);
         for i in 0..50i64 {
             db.execute_with("INSERT INTO kwo_sc VALUES (:1, :2)", params![i, format!("row {i}")]).await.unwrap();
@@ -722,10 +730,10 @@ fn repeated_statements_reuse_their_parsed_cursor() {
         let (parse1, exec1) = (stat("parse count (total)").await, stat("execute count").await);
         eprintln!("150 executions: parse count +{}, execute count +{}", parse1 - parse0, exec1 - exec0);
         assert!(exec1 - exec0 >= 150, "every statement ran");
-        // Measured: +24 with the cache (incl. the server's recursive parses
-        // inside PL/SQL), +170 without it.
-        assert!(parse1 - parse0 <= 40, "parsed once per statement, not per execution: +{}", parse1 - parse0);
-        assert_eq!(db.query_scalar("SELECT COUNT(*) FROM kwo_sc", &[]).await.unwrap(), Value::Int(50));
+        // Measured after the warm-up: +0 with the cache, one per execution
+        // (+150 and more) without it.
+        assert!(parse1 - parse0 <= 10, "parsed once per statement, not per execution: +{}", parse1 - parse0);
+        assert_eq!(db.query_scalar("SELECT COUNT(*) FROM kwo_sc WHERE n >= 0", &[]).await.unwrap(), Value::Int(50));
     });
 }
 

@@ -296,10 +296,19 @@ fn sharded_cluster_through_mongos() {
         }
         s.commit_transaction().await.unwrap();
         assert_eq!(coll.count_documents(doc! { "t" => true }).await.unwrap(), 10);
-        // Retryable writes through mongos.
-        fail_point(&c, doc! { "failCommands" => vec![Bson::from("insert")], "closeConnection" => true }).await;
-        coll.insert_one(&doc! { "_id" => 1000 }).await.unwrap();
+        // Retryable writes through mongos. The fail point lives on one
+        // router, so arm it and write through a client of that router only —
+        // otherwise the write may go to the other one and leave it armed.
+        let routers: Vec<String> = c.topology().servers.keys().map(|a| a.to_string()).collect();
+        let one = Client::connect(&format!("mongodb://{}/kernway_test", routers[0])).await.unwrap();
+        fail_point(&one, doc! { "failCommands" => vec![Bson::from("insert")], "closeConnection" => true }).await;
+        one.database("kernway_test").collection::<Document>(&name).insert_one(&doc! { "_id" => 1000 }).await.unwrap();
         assert_eq!(coll.count_documents(doc! {}).await.unwrap(), 501);
+        // Leave no fail point armed for the tests that follow.
+        for r in &routers {
+            let d = Client::connect(&format!("mongodb://{r}/?directConnection=true")).await.unwrap();
+            d.run_command("admin", doc! { "configureFailPoint" => "failCommand", "mode" => "off" }).await.unwrap();
+        }
         coll.drop().await.unwrap();
     });
 }
