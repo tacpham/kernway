@@ -177,3 +177,24 @@ fn metadata_is_built_once_and_shared() {
     assert!(std::ptr::eq(OrderLineItem::columns(), OrderLineItem::columns()));
     assert!(std::ptr::eq(Comment::relations(), Comment::relations()));
 }
+
+#[derive(Debug, Clone)]
+#[entity]
+struct Assigned {
+    #[id(strategy = "assigned")]
+    code: String,
+}
+
+#[derive(Debug, Clone)]
+#[entity]
+struct Manual {
+    #[id(strategy = "manual")]
+    code: String,
+}
+
+#[test]
+fn assigned_is_the_jpa_name_for_a_manual_key() {
+    for id in [&Assigned::columns()[0], &Manual::columns()[0]] {
+        assert!(id.primary_key && !id.auto, "{id:?}");
+    }
+}

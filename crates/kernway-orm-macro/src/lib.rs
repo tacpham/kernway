@@ -210,8 +210,9 @@ fn extract_table_name(args: &Punctuated<Meta, Token![,]>) -> Option<String> {
     None
 }
 
-/// `#[id]`, `#[id()]` or `#[id(strategy = "auto" | "manual")]` → whether the
-/// key is assigned by the store.
+/// `#[id]`, `#[id()]` or `#[id(strategy = "auto" | "manual" | "assigned")]` →
+/// whether the key is assigned by the store. `assigned` (the JPA / Hibernate name
+/// for a key the application sets) is `manual`.
 fn parse_id_attr(attr: &Attribute) -> syn::Result<bool> {
     let mut auto = false;
     // A bare `#[id]` has no argument list to parse.
@@ -223,8 +224,8 @@ fn parse_id_attr(attr: &Attribute) -> syn::Result<bool> {
             let value = meta.value()?.parse::<syn::LitStr>()?;
             match value.value().as_str() {
                 "auto" => auto = true,
-                "manual" => auto = false,
-                _ => return Err(syn::Error::new_spanned(value, "expected strategy = \"auto\" or \"manual\"")),
+                "manual" | "assigned" => auto = false,
+                _ => return Err(syn::Error::new_spanned(value, "expected strategy = \"auto\", \"manual\" or \"assigned\"")),
             }
             return Ok(());
         }
