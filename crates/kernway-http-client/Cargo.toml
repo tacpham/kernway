@@ -23,6 +23,8 @@ kernway-dns = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+serde_json = { workspace = true }
+kernway-compress = { workspace = true }
 # Benchmark-only: the response parser hyper/reqwest use, as the incumbent to measure
 # our own response-head parsing against (KEP-0000 §2). Never a real dependency.
 httparse  = "1"

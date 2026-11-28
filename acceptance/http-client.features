@@ -1,0 +1,49 @@
+# HTTP client feature catalog for the acceptance report.
+# area | feature | evidence
+# evidence = comma-separated test names (all must pass), or
+#            GAP: <why>  (not implemented / not verified — counted against completeness)
+#            N/A: <why>  (does not apply to an HTTP/1.1 client)
+#
+# Live tests run against go-httpbin (plain and TLS) and Caddy (mutual TLS, and
+# precompressed brotli files), official release binaries run natively by
+# crates/kernway-http-client/tests/support/httpbin-setup.sh (or in Docker with
+# HTTPBIN_DOCKER=1). The wire tests drive loopback servers that misbehave on
+# purpose — what no well-behaved server sends on demand. CI runs the same suite
+# on Linux, macOS and Windows.
+
+Requests | GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS; bodies byte-exact (UTF-8 JSON); query and header values in UTF-8; a bodiless POST says Content-Length: 0 | requests_carry_their_headers_query_and_body, tests::a_bodiless_post_still_sends_its_length, tests::encodes_a_request_with_default_headers
+Requests | Form posts (application/x-www-form-urlencoded) with Vietnamese and reserved characters | requests_carry_their_headers_query_and_body, tests::form_is_percent_encoded
+URLs | IPv4, IPv6 ([::1]), names; default and explicit ports; queries without a path; the #fragment never sent; spaces and non-ASCII percent-encoded; user:password@ as Basic auth | tests::urls_with_ipv6_userinfo_queries_and_fragments, tests::parses_urls, ipv6_and_names_resolve_and_connect, basic_and_bearer_authentication
+URLs | Internationalized domain names (Unicode hosts) | GAP: refused with a clear error; pass the xn-- (punycode) form
+Responses | Status codes and reason phrases; 204 / 304 / HEAD without a body whatever their headers; repeated headers kept in order | status_codes_and_bodiless_responses, tests::head_204_and_304_responses_have_no_body, tests::status_lines_are_checked
+Responses | Interim 1xx responses (100 Continue, 103 Early Hints) read past to the final one | interim_1xx_responses_are_read_past
+Framing | Content-Length, chunked (with extensions and trailers), read-to-close; Transfer-Encoding lists (gzip, chunked); conflicting or malformed lengths are errors, not guesses | chunked_bodies_trailers_ranges_and_streaming, tests::body_framing_follows_rfc_9112, tests::chunked_bodies_keep_trailers_and_refuse_malformed_framing, conflicting_lengths_are_an_error_not_a_guess
+Framing | Trailer fields after a chunked body (Response::trailer) | chunked_bodies_trailers_ranges_and_streaming, connections_are_reused_only_when_in_step
+Framing | Range requests (206 Partial Content) | chunked_bodies_trailers_ranges_and_streaming
+Streaming | Response bodies streamed a slice at a time (O(chunk) memory), Server-Sent Events as they arrive, a per-read idle timeout | chunked_bodies_trailers_ranges_and_streaming, slow_servers_hit_the_timeout_and_the_client_recovers, tests::streams_a_content_length_body_in_chunks, tests::streams_a_chunked_body_incrementally, tests::streaming_memory_stays_bounded
+Streaming | Streaming request bodies (upload without holding the body in memory); Expect: 100-continue | GAP: request bodies are buffered (a 1xx from the server is read past)
+Compression | gzip, deflate (zlib and raw), brotli inflated transparently; Content-Encoding lists undone in order; concatenated gzip members | compressed_responses_are_inflated, tests::decompresses_a_gzip_response
+Compression | zstd responses | GAP: not advertised in Accept-Encoding, so servers do not send it; an unrequested zstd body is handed over as sent
+Redirects | 301 / 302 / 303 / 307 / 308 with the method and body rules; relative, absolute, scheme-relative and query-only Locations; dot segments; a redirect budget | redirects_are_followed_with_the_method_rules, tests::locations_resolve_per_rfc_3986, tests::follows_a_redirect_over_sockets
+Cookies | Cookie jar (opt-in): stored from Set-Cookie (redirects too), sent by domain / path, expired cookies dropped | cookies_are_stored_sent_and_expired, tests::a_cookie_jar_carries_cookies_to_the_next_request
+Authentication | Basic (RFC 7617, UTF-8 passwords), Bearer tokens, credentials from the URL | basic_and_bearer_authentication, tests::basic_and_bearer_auth_and_url_credentials
+Authentication | Digest, NTLM, Negotiate (Kerberos) | GAP: not implemented
+TLS | HTTPS with verification against Mozilla's roots; an unknown CA and another CA refused as Tls errors | tls_against_a_private_ca
+TLS | A private CA (trust_ca_pem); certificates for IP addresses (v4 and v6) | tls_against_a_private_ca
+TLS | Mutual TLS: the client certificate presented; refused without one or with one from another CA; a key that is not the certificate's refused up front | mutual_tls_presents_the_client_certificate
+Connections | Keep-alive pool per origin and core; shared by many tasks; reused only when the connection is in step (framed body read to its end, HTTP/1.1 or keep-alive, no Connection: close) | many_requests_share_the_pool_across_tasks, connections_are_reused_only_when_in_step, tests::reuses_a_pooled_connection
+Connections | A keep-alive the server closed is noticed before it is used (plain and TLS) | a_keep_alive_the_server_closed_is_not_used_for_the_next_post
+Connections | Every resolved address tried in order (localhost reaches a server on ::1 or 127.0.0.1 only); the connect timeout shared across them | every_resolved_address_is_tried, a_server_that_never_answers_the_connect_cannot_use_the_whole_budget_per_address
+Connections | HTTP proxies (absolute-form requests, CONNECT tunnels, HTTP_PROXY / NO_PROXY) | GAP: not implemented — requests go straight to the origin
+Connections | HTTP/2 and HTTP/3 | GAP: HTTP/1.1 only (ALPN not offered)
+Timeouts | Connect timeout and whole-request timeout; the client stays usable after one fires | slow_servers_hit_the_timeout_and_the_client_recovers, tests::a_hung_server_hits_the_timeout
+DNS | IP literals, the hosts file, async UDP DNS, getaddrinfo on the blocking pool as the last resort | tests::ipv4_literal_resolves_without_a_lookup, tests::ipv6_literal_resolves_without_a_lookup, tests::localhost_resolves_to_loopback_without_network, tests::a_trailing_dot_is_stripped_before_resolving, get_over_loopback_via_ip_literal, get_over_loopback_via_localhost
+DNS | Windows: the system's DNS servers | GAP: resolv.conf only — on Windows the async resolver uses public resolvers, then getaddrinfo (on the blocking pool) answers
+
+Security | Header names and values that would split the request (CR, LF, NUL, non-token names) refused before anything is sent; control characters in URLs refused | an_injected_header_never_reaches_the_wire, tests::header_values_and_names_cannot_split_the_request
+Security | Credentials (Authorization, Cookie, Proxy-Authorization, URL user:password) never follow a redirect to another origin, https → http included | credentials_never_follow_a_redirect_to_another_origin, tests::redirects_drop_every_credential_across_origins
+Security | Response limits: a head over 64 KiB, a body over max_response_size (64 MiB by default), and a compression bomb fail with TooLarge instead of exhausting memory | a_head_that_never_ends_is_refused, a_compression_bomb_is_stopped_at_the_limit, a_body_longer_than_the_limit_is_refused_before_it_is_read, compressed_responses_are_inflated
+Security | A request that may have reached the server is never resent: a POST on a connection that died is an error; GET, PUT, DELETE and requests with an Idempotency-Key are retried once | a_post_that_got_out_is_never_sent_twice, a_get_on_a_connection_that_died_is_resent_once, tests::only_safe_requests_are_resent_on_a_dead_connection
+
+Reliability | Fully async on kernway's reactor: no blocking call on a shard (source scan); the hosts file and resolver config read on the blocking pool | no_blocking_call_runs_on_the_reactor
+Reliability | Linux, macOS and Windows (CI on each, against the real servers) | ci::http_client_ubuntu_latest, ci::http_client_macos_latest, ci::http_client_windows_latest

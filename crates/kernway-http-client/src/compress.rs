@@ -1,27 +1,44 @@
 //! Response body decompression — the client half of the shared [`kernway_compress`]
 //! layer (the server half compresses; this reverses it). A response marked
-//! `Content-Encoding: gzip | deflate | br` is inflated transparently so callers always
-//! see plain bytes, and the now-stale framing headers are dropped.
+//! `Content-Encoding: gzip | deflate | br` (or a list of them, applied in order) is
+//! inflated transparently so callers always see plain bytes, and the now-stale framing
+//! headers are dropped. The inflated size is capped, so a small "compression bomb"
+//! fails instead of exhausting memory.
 
 use kernway_compress::Encoding;
 
 use crate::{HttpError, Response};
 
-/// Inflate `resp.body` in place per its `Content-Encoding`. `identity`, an absent
-/// header, or an unrecognised encoding leave the body untouched.
-pub(crate) fn decompress(resp: &mut Response) -> Result<(), HttpError> {
-    let Some(encoding) = resp
-        .header("content-encoding")
-        .and_then(Encoding::from_token)
-    else {
-        return Ok(()); // no encoding, or one we don't handle — leave as-is
+/// Inflate `resp.body` in place per its `Content-Encoding`, producing at most `max`
+/// bytes. `identity`, an absent header, or a coding we do not know leave the body
+/// (and its headers) untouched.
+pub(crate) fn decompress(resp: &mut Response, max: usize) -> Result<(), HttpError> {
+    let Some(header) = resp.header("content-encoding") else {
+        return Ok(());
     };
-    if encoding == Encoding::Identity {
+    // `Content-Encoding: gzip, br` means gzip was applied first: undo br, then gzip.
+    let mut codings = Vec::new();
+    for token in header.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+        match Encoding::from_token(token) {
+            Some(Encoding::Identity) => {}
+            Some(e) => codings.push(e),
+            None => return Ok(()), // a coding we cannot undo — hand over the bytes as sent
+        }
+    }
+    if codings.is_empty() {
         return Ok(());
     }
-
-    resp.body =
-        kernway_compress::decode(&resp.body, encoding).map_err(|e| HttpError::Protocol(e.0))?;
+    let mut body = std::mem::take(&mut resp.body);
+    for &coding in codings.iter().rev() {
+        body = kernway_compress::decode_limited(&body, coding, max).map_err(|e| {
+            if e.is_too_large() {
+                HttpError::TooLarge(format!("decompressed body over the {max}-byte limit"))
+            } else {
+                HttpError::Protocol(e.0)
+            }
+        })?;
+    }
+    resp.body = body;
 
     // The body is plain now; drop the framing headers so they don't lie about it.
     let Response { head, spans, .. } = resp;

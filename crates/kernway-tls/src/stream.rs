@@ -141,6 +141,38 @@ impl AsyncTlsStream {
         }
     }
 
+    /// Whether this idle session can carry another request: nothing undelivered,
+    /// and the peer has neither closed the socket nor sent `close_notify`. Checked
+    /// without waiting; records that arrived meanwhile (a TLS 1.3 session ticket)
+    /// are processed, not mistaken for data.
+    pub fn is_idle_open(&mut self) -> bool {
+        if self.closed || self.inbox_pos < self.inbox.len() {
+            return false;
+        }
+        let mut chunk = [0u8; 8192];
+        loop {
+            match self.tcp.try_read(&mut chunk) {
+                Ok(0) => return false,
+                Ok(n) => {
+                    let mut cursor = &chunk[..n];
+                    while !cursor.is_empty() {
+                        if self.conn.read_tls(&mut cursor).is_err()
+                            || self.conn.process_new_packets().is_err()
+                            || self.drain_plaintext().is_err()
+                        {
+                            return false;
+                        }
+                    }
+                    if self.closed || !self.inbox.is_empty() {
+                        return false;
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return true,
+                Err(_) => return false,
+            }
+        }
+    }
+
     /// Drain every TLS record `rustls` wants to send, writing them to the socket.
     async fn flush_tls(&mut self) -> io::Result<()> {
         while self.conn.wants_write() {

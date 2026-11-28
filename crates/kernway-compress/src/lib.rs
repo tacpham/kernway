@@ -89,21 +89,54 @@ pub fn encode(data: &[u8], encoding: Encoding) -> Vec<u8> {
 
 /// Decompress `data` that was encoded with `encoding` (`Identity` copies it through).
 pub fn decode(data: &[u8], encoding: Encoding) -> Result<Vec<u8>, CompressError> {
+    decode_limited(data, encoding, usize::MAX)
+}
+
+/// [`decode`], refusing to produce more than `max` bytes — a small "compression
+/// bomb" (a few KiB of gzip that inflate to gigabytes) fails once `max` is
+/// passed instead of exhausting memory.
+pub fn decode_limited(data: &[u8], encoding: Encoding, max: usize) -> Result<Vec<u8>, CompressError> {
     match encoding {
+        Encoding::Identity if data.len() > max => Err(too_large("identity", max)),
         Encoding::Identity => Ok(data.to_vec()),
-        Encoding::Gzip => read_all(flate2::read::GzDecoder::new(data), "gzip"),
+        // Several gzip members back to back are one body (RFC 1952 §2.2).
+        Encoding::Gzip => read_all(flate2::read::MultiGzDecoder::new(data), "gzip", max),
         // HTTP "deflate" is ambiguously zlib-wrapped or raw — try zlib, then raw.
-        Encoding::Deflate => read_all(flate2::read::ZlibDecoder::new(data), "deflate")
-            .or_else(|_| read_all(flate2::read::DeflateDecoder::new(data), "deflate")),
-        Encoding::Br => read_all(brotli::Decompressor::new(data, 4096), "br"),
+        Encoding::Deflate => read_all(flate2::read::ZlibDecoder::new(data), "deflate", max).or_else(|e| {
+            if e.is_too_large() {
+                Err(e)
+            } else {
+                read_all(flate2::read::DeflateDecoder::new(data), "deflate", max)
+            }
+        }),
+        Encoding::Br => read_all(brotli::Decompressor::new(data, 4096), "br", max),
     }
 }
 
-fn read_all(mut reader: impl Read, what: &str) -> Result<Vec<u8>, CompressError> {
+const TOO_LARGE: &str = "decoded body larger than";
+
+fn too_large(what: &str, max: usize) -> CompressError {
+    CompressError(format!("{what}: {TOO_LARGE} {max} bytes"))
+}
+
+impl CompressError {
+    /// Whether decoding stopped at the size limit of [`decode_limited`] (the
+    /// data itself may be fine).
+    #[must_use]
+    pub fn is_too_large(&self) -> bool {
+        self.0.contains(TOO_LARGE)
+    }
+}
+
+fn read_all(reader: impl Read, what: &str, max: usize) -> Result<Vec<u8>, CompressError> {
     let mut out = Vec::new();
     reader
+        .take((max as u64).saturating_add(1))
         .read_to_end(&mut out)
         .map_err(|e| CompressError(format!("{what}: {e}")))?;
+    if out.len() > max {
+        return Err(too_large(what, max));
+    }
     Ok(out)
 }
 
@@ -249,5 +282,26 @@ mod tests {
         assert_eq!(negotiate("*"), Encoding::Br);
         // q=0 refuses an encoding.
         assert_eq!(negotiate("br;q=0, gzip"), Encoding::Gzip);
+    }
+
+    #[test]
+    fn a_compression_bomb_stops_at_the_limit() {
+        let zeros = vec![0u8; 8 << 20];
+        for enc in [Encoding::Gzip, Encoding::Deflate, Encoding::Br] {
+            let small = encode(&zeros, enc);
+            assert!(small.len() < 64 << 10, "{enc:?} compresses 8 MiB of zeros to {} bytes", small.len());
+            let err = decode_limited(&small, enc, 1 << 20).unwrap_err();
+            assert!(err.is_too_large(), "{enc:?}: {err}");
+            assert_eq!(decode_limited(&small, enc, 8 << 20).unwrap().len(), 8 << 20, "{enc:?}: exactly the limit is fine");
+        }
+        assert!(decode_limited(b"abc", Encoding::Identity, 2).unwrap_err().is_too_large());
+        assert!(!decode_limited(b"not gzip", Encoding::Gzip, 100).unwrap_err().is_too_large());
+    }
+
+    #[test]
+    fn concatenated_gzip_members_are_one_body() {
+        let mut both = encode(b"hello ", Encoding::Gzip);
+        both.extend(encode(b"world", Encoding::Gzip));
+        assert_eq!(decode(&both, Encoding::Gzip).unwrap(), b"hello world");
     }
 }

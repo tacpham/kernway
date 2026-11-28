@@ -897,6 +897,7 @@ dependencies = [
  "rt-core",
  "rt-net",
  "rustls",
+ "serde_json",
 ]
 
 [[package]]

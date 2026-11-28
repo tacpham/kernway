@@ -17,10 +17,11 @@ hướng dẫn cuối trang.*
 | Refused with a clear error | Asking for it fails at once with an error that names it; nothing hangs or misbehaves. |
 | Built, not verified | The code exists, but the test setup has no server or platform to prove it against. |
 
-**53 gaps** across 10 drivers.
+**60 gaps** across 11 drivers.
 
 | Driver | Features | Gaps |
 |---|---:|---:|
+| [HTTP client](#http-client) | 34 | 7 |
 | [Kafka](#kafka) | 33 | 7 |
 | [MariaDB](#mariadb) | 45 | 1 |
 | [Meilisearch](#meilisearch) | 14 | 3 |
@@ -35,6 +36,21 @@ hướng dẫn cuối trang.*
 | [S3-compatible object storage](#s3) | 20 | 5 |
 | [SQLite](#sqlite) | 47 | — |
 | [Valkey](#valkey) | 37 | 1 |
+
+<a id="http-client"></a>
+## HTTP client
+
+Report: [`docs/acceptance/http-client.md`](acceptance/http-client.md) · catalog: `acceptance/http-client.features`
+
+| Area | Feature | Status | Why / what happens instead |
+|---|---|---|---|
+| URLs | Internationalized domain names (Unicode hosts) | Refused with a clear error | refused with a clear error; pass the xn-- (punycode) form |
+| Streaming | Streaming request bodies (upload without holding the body in memory); Expect: 100-continue | Not built | request bodies are buffered (a 1xx from the server is read past) |
+| Compression | zstd responses | Not built | not advertised in Accept-Encoding, so servers do not send it; an unrequested zstd body is handed over as sent |
+| Authentication | Digest, NTLM, Negotiate (Kerberos) | Not built | not implemented |
+| Connections | HTTP proxies (absolute-form requests, CONNECT tunnels, HTTP_PROXY / NO_PROXY) | Not built | not implemented — requests go straight to the origin |
+| Connections | HTTP/2 and HTTP/3 | Not built | HTTP/1.1 only (ALPN not offered) |
+| DNS | Windows: the system's DNS servers | Not built | resolv.conf only — on Windows the async resolver uses public resolvers, then getaddrinfo (on the blocking pool) answers |
 
 <a id="kafka"></a>
 ## Kafka
@@ -155,7 +171,7 @@ Report: [`docs/acceptance/s3.md`](acceptance/s3.md) · catalog: `acceptance/s3.f
 | Area | Feature | Status | Why / what happens instead |
 |---|---|---|---|
 | Addressing | Virtual-hosted requests against AWS itself | Built, not verified | built and unit-tested; no AWS account in the test setup |
-| Security | HTTPS with a private CA / self-signed certificate | Not built | kernway-http-client verifies against the public web roots only (no CA option) |
+| Security | HTTPS with a private CA / self-signed certificate | Not built | kernway-http-client takes one (HttpClient::trust_ca_pem); S3Config does not pass it through yet |
 | Security | Temporary credentials (session tokens) | Built, not verified | signed (x-amz-security-token), not verified against STS-issued credentials |
 | Objects | Batch delete (DeleteObjects), object tagging, versioning, object lock, server-side encryption headers, checksums (CRC32C / SHA256 trailers) | Not built | not implemented (delete_prefix deletes one by one) |
 | Objects | Streaming uploads / downloads without holding the object in memory | Not built | bodies are buffered (multipart splits large uploads) |

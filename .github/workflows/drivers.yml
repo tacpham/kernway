@@ -579,6 +579,36 @@ jobs:
           ! grep -q "skip:" s3.log
           grep -q "^test presigned_urls_work_without_credentials " s3.log
 
+  http-client:
+    name: http-client (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: HTTP servers (go-httpbin and Caddy, official releases)
+        shell: bash
+        run: crates/kernway-http-client/tests/support/httpbin-setup.sh "$RUNNER_TEMP/httpbin" >> "$GITHUB_ENV"
+
+      - name: HTTP client — all tests, live
+        shell: bash
+        run: cargo test -p kernway-http-client -p kernway-compress -p kernway-dns -- --test-threads=1 --nocapture 2>&1 | tee http-client.log
+
+      - name: Nothing was skipped
+        shell: bash
+        run: |
+          ! grep -q "skip:" http-client.log
+          grep -q "^test mutual_tls_presents_the_client_certificate " http-client.log
+          grep -q "^test a_keep_alive_the_server_closed_is_not_used_for_the_next_post " http-client.log
+          grep -q "^test every_resolved_address_is_tried " http-client.log
+
   # SQL Server runs on Linux in Docker (Microsoft ships no macOS build, and a
   # Windows runner has no TCP-enabled instance); the client code is the same
   # on every OS — it builds and its unit tests pass in the drivers job above.

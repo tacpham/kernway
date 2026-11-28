@@ -132,11 +132,21 @@ pub fn load_resolv_conf() -> ResolvConf {
         .unwrap_or_default()
 }
 
-/// Load `/etc/hosts`, returning an empty map on any error.
+/// Load the hosts file — `/etc/hosts`, or `%SystemRoot%\System32\drivers\etc\hosts`
+/// on Windows — returning an empty map on any error.
 pub fn load_hosts() -> HashMap<String, Vec<IpAddr>> {
-    std::fs::read_to_string("/etc/hosts")
+    std::fs::read_to_string(hosts_path())
         .map(|c| parse_hosts(&c))
         .unwrap_or_default()
+}
+
+fn hosts_path() -> std::path::PathBuf {
+    if cfg!(windows) {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        std::path::Path::new(&root).join("System32").join("drivers").join("etc").join("hosts")
+    } else {
+        "/etc/hosts".into()
+    }
 }
 
 #[cfg(test)]

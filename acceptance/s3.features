@@ -23,7 +23,7 @@ Presigned URLs | Presigned PUT and GET used without credentials (a browser uploa
 Errors | Typed errors: denied (403), not found (NoSuchBucket / NoSuchKey), service errors with S3's code, connection failures; error documents parsed | failures_are_typed_errors, client::tests::error_documents, xml::tests::elements_and_entities
 Addressing | Path-style (MinIO, R2, B2, versitygw) and virtual-hosted (AWS) URLs | client::tests::addressing_and_names
 Addressing | Virtual-hosted requests against AWS itself | GAP: built and unit-tested; no AWS account in the test setup
-Security | HTTPS with a private CA / self-signed certificate | GAP: kernway-http-client verifies against the public web roots only (no CA option)
+Security | HTTPS with a private CA / self-signed certificate | GAP: kernway-http-client takes one (HttpClient::trust_ca_pem); S3Config does not pass it through yet
 Security | Temporary credentials (session tokens) | GAP: signed (x-amz-security-token), not verified against STS-issued credentials
 Objects | Batch delete (DeleteObjects), object tagging, versioning, object lock, server-side encryption headers, checksums (CRC32C / SHA256 trailers) | GAP: not implemented (delete_prefix deletes one by one)
 Objects | Streaming uploads / downloads without holding the object in memory | GAP: bodies are buffered (multipart splits large uploads)

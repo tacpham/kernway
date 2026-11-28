@@ -98,6 +98,20 @@ impl AsyncTcpStream {
         }
     }
 
+    /// Read what has already arrived, without waiting: `Err` of kind
+    /// [`WouldBlock`](io::ErrorKind::WouldBlock) when nothing has. `Ok(0)` means
+    /// the peer closed its side. For checking an idle connection (a pooled
+    /// keep-alive the server may have closed) without parking on the reactor.
+    pub fn try_read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            match self.inner.read(buf) {
+                Err(e) if would_block(&e) => return Err(io::ErrorKind::WouldBlock.into()),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                other => return other,
+            }
+        }
+    }
+
     /// Read into `buf`, returning the number of bytes read. `Ok(0)` means the
     /// peer closed its side.
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {

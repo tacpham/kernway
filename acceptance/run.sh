@@ -17,13 +17,14 @@
 #   acceptance/run.sh rabbitmq (RabbitMQ 4.1 with TLS and EXTERNAL auth, in Docker)
 #   acceptance/run.sh meilisearch (the official Meilisearch binary, natively)
 #   acceptance/run.sh kafka    (Kafka 3.9 KRaft with SASL PLAIN / SCRAM and TLS, in Docker)
+#   acceptance/run.sh http-client (go-httpbin + Caddy, native; HTTPBIN_DOCKER=1 for Docker)
 #
 # Containers (created if missing; existing ones and their data are reused):
 #   kernway-mysql   mysql:8.0                  host port 3307, root password "secret"
 #   kernway-oracle  gvenzl/oracle-free:23-slim host ports 1521 / 2484 (TCPS)
 # Oracle TCPS needs a wallet once: crates/kernway-orm-oracle/tests/support/oracle-tcps-setup.sh
 set -euo pipefail
-DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb|mssql|nats|rabbitmq|meilisearch|kafka|mariadb|valkey|s3}"
+DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb|mssql|nats|rabbitmq|meilisearch|kafka|mariadb|valkey|s3|http-client}"
 # CI workflow whose jobs for this commit are the cross-OS evidence.
 WORKFLOW=drivers.yml; IMAGE=""; EXTRA=()
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -247,7 +248,16 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     VERSION="$KERNWAY_S3_SERVER"; IMAGE="official release binary (native)"; C="none (native versitygw process)"
     CRATE=kernway-s3; FEATURES=(); TITLE="S3-compatible object storage"; SKIP=()
     ;;
-  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql | nats | rabbitmq | meilisearch | kafka | mariadb | valkey | s3)" >&2; exit 2 ;;
+  http-client)
+    # go-httpbin (plain + TLS) and Caddy (mTLS, precompressed brotli), with a fresh test CA.
+    log "HTTP servers (go-httpbin, Caddy)"
+    "$ROOT/crates/kernway-http-client/tests/support/httpbin-setup.sh" "$ROOT/target/httpbin" > "$WORK/httpbin.env"
+    sed -i.bak 's/^\(KERNWAY_HTTPBIN_[A-Z_]*=\)\(.*\)$/\1"\2"/' "$WORK/httpbin.env"
+    set -a; . "$WORK/httpbin.env"; set +a
+    VERSION="$KERNWAY_HTTPBIN_SERVER"; IMAGE="official release binaries (or their Docker images)"; C="none (go-httpbin and Caddy processes)"
+    CRATE=kernway-http-client; FEATURES=(); TITLE="HTTP client"; SKIP=()
+    ;;
+  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql | nats | rabbitmq | meilisearch | kafka | mariadb | valkey | s3 | http-client)" >&2; exit 2 ;;
 esac
 
 CMD="cargo test -p $CRATE ${FEATURES[*]+${FEATURES[*]}} --lib --tests -- --test-threads=1 --nocapture ${EXTRA[*]+${EXTRA[*]}} ${SKIP[*]+${SKIP[*]}}"
