@@ -18,13 +18,14 @@
 #   acceptance/run.sh meilisearch (the official Meilisearch binary, natively)
 #   acceptance/run.sh kafka    (Kafka 3.9 KRaft with SASL PLAIN / SCRAM and TLS, in Docker)
 #   acceptance/run.sh http-client (go-httpbin + Caddy, native; HTTPBIN_DOCKER=1 for Docker)
+#   acceptance/run.sh ssh      (OpenSSH in Docker; SSH_NATIVE=1 for sshd as this user, key logins only)
 #
 # Containers (created if missing; existing ones and their data are reused):
 #   kernway-mysql   mysql:8.0                  host port 3307, root password "secret"
 #   kernway-oracle  gvenzl/oracle-free:23-slim host ports 1521 / 2484 (TCPS)
 # Oracle TCPS needs a wallet once: crates/kernway-orm-oracle/tests/support/oracle-tcps-setup.sh
 set -euo pipefail
-DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb|mssql|nats|rabbitmq|meilisearch|kafka|mariadb|valkey|s3|http-client}"
+DB="${1:?usage: $0 mysql|oracle|sqlite|redis|postgres|mongodb|mssql|nats|rabbitmq|meilisearch|kafka|mariadb|valkey|s3|http-client|ssh}"
 # CI workflow whose jobs for this commit are the cross-OS evidence.
 WORKFLOW=drivers.yml; IMAGE=""; EXTRA=()
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -262,7 +263,21 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     fi
     CRATE=kernway-http-client; FEATURES=(); TITLE="HTTP client"; SKIP=()
     ;;
-  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql | nats | rabbitmq | meilisearch | kafka | mariadb | valkey | s3 | http-client)" >&2; exit 2 ;;
+  ssh)
+    # OpenSSH with fresh keys: in Docker (password login too), or natively as this user.
+    log "OpenSSH server"
+    if [ -z "${SSH_NATIVE:-}" ]; then export SSH_DOCKER=1; fi
+    "$ROOT/crates/kernway-ssh/tests/support/ssh-setup.sh" "$ROOT/target/ssh" > "$WORK/ssh.env"
+    sed -i.bak 's/^\(KERNWAY_SSH_[A-Z_]*=\)\(.*\)$/\1"\2"/' "$WORK/ssh.env"
+    set -a; . "$WORK/ssh.env"; set +a
+    VERSION="$KERNWAY_SSH_SERVER"; CRATE=kernway-ssh; FEATURES=(); TITLE="SSH and SFTP client"; SKIP=()
+    if [ -n "${SSH_DOCKER:-}" ]; then
+      IMAGE="lscr.io/linuxserver/openssh-server"; C="servers in Docker: kernway-sshd"
+    else
+      IMAGE="the system's sshd (native)"; C="none (native sshd processes)"; SKIP=(--skip password_)
+    fi
+    ;;
+  *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql | nats | rabbitmq | meilisearch | kafka | mariadb | valkey | s3 | http-client | ssh)" >&2; exit 2 ;;
 esac
 
 CMD="cargo test -p $CRATE ${FEATURES[*]+${FEATURES[*]}} --lib --tests -- --test-threads=1 --nocapture ${EXTRA[*]+${EXTRA[*]}} ${SKIP[*]+${SKIP[*]}}"

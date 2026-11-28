@@ -894,6 +894,7 @@ dependencies = [
  "kernway-compress",
  "kernway-dns",
  "kernway-tls",
+ "kernway-wire",
  "rt-core",
  "rt-net",
  "rustls",
@@ -1231,6 +1232,16 @@ dependencies = [
  "kernway-cache-core",
  "kernway-core",
  "rt-core",
+]
+
+[[package]]
+name = "kernway-ssh"
+version = "0.1.0"
+dependencies = [
+ "kernway-wire",
+ "ring",
+ "rt-core",
+ "rt-net",
 ]
 
 [[package]]

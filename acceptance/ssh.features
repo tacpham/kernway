@@ -1,0 +1,55 @@
+# SSH and SFTP client feature catalog for the acceptance report.
+# area | feature | evidence
+# evidence = comma-separated test names (all must pass), or
+#            GAP: <why>  (not implemented / not verified — counted against completeness)
+#            N/A: <why>  (does not apply to an SSH client)
+#
+# Live tests run against OpenSSH, set up by
+# crates/kernway-ssh/tests/support/ssh-setup.sh: the linuxserver/openssh-server
+# image in Docker (password login included), or sshd natively as the current
+# user (public-key login only). A second sshd with RekeyLimit 64K proves rekeys
+# the server starts. The wire tests drive loopback servers that misbehave on
+# purpose, one of them running a real curve25519 key exchange.
+
+Transport | SSH 2 version exchange; banner lines before the version allowed; SSH 1 and non-SSH servers refused | ssh_1_is_refused_by_name, banner_lines_before_the_version_are_allowed, a_server_that_is_not_ssh_is_refused
+Transport | Key exchange: curve25519-sha256 (and @libssh.org), ecdh-sha2-nistp256, ecdh-sha2-nistp384 — each with each cipher against OpenSSH | every_key_exchange_and_cipher_works, transport::tests::keys_are_derived_and_extended, transport::tests::the_first_client_algorithm_the_server_knows_wins
+Transport | Ciphers: chacha20-poly1305@openssh.com, aes256-gcm@openssh.com, aes128-gcm@openssh.com; any changed byte of a packet refused | every_key_exchange_and_cipher_works, cipher::tests::packets_round_trip_and_tampering_is_caught, cipher::tests::the_gcm_counter_counts_per_packet
+Transport | Strict kex (the CVE-2023-48795 "Terrapin" fix): a message slipped in before KEXINIT is refused | strict_kex_refuses_a_message_slipped_in_before_kexinit
+Transport | Rekeying started by the client (after a byte limit) or by the server, mid-transfer, data intact | rekeying_started_by_either_side
+Transport | A guessed key-exchange packet the negotiation proves wrong is dropped (RFC 4253 §7) | transport::tests::a_wrong_guess_is_detected
+Transport | Choosing the algorithms offered (kex_algorithms, ciphers, host_key_algorithms); no common algorithm reported per kind with the server's list | every_key_exchange_and_cipher_works, each_kind_of_algorithm_must_be_agreed
+Transport | Post-quantum key exchange (mlkem768x25519-sha256, sntrup761x25519-sha512 — OpenSSH 10's default) | GAP: not implemented; OpenSSH still accepts curve25519-sha256
+Transport | diffie-hellman-group14/16/18 key exchange; aes-ctr / aes-cbc with HMAC; zlib compression | GAP: not implemented — servers that offer only these (old or embedded ones) are refused with NoCommonAlgorithm
+
+Host keys | Ed25519, ECDSA P-256, RSA (rsa-sha2-512, rsa-sha2-256) host keys verified against the key exchange | host_keys_are_checked_every_way, hostkey::tests::signatures_are_checked
+Host keys | A host key shown by someone who cannot sign with it (a man in the middle) refused | a_host_key_signature_that_does_not_cover_the_exchange_is_refused
+Host keys | known_hosts: plain, [host]:port, wildcards and negation, hashed (ssh-keygen -H) entries; @revoked keys refused; an unknown host refused naming its fingerprint; a changed key refused as a possible attack | host_keys_are_checked_every_way, hostkey::tests::known_hosts_lines_match_like_openssh
+Host keys | The host key types known_hosts lists are asked for first (a host known by its ECDSA key is not refused for offering Ed25519) | host_keys_are_checked_every_way
+Host keys | A pinned SHA256: fingerprint (as ssh-keygen -lf prints it) | host_keys_are_checked_every_way, hostkey::tests::keys_parse_print_and_fingerprint_like_openssh
+Host keys | Host certificates (@cert-authority) | GAP: not implemented — such lines are ignored, so certificate-only hosts are unknown
+Host keys | Adding an unknown host to known_hosts (trust on first use) | GAP: not implemented — connect with the fingerprint checked by other means, then add the line
+
+Authentication | Public key: Ed25519, ECDSA P-256 / P-384, RSA (rsa-sha2-512 / -256 per server-sig-algs) keys in OpenSSH format; RSA in PKCS#8 and PKCS#1 PEM | logs_in_with_every_key_type_and_format, keys::tests::big_mod_and_minus_one, keys::tests::a_generated_ed25519_key_signs_verifiably
+Authentication | Password (UTF-8), and keyboard-interactive answered with it; methods tried in order, a refused one passing to the next | password_logins_with_password_and_keyboard_interactive
+Authentication | Refusals say why: an unknown key, an unknown user and no method all report the methods the server still allows | refused_logins_say_why
+Authentication | Passphrase-protected private keys | GAP: refused with a clear error (bcrypt-pbkdf + aes256-ctr not implemented); remove the passphrase with ssh-keygen -p, or use password login
+Authentication | ssh-agent, FIDO (sk-) keys, user certificates, GSSAPI / Kerberos | GAP: not implemented
+
+Channels | exec: stdout, stderr, exit status, exit signal; stdin; output and input far larger than the channel window (flow control both ways); many commands on one connection | commands_return_output_status_and_signals
+Channels | Interactive shells with a pty, port forwarding (local, remote, dynamic), X11 / agent forwarding | GAP: not implemented (forwarding requests from the server are refused)
+
+SFTP | Version 3 with OpenSSH's extensions (posix-rename, statvfs, fsync, hardlink) | sftp_files_round_trip_byte_exact, sftp_directories_links_and_attributes
+SFTP | Whole-file read / write / append byte-exact, 0 bytes to 3.3 MB, sizes around the request size; many requests in flight; UTF-8 and spaces in names | sftp_files_round_trip_byte_exact
+SFTP | Directories: create (with parents), list with attributes and long names, remove (a non-empty one refused); canonical paths | sftp_directories_links_and_attributes
+SFTP | Rename over an existing file (POSIX), symbolic and hard links, read_link, lstat vs stat | sftp_directories_links_and_attributes
+SFTP | Attributes: permissions, access / modification times, truncation; file system space | sftp_directories_links_and_attributes
+SFTP | Open handles: random-access reads and writes, holes, read past the end, fstat, fsync, create_new on an existing file refused | sftp_handles_give_random_access
+SFTP | Typed errors (not found, permission denied, failure) that leave the session usable; SFTP and exec on one connection | sftp_errors_are_typed, sftp_directories_links_and_attributes
+SFTP | 4 MB over SFTP across server-started rekeys | rekeying_started_by_either_side
+SFTP | SFTP versions 4–6, the copy-data / limits / users-groups extensions, transfers streamed to local files | GAP: not implemented (whole-file transfers are buffered; open handles stream in pieces)
+
+Reliability | Connection failures fail cleanly: nothing listening, a server that never speaks, one that hangs up mid-handshake; the connect timeout covers TCP, key exchange and login | connections_that_go_wrong_fail_cleanly, a_server_hanging_up_mid_handshake_is_an_error_not_a_hang, a_silent_server_hits_the_connect_timeout
+Reliability | Fully async on kernway's reactor: no blocking call on a shard (source scan); known_hosts and keys read on the blocking pool | no_blocking_call_runs_on_the_reactor
+Reliability | Linux and macOS against a real OpenSSH (CI on each) | ci::ssh_ubuntu_latest, ci::ssh_macos_latest
+Reliability | Windows (CI builds it and runs the unit and wire tests, the curve25519 key exchange included) | ci::ssh_windows_latest
+Reliability | Windows against a live SSH server | GAP: the Windows CI runner has no POSIX SSH server; the client's live suite there is not run

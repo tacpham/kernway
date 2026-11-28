@@ -1,0 +1,24 @@
+[package]
+name        = "kernway-ssh"
+description = "A self-written async SSH 2 client and SFTP client for Kernway: curve25519 / P-256 key exchange, chacha20-poly1305 and AES-GCM, Ed25519 / ECDSA / RSA keys, known_hosts, password / public-key / keyboard-interactive auth, exec and SFTP v3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The per-core async socket, the blocking pool (DNS, key files) and the
+# shared connect helpers (every resolved address, file reads off the shard).
+rt-net       = { workspace = true }
+rt-core      = { workspace = true }
+kernway-wire = { workspace = true }
+# The cryptographic primitives only — X25519 / P-256, AEAD, signatures,
+# digests, HMAC, the system RNG. The SSH protocol on top of them is ours.
+ring         = "0.17"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+rt-core      = { workspace = true }
+ring         = "0.17"
+kernway-wire = { workspace = true }

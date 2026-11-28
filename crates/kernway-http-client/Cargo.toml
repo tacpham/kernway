@@ -20,6 +20,8 @@ kernway-compress = { workspace = true }
 # Pure-async DNS (no getaddrinfo thread). getaddrinfo stays as a last-resort
 # fallback behind the `getaddrinfo-fallback` feature (default on).
 kernway-dns = { workspace = true }
+# Shared wire helpers (base64).
+kernway-wire = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

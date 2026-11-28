@@ -609,6 +609,56 @@ jobs:
           grep -q "^test a_keep_alive_the_server_closed_is_not_used_for_the_next_post " http-client.log
           grep -q "^test every_resolved_address_is_tried " http-client.log
 
+  # SSH: OpenSSH in Docker on Linux (password login too), the system sshd run as
+  # the runner user on macOS (key logins only). The Windows runner has no POSIX
+  # SSH server: there the client builds and runs its unit and wire tests (loopback
+  # servers, a real curve25519 key exchange among them).
+  ssh:
+    name: ssh (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: OpenSSH server
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then export SSH_DOCKER=1; fi
+          crates/kernway-ssh/tests/support/ssh-setup.sh "$RUNNER_TEMP/ssh" >> "$GITHUB_ENV"
+
+      - name: SSH client — all tests, live
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          SKIP=""
+          if [ "$RUNNER_OS" != Linux ]; then SKIP="--skip password_"; fi
+          cargo test -p kernway-ssh -p kernway-wire -- --test-threads=1 --nocapture $SKIP 2>&1 | tee ssh.log
+
+      - name: SSH client — unit and wire tests (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cargo test -p kernway-ssh --lib --test wire --test no_blocking -- --test-threads=1 --nocapture 2>&1 | tee ssh.log
+
+      - name: Nothing was skipped
+        shell: bash
+        run: |
+          ! grep -q "skip:" ssh.log
+          grep -q "^test a_host_key_signature_that_does_not_cover_the_exchange_is_refused " ssh.log
+          grep -q "^test strict_kex_refuses_a_message_slipped_in_before_kexinit " ssh.log
+          if [ "$RUNNER_OS" != Windows ]; then
+            grep -q "^test sftp_files_round_trip_byte_exact " ssh.log
+            grep -q "^test rekeying_started_by_either_side " ssh.log
+          fi
+          if [ "$RUNNER_OS" = Linux ]; then grep -q "^test password_logins_with_password_and_keyboard_interactive " ssh.log; fi
+
   # SQL Server runs on Linux in Docker (Microsoft ships no macOS build, and a
   # Windows runner has no TCP-enabled instance); the client code is the same
   # on every OS — it builds and its unit tests pass in the drivers job above.
