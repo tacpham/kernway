@@ -48,6 +48,9 @@ pub enum Auth {
     /// `keyboard-interactive` with these answers, one per prompt in order (a
     /// one-time code after the password, for example).
     KeyboardInteractive(Vec<String>),
+    /// Every key an ssh-agent holds, tried in the agent's order; the agent signs,
+    /// so the private keys never leave it.
+    Agent(crate::agent::Agent),
 }
 
 impl std::fmt::Debug for Auth {
@@ -56,6 +59,7 @@ impl std::fmt::Debug for Auth {
             Auth::Password(_) => f.write_str("Password(…)"),
             Auth::Key(k) => write!(f, "Key({k:?})"),
             Auth::KeyboardInteractive(a) => write!(f, "KeyboardInteractive({} answers)", a.len()),
+            Auth::Agent(a) => write!(f, "Agent({a:?})"),
         }
     }
 }
@@ -181,26 +185,26 @@ impl ExecOutput {
 }
 
 #[derive(Default)]
-struct Channel {
-    remote: u32,
-    open: Option<Result<(), String>>,
-    remote_window: u32,
-    remote_max: u32,
+pub(crate) struct Channel {
+    pub(crate) remote: u32,
+    pub(crate) open: Option<Result<(), String>>,
+    pub(crate) remote_window: u32,
+    pub(crate) remote_max: u32,
     /// What we still allow the server to send before adjusting.
-    local_window: u32,
-    data: VecDeque<u8>,
-    stderr: Vec<u8>,
-    eof: bool,
-    closed: bool,
-    close_sent: bool,
-    replies: VecDeque<bool>,
-    exit_status: Option<u32>,
-    exit_signal: Option<String>,
+    pub(crate) local_window: u32,
+    pub(crate) data: VecDeque<u8>,
+    pub(crate) stderr: Vec<u8>,
+    pub(crate) eof: bool,
+    pub(crate) closed: bool,
+    pub(crate) close_sent: bool,
+    pub(crate) replies: VecDeque<bool>,
+    pub(crate) exit_status: Option<u32>,
+    pub(crate) exit_signal: Option<String>,
 }
 
 /// An authenticated SSH connection.
 pub struct SshClient {
-    t: Transport,
+    pub(crate) t: Transport,
     channels: HashMap<u32, Channel>,
     next_id: u32,
     banner: Option<String>,
@@ -298,6 +302,7 @@ impl SshClient {
                     }
                     r
                 }
+                Auth::Agent(agent) if allowed.iter().any(|m| m == "publickey") => self.auth_agent(user, agent).await?,
                 Auth::KeyboardInteractive(answers) if allowed.iter().any(|m| m == "keyboard-interactive") => {
                     self.auth_keyboard(user, &mut answers.clone().into_iter()).await?
                 }
@@ -357,6 +362,26 @@ impl SshClient {
         .await
     }
 
+    async fn auth_agent(&mut self, user: &str, agent: &crate::agent::Agent) -> Result<Result<(), Vec<String>>, SshError> {
+        let mut last = Err(vec!["publickey".to_owned()]);
+        for (key, _comment) in agent.identities().await? {
+            let alg = crate::keys::choose_algorithm(&key, self.t.server_sig_algs.as_deref());
+            let blob = key.to_blob();
+            let mut data = Writer::new();
+            data.string(self.t.session_id()).u8(MSG_USERAUTH_REQUEST).string(user).string("ssh-connection").string("publickey").bool(true).string(alg).string(&blob);
+            let sig = agent.sign(&key, alg, &data.into_inner()).await?;
+            last = self
+                .auth_request(user, "publickey", |w| {
+                    w.bool(true).string(alg).string(&blob).string(&sig);
+                })
+                .await?;
+            if last.is_ok() {
+                break;
+            }
+        }
+        Ok(last)
+    }
+
     async fn auth_keyboard(&mut self, user: &str, answers: &mut dyn Iterator<Item = String>) -> Result<Result<(), Vec<String>>, SshError> {
         let mut w = Writer::msg(MSG_USERAUTH_REQUEST);
         w.string(user).string("ssh-connection").string("keyboard-interactive").string("").string("");
@@ -389,6 +414,19 @@ impl SshClient {
     /// Read one message and apply it to the channels.
     async fn pump(&mut self) -> Result<(), SshError> {
         let p = self.t.recv().await?;
+        self.dispatch(p).await
+    }
+
+    /// Apply one connection-layer message to the channels.
+    pub(crate) async fn dispatch(&mut self, p: Vec<u8>) -> Result<(), SshError> {
+        // A late message for a channel already closed and forgotten (a window
+        // adjust that crossed our close) is dropped, not an error.
+        if (MSG_CHANNEL_OPEN_CONFIRMATION..=MSG_CHANNEL_FAILURE).contains(&p[0]) {
+            let id = Reader::new(&p[1..]).u32()?;
+            if !self.channels.contains_key(&id) {
+                return Ok(());
+            }
+        }
         let mut r = Reader::new(&p[1..]);
         match p[0] {
             MSG_GLOBAL_REQUEST => {
@@ -483,7 +521,27 @@ impl SshClient {
         Ok(())
     }
 
-    fn chan(&mut self, id: u32) -> Result<&mut Channel, SshError> {
+    /// A channel request that wants no reply (window-change, signal).
+    pub(crate) async fn request_no_reply(&mut self, id: u32, name: &str, fields: impl FnOnce(&mut Writer)) -> Result<(), SshError> {
+        let remote = self.chan(id)?.remote;
+        let mut w = Writer::msg(MSG_CHANNEL_REQUEST);
+        w.u32(remote).string(name).bool(false);
+        fields(&mut w);
+        self.t.send(&w.into_inner()).await
+    }
+
+    /// What a channel has received and not yet been taken: (stdout, stderr), and
+    /// whether the server closed it — then with its exit status and signal.
+    pub(crate) async fn take_output(&mut self, id: u32) -> Result<(Vec<u8>, Vec<u8>, Option<(Option<u32>, Option<String>)>), SshError> {
+        let c = self.chan(id)?;
+        let out: Vec<u8> = c.data.drain(..).collect();
+        let err = std::mem::take(&mut c.stderr);
+        let ended = c.closed.then(|| (c.exit_status, c.exit_signal.clone()));
+        self.replenish(id).await?;
+        Ok((out, err, ended))
+    }
+
+    pub(crate) fn chan(&mut self, id: u32) -> Result<&mut Channel, SshError> {
         self.channels.get_mut(&id).ok_or_else(|| SshError::Protocol(format!("a message for unknown channel {id}")))
     }
 
@@ -597,6 +655,14 @@ impl SshClient {
         let mut w = Writer::msg(MSG_CHANNEL_EOF);
         w.u32(remote);
         self.t.send(&w.into_inner()).await
+    }
+
+    /// Wait until the server has closed a channel (its exit status arrives first).
+    pub(crate) async fn wait_closed(&mut self, id: u32) -> Result<(), SshError> {
+        while !self.chan(id)?.closed {
+            self.pump().await?;
+        }
+        Ok(())
     }
 
     /// Close a channel and wait for the server's close.

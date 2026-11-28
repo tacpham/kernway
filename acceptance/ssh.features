@@ -32,11 +32,22 @@ Host keys | Adding an unknown host to known_hosts (trust on first use) | GAP: no
 Authentication | Public key: Ed25519, ECDSA P-256 / P-384, RSA (rsa-sha2-512 / -256 per server-sig-algs) keys in OpenSSH format; RSA in PKCS#8 and PKCS#1 PEM | logs_in_with_every_key_type_and_format, keys::tests::big_mod_and_minus_one, keys::tests::a_generated_ed25519_key_signs_verifiably
 Authentication | Password (UTF-8), and keyboard-interactive answered with it; methods tried in order, a refused one passing to the next | password_logins_with_password_and_keyboard_interactive
 Authentication | Refusals say why: an unknown key, an unknown user and no method all report the methods the server still allows | refused_logins_say_why
-Authentication | Passphrase-protected private keys | GAP: refused with a clear error (bcrypt-pbkdf + aes256-ctr not implemented); remove the passphrase with ssh-keygen -p, or use password login
-Authentication | ssh-agent, FIDO (sk-) keys, user certificates, GSSAPI / Kerberos | GAP: not implemented
+Authentication | Passphrase-protected OpenSSH keys as ssh-keygen writes them (bcrypt_pbkdf with aes256-ctr, and aes256-gcm@openssh.com) — Ed25519, ECDSA, RSA, UTF-8 passphrases; a wrong or missing passphrase reported as such | passphrase_protected_keys_log_in, kdf::tests::aes_matches_fips_197, kdf::tests::ctr_matches_sp_800_38a, kdf::tests::bcrypt_pbkdf_is_deterministic_and_spreads_bytes
+Authentication | Several keys tried in turn: one the server refuses passes to the next | keys_from_an_agent_and_several_keys_in_turn_log_in
+Authentication | ssh-agent (SSH_AUTH_SOCK): its keys listed and used, the agent signing — the private key never in this process | keys_from_an_agent_and_several_keys_in_turn_log_in
+Authentication | The Windows OpenSSH agent (named pipe \\.\pipe\openssh-ssh-agent) | GAP: built (the pipe client compiles and runs on the Windows CI), not verified against a running agent
+Authentication | Encrypted PKCS#8 and legacy encrypted PEM keys | GAP: refused with a clear error — convert with ssh-keygen -p (OpenSSH format)
+Authentication | FIDO (sk-) keys, user certificates, GSSAPI / Kerberos, agent forwarding | GAP: not implemented
 
 Channels | exec: stdout, stderr, exit status, exit signal; stdin; output and input far larger than the channel window (flow control both ways); many commands on one connection | commands_return_output_status_and_signals
-Channels | Interactive shells with a pty, port forwarding (local, remote, dynamic), X11 / agent forwarding | GAP: not implemented (forwarding requests from the server are refused)
+Channels | Interactive console: a login shell on a pseudo-terminal (TERM, size), full duplex — keystrokes in while output streams out; window resize; Ctrl-C; UTF-8; the exit status at the end | a_console_is_a_real_terminal_that_resizes_and_takes_ctrl_c
+Channels | A command as a console: output as it is written, stdin streamed in (3 MB byte-exact), stdout / stderr apart without a terminal, signals (TERM) | a_command_console_streams_output_takes_input_and_signals
+Channels | Several consoles and SFTP over one connection (one login) | GAP: a console takes over its connection — open one connection per console / SFTP session
+Channels | Port forwarding (local, remote, dynamic), X11 forwarding | GAP: not implemented (forwarding requests from the server are refused)
+
+SCP | Upload and download (scp -t / -f): bytes exact from 0 to 1.5 MB, mode and modification / access times kept, names with spaces and quotes, into an existing directory | scp_copies_files_with_their_mode_and_times
+SCP | Directory trees both ways (-r): nested and empty directories, UTF-8 names, modes and times | scp_copies_directory_trees_both_ways
+SCP | Errors carry the remote scp's message (no such file, not a regular file, permission denied); a hostile server's ../ or / names refused | scp_copies_files_with_their_mode_and_times, scp::tests::records_parse_and_hostile_names_are_refused
 
 SFTP | Version 3 with OpenSSH's extensions (posix-rename, statvfs, fsync, hardlink) | sftp_files_round_trip_byte_exact, sftp_directories_links_and_attributes
 SFTP | Whole-file read / write / append byte-exact, 0 bytes to 3.3 MB, sizes around the request size; many requests in flight; UTF-8 and spaces in names | sftp_files_round_trip_byte_exact

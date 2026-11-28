@@ -36,14 +36,39 @@ fn key_err(m: impl Into<String>) -> SshError {
 
 impl PrivateKey {
     /// Read a private key file's contents: OpenSSH format, `BEGIN RSA PRIVATE KEY`
-    /// (PKCS#1) or `BEGIN PRIVATE KEY` (PKCS#8). Passphrase-protected keys are refused
-    /// with an error saying so (decrypt them with `ssh-keygen -p -N ''`, or keep them
-    /// in an agent).
+    /// (PKCS#1) or `BEGIN PRIVATE KEY` (PKCS#8). A passphrase-protected key needs
+    /// [`from_pem_with_passphrase`](Self::from_pem_with_passphrase).
     pub fn from_pem(text: &[u8]) -> Result<Self, SshError> {
+        Self::from_pem_inner(text, None)
+    }
+
+    /// [`from_pem`](Self::from_pem) for a key protected by `passphrase` (OpenSSH
+    /// format, as `ssh-keygen` writes it: bcrypt_pbkdf with aes256-ctr, aes128/192-ctr
+    /// or aes256-gcm@openssh.com). A wrong passphrase is a [`SshError::Key`] saying so.
+    /// An unprotected key loads as well, ignoring the passphrase.
+    pub fn from_pem_with_passphrase(text: &[u8], passphrase: &str) -> Result<Self, SshError> {
+        Self::from_pem_inner(text, Some(passphrase.as_bytes()))
+    }
+
+    /// Whether this key file is passphrase-protected (so a UI knows to ask).
+    #[must_use]
+    pub fn is_encrypted(text: &[u8]) -> bool {
+        let Ok(text) = std::str::from_utf8(text) else { return false };
+        match pem_body(text) {
+            Ok((label, body)) if label == "OPENSSH PRIVATE KEY" => body
+                .strip_prefix(b"openssh-key-v1\0")
+                .and_then(|b| Reader::new(b).string().ok().map(|c| c != b"none"))
+                .unwrap_or(false),
+            Ok((label, _)) => label == "ENCRYPTED PRIVATE KEY",
+            Err(e) => e.to_string().contains("passphrase"),
+        }
+    }
+
+    fn from_pem_inner(text: &[u8], passphrase: Option<&[u8]>) -> Result<Self, SshError> {
         let text = std::str::from_utf8(text).map_err(|_| key_err("the key file is not text (PEM)"))?;
         let (label, body) = pem_body(text)?;
         match label.as_str() {
-            "OPENSSH PRIVATE KEY" => Self::from_openssh_blob(&body),
+            "OPENSSH PRIVATE KEY" => Self::from_openssh_blob(&body, passphrase),
             "RSA PRIVATE KEY" => {
                 let pair = RsaKeyPair::from_der(&body).map_err(|e| key_err(format!("PKCS#1 RSA key: {e}")))?;
                 Ok(Self::from_rsa(pair))
@@ -84,25 +109,27 @@ impl PrivateKey {
     }
 
     /// `openssh-key-v1` (PROTOCOL.key in OpenSSH).
-    fn from_openssh_blob(b: &[u8]) -> Result<Self, SshError> {
+    fn from_openssh_blob(b: &[u8], passphrase: Option<&[u8]>) -> Result<Self, SshError> {
         let body = b.strip_prefix(b"openssh-key-v1\0").ok_or_else(|| key_err("not an openssh-key-v1 file"))?;
         let mut r = Reader::new(body);
-        let cipher = r.string()?;
-        let _kdf = r.string()?;
-        let _kdf_options = r.string()?;
-        if cipher != b"none" {
-            return Err(key_err(format!(
-                "the key is passphrase-protected ({}); passphrase-protected keys are not supported — remove the passphrase with `ssh-keygen -p -N ''` or use password authentication",
-                String::from_utf8_lossy(cipher)
-            )));
-        }
+        let cipher = r.string()?.to_vec();
+        let kdf = r.string()?.to_vec();
+        let kdf_options = r.string()?.to_vec();
         if r.u32()? != 1 {
             return Err(key_err("a key file with more than one key"));
         }
         let public_blob = r.string()?;
-        let mut p = Reader::new(r.string()?);
+        let mut private = r.string()?.to_vec();
+        let tag = r.bytes(if cipher == b"aes256-gcm@openssh.com" { 16 } else { 0 })?.to_vec();
+        if cipher != b"none" {
+            let Some(pass) = passphrase else {
+                return Err(key_err("the key is passphrase-protected: load it with from_pem_with_passphrase"));
+            };
+            decrypt_private(&cipher, &kdf, &kdf_options, pass, &mut private, &tag)?;
+        }
+        let mut p = Reader::new(&private);
         if p.u32()? != p.u32()? {
-            return Err(key_err("the key's check numbers differ (a corrupt file)"));
+            return Err(key_err(if cipher == b"none" { "the key's check numbers differ (a corrupt file)" } else { "wrong passphrase" }));
         }
         let kind = p.string()?;
         let key = match kind {
@@ -160,12 +187,7 @@ impl PrivateKey {
     /// The signature algorithm to use, given what the server said it accepts
     /// (`server-sig-algs`; `None` when it did not say).
     pub(crate) fn algorithm(&self, server_sig_algs: Option<&[String]>) -> &'static str {
-        let ours = self.public.algorithms();
-        match server_sig_algs {
-            Some(theirs) => ours.iter().copied().find(|a| theirs.iter().any(|t| t == a)).unwrap_or(ours[0]),
-            None if matches!(self.public, PublicKey::Rsa { .. }) => "rsa-sha2-256",
-            None => ours[0],
-        }
+        choose_algorithm(&self.public, server_sig_algs)
     }
 
     /// Sign `data` with `alg`, in the wire form (`string alg, string signature`).
@@ -191,6 +213,52 @@ impl PrivateKey {
         w.string(alg).string(raw);
         Ok(w.into_inner())
     }
+}
+
+/// The signature algorithm for `key`, given what the server said it accepts
+/// (`server-sig-algs`; `None` when it did not say).
+pub(crate) fn choose_algorithm(key: &PublicKey, server_sig_algs: Option<&[String]>) -> &'static str {
+    let ours = key.algorithms();
+    match server_sig_algs {
+        Some(theirs) => ours.iter().copied().find(|a| theirs.iter().any(|t| t == a)).unwrap_or(ours[0]),
+        None if matches!(key, PublicKey::Rsa { .. }) => "rsa-sha2-256",
+        None => ours[0],
+    }
+}
+
+/// Decrypt an `openssh-key-v1` private section in place (PROTOCOL.key): the key and
+/// IV come from bcrypt_pbkdf over the passphrase with the file's salt and rounds.
+fn decrypt_private(cipher: &[u8], kdf: &[u8], options: &[u8], pass: &[u8], data: &mut Vec<u8>, tag: &[u8]) -> Result<(), SshError> {
+    if kdf != b"bcrypt" {
+        return Err(key_err(format!("unsupported key derivation {}", String::from_utf8_lossy(kdf))));
+    }
+    let mut o = Reader::new(options);
+    let salt = o.string()?.to_vec();
+    let rounds = o.u32()?;
+    if rounds == 0 || rounds > 1 << 20 {
+        return Err(key_err(format!("an implausible bcrypt round count {rounds}")));
+    }
+    let (key_len, iv_len) = match cipher {
+        b"aes128-ctr" => (16, 16),
+        b"aes192-ctr" => (24, 16),
+        b"aes256-ctr" => (32, 16),
+        b"aes256-gcm@openssh.com" => (32, 12),
+        other => return Err(key_err(format!("unsupported key cipher {} (re-encrypt it with ssh-keygen -p)", String::from_utf8_lossy(other)))),
+    };
+    let mut material = vec![0u8; key_len + iv_len];
+    crate::kdf::bcrypt_pbkdf(pass, &salt, rounds, &mut material);
+    let (key, iv) = material.split_at(key_len);
+    if iv_len == 16 {
+        crate::kdf::Aes::new(key).ctr(iv.try_into().expect("16 bytes"), data);
+        return Ok(());
+    }
+    // AES-256-GCM: the tag follows the encrypted section; no associated data.
+    let k = ring::aead::LessSafeKey::new(ring::aead::UnboundKey::new(&ring::aead::AES_256_GCM, key).expect("32 bytes"));
+    let nonce = ring::aead::Nonce::assume_unique_for_key(iv.try_into().expect("12 bytes"));
+    data.extend_from_slice(tag);
+    let plain_len = k.open_in_place(nonce, ring::aead::Aad::empty(), data).map_err(|_| key_err("wrong passphrase"))?.len();
+    data.truncate(plain_len);
+    Ok(())
 }
 
 /// The label and the decoded body of the first PEM block.
@@ -294,6 +362,7 @@ mod tests {
         assert!(PrivateKey::from_pem(b"hello").unwrap_err().to_string().contains("BEGIN"));
         let encrypted_pkcs1 = b"-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,00\n\nAAAA\n-----END RSA PRIVATE KEY-----\n";
         assert!(PrivateKey::from_pem(encrypted_pkcs1).unwrap_err().to_string().contains("passphrase"));
+        assert!(PrivateKey::is_encrypted(encrypted_pkcs1));
     }
 
     #[test]

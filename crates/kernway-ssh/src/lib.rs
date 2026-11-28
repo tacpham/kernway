@@ -11,9 +11,12 @@
 //!   host keys checked against an OpenSSH `known_hosts` file (plain, `[host]:port` and
 //!   hashed entries, `@revoked`) or a pinned `SHA256:` fingerprint;
 //! - user authentication (RFC 4252 / 4256): password, public key (Ed25519, ECDSA, RSA
-//!   keys in OpenSSH or PEM form), keyboard-interactive;
-//! - connection (RFC 4254): session channels with flow control, `exec`;
-//! - SFTP version 3 (the protocol OpenSSH speaks), with pipelined reads and writes.
+//!   keys in OpenSSH or PEM form, passphrase-protected ones too), an ssh-agent,
+//!   keyboard-interactive;
+//! - connection (RFC 4254): session channels with flow control, `exec`, and
+//!   interactive [`Console`]s on a pseudo-terminal (resize, signals, full duplex);
+//! - SFTP version 3 (the protocol OpenSSH speaks), with pipelined reads and writes;
+//! - SCP (`scp -t` / `scp -f`): files and directory trees with modes and times.
 //!
 //! ```rust,ignore
 //! let key = PrivateKey::from_pem(&key_file_bytes)?;
@@ -27,17 +30,24 @@
 
 #![forbid(unsafe_code)]
 
+mod agent;
 mod cipher;
 mod client;
+mod console;
 mod hostkey;
+mod kdf;
 mod keys;
+mod scp;
 mod sftp;
 mod transport;
 mod wire;
 
 pub use hostkey::{Curve, HostKeyPolicy, PublicKey};
+pub use agent::Agent;
 pub use client::{Auth, ExecOutput, SshClient, SshConfig};
+pub use console::{Console, ConsoleEvent, PtyConfig};
 pub use keys::PrivateKey;
+pub use scp::ScpFile;
 pub use sftp::{DirEntry, File, FsStats, Metadata, OpenOptions, Sftp};
 pub use transport::Negotiated;
 use std::fmt;

@@ -1,4 +1,4 @@
-//! The SSH and SFTP clients are fully async on kernway's reactor: no blocking system call
+//! The SSH, SFTP and SCP clients are fully async on kernway's reactor: no blocking system call
 //! may run on a shard. This scans the driver's source for the blocking APIs —
 //! DNS lookups, file reads, `std` sockets, sleeps — and fails on any use that
 //! is not inside a `spawn_blocking` closure (the blocking pool).
@@ -34,12 +34,22 @@ fn no_blocking_call_runs_on_the_reactor() {
         // Unit tests may block: they are not driver code.
         let code = text.split("#[cfg(test)]\nmod tests").next().unwrap_or(&text);
         let lines: Vec<&str> = code.lines().collect();
+        // A top-level `fn …_blocking(` may block: its body is skipped, and each call
+        // to it must sit inside a `spawn_blocking(` like any blocking API.
+        let mut in_blocking_fn = false;
         for (i, line) in lines.iter().enumerate() {
             let trimmed = line.trim_start();
             if trimmed.starts_with("//") {
                 continue;
             }
-            for api in BLOCKING {
+            if !line.starts_with(' ') && !line.starts_with('}') && !line.is_empty() && !line.starts_with('#') {
+                in_blocking_fn = (line.starts_with("fn ") || line.starts_with("pub(crate) fn ")) && line.contains("_blocking(");
+            }
+            if in_blocking_fn {
+                continue;
+            }
+            let calls_blocking_fn = line.contains("_blocking(") && !line.contains("spawn_blocking(");
+            for api in BLOCKING.iter().copied().chain(calls_blocking_fn.then_some("_blocking(")) {
                 if line.contains(api) {
                     let from = i.saturating_sub(WINDOW);
                     if !lines[from..=i].iter().any(|l| l.contains("spawn_blocking(")) {

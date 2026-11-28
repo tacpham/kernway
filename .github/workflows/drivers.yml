@@ -656,6 +656,11 @@ jobs:
           if [ "$RUNNER_OS" != Windows ]; then
             grep -q "^test sftp_files_round_trip_byte_exact " ssh.log
             grep -q "^test rekeying_started_by_either_side " ssh.log
+            for t in passphrase_protected_keys_log_in keys_from_an_agent_and_several_keys_in_turn_log_in \
+                     a_console_is_a_real_terminal_that_resizes_and_takes_ctrl_c a_command_console_streams_output_takes_input_and_signals \
+                     scp_copies_files_with_their_mode_and_times scp_copies_directory_trees_both_ways; do
+              grep -q "^test $t " ssh.log
+            done
           fi
           if [ "$RUNNER_OS" = Linux ]; then grep -q "^test password_logins_with_password_and_keyboard_interactive " ssh.log; fi
 

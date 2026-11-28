@@ -22,6 +22,8 @@
 //! All of it is single-shard, like the rest of the thread-per-core stack.
 
 pub mod base64;
+#[cfg(feature = "blowfish")]
+pub mod blowfish;
 pub mod offload;
 #[cfg(feature = "scram")]
 pub mod saslprep;

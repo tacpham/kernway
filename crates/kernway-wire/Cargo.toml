@@ -17,6 +17,8 @@ sha2 = { version = "0.11", optional = true }
 
 [features]
 default = []
+# Blowfish / EksBlowfish (bcrypt, bcrypt_pbkdf).
+blowfish = []
 # The shared SCRAM-SHA-1 / SCRAM-SHA-256 client (PostgreSQL, MongoDB).
 scram = ["sha1", "sha2"]
 

@@ -18,6 +18,9 @@ kernway-log  = { workspace = true } # store-error warnings on the auth path
 # OS RNG, small and audited — the responsible dependency, like mio for I/O.
 getrandom = "0.2"
 
+# The shared Blowfish under bcrypt (feature = "bcrypt").
+kernway-wire = { workspace = true, optional = true, features = ["blowfish"] }
+
 # The Redis-backed SessionStore (feature = "redis"). Off by default — the
 # in-memory store needs nothing, and this pulls in the async RESP client.
 kernway-redis = { workspace = true, optional = true }
@@ -52,7 +55,7 @@ jwt = ["dep:serde", "dep:serde_json"]
 # BCrypt verify/generate ($2a/$2b/$2y), byte-compatible with jBCrypt / Spring
 # BCryptPasswordEncoder — for interop with an existing bcrypt user store. No new
 # deps (uses the getrandom already pulled in for CSRF).
-bcrypt = []
+bcrypt = ["dep:kernway-wire"]
 # RS256 verification against a JWKS — accept tokens from an external issuer
 # (Auth0/Keycloak/Google) using their published public keys. Adds ring (RSA verify).
 jwks = ["jwt", "dep:ring"]

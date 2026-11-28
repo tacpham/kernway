@@ -17,7 +17,7 @@ hướng dẫn cuối trang.*
 | Refused with a clear error | Asking for it fails at once with an error that names it; nothing hangs or misbehaves. |
 | Built, not verified | The code exists, but the test setup has no server or platform to prove it against. |
 
-**72 gaps** across 13 drivers.
+**74 gaps** across 13 drivers.
 
 | Driver | Features | Gaps |
 |---|---:|---:|
@@ -36,7 +36,7 @@ hướng dẫn cuối trang.*
 | [S3-compatible object storage](#s3) | 20 | 5 |
 | [Web security](#security) | 32 | 3 |
 | [SQLite](#sqlite) | 47 | — |
-| [SSH and SFTP client](#ssh) | 37 | 9 |
+| [SSH and SFTP client](#ssh) | 47 | 11 |
 | [Valkey](#valkey) | 37 | 1 |
 
 <a id="http-client"></a>
@@ -200,9 +200,11 @@ Report: [`docs/acceptance/ssh.md`](acceptance/ssh.md) · catalog: `acceptance/ss
 | Transport | diffie-hellman-group14/16/18 key exchange; aes-ctr / aes-cbc with HMAC; zlib compression | Not built | not implemented — servers that offer only these (old or embedded ones) are refused with NoCommonAlgorithm |
 | Host keys | Host certificates (@cert-authority) | Not built | not implemented — such lines are ignored, so certificate-only hosts are unknown |
 | Host keys | Adding an unknown host to known_hosts (trust on first use) | Not built | not implemented — connect with the fingerprint checked by other means, then add the line |
-| Authentication | Passphrase-protected private keys | Refused with a clear error | refused with a clear error (bcrypt-pbkdf + aes256-ctr not implemented); remove the passphrase with ssh-keygen -p, or use password login |
-| Authentication | ssh-agent, FIDO (sk-) keys, user certificates, GSSAPI / Kerberos | Not built | not implemented |
-| Channels | Interactive shells with a pty, port forwarding (local, remote, dynamic), X11 / agent forwarding | Not built | not implemented (forwarding requests from the server are refused) |
+| Authentication | The Windows OpenSSH agent (named pipe \\.\pipe\openssh-ssh-agent) | Built, not verified | built (the pipe client compiles and runs on the Windows CI), not verified against a running agent |
+| Authentication | Encrypted PKCS#8 and legacy encrypted PEM keys | Refused with a clear error | refused with a clear error — convert with ssh-keygen -p (OpenSSH format) |
+| Authentication | FIDO (sk-) keys, user certificates, GSSAPI / Kerberos, agent forwarding | Not built | not implemented |
+| Channels | Several consoles and SFTP over one connection (one login) | Not built | a console takes over its connection — open one connection per console / SFTP session |
+| Channels | Port forwarding (local, remote, dynamic), X11 forwarding | Not built | not implemented (forwarding requests from the server are refused) |
 | SFTP | SFTP versions 4–6, the copy-data / limits / users-groups extensions, transfers streamed to local files | Not built | not implemented (whole-file transfers are buffered; open handles stream in pieces) |
 | Reliability | Windows against a live SSH server | Not built | the Windows CI runner has no POSIX SSH server; the client's live suite there is not run |
 

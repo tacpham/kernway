@@ -69,6 +69,9 @@ pub(crate) struct Transport {
     sock: AsyncTcpStream,
     /// Socket bytes read but not yet consumed.
     rbuf: Vec<u8>,
+    /// Where a socket read lands before it joins `rbuf` (so an abandoned read
+    /// leaves `rbuf` untouched).
+    scratch: Vec<u8>,
     seal: Protection,
     open: Protection,
     send_seq: u32,
@@ -112,6 +115,7 @@ impl Transport {
         let mut t = Transport {
             sock,
             rbuf: Vec::new(),
+            scratch: vec![0u8; 32 * 1024],
             seal: Protection::None,
             open: Protection::None,
             send_seq: 0,
@@ -179,29 +183,14 @@ impl Transport {
         Err(SshError::Protocol("no SSH version line from the server".into()))
     }
 
-    /// Read more socket bytes into `rbuf` (straight into its spare room: a buffer on
-    /// the stack would live inside every future that awaits this).
-    async fn fill(&mut self) -> Result<(), SshError> {
-        let start = self.rbuf.len();
-        self.rbuf.resize(start + 32 * 1024, 0);
-        let n = self.sock.read(&mut self.rbuf[start..]).await;
-        let n = match n {
-            Ok(n) => n,
-            Err(e) => {
-                self.rbuf.truncate(start);
-                return Err(e.into());
-            }
-        };
-        self.rbuf.truncate(start + n);
+    /// Read more socket bytes into `rbuf`. Cancel-safe: the read lands in `scratch`
+    /// and joins `rbuf` only once it completed, so dropping this future mid-way (a
+    /// console waiting on input and the network at once) loses nothing.
+    pub(crate) async fn fill(&mut self) -> Result<(), SshError> {
+        let n = self.sock.read(&mut self.scratch).await?;
+        self.rbuf.extend_from_slice(&self.scratch[..n]);
         if n == 0 {
             return Err(SshError::Io(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "the server closed the connection")));
-        }
-        Ok(())
-    }
-
-    async fn need(&mut self, n: usize) -> Result<(), SshError> {
-        while self.rbuf.len() < n {
-            self.fill().await?;
         }
         Ok(())
     }
@@ -217,10 +206,24 @@ impl Transport {
 
     /// Read and open one packet, as it comes.
     async fn read_packet(&mut self) -> Result<Vec<u8>, SshError> {
-        self.need(Protection::first_len()).await?;
+        loop {
+            if let Some(p) = self.try_decode()? {
+                return Ok(p);
+            }
+            self.fill().await?;
+        }
+    }
+
+    /// The next whole packet already in `rbuf`, opened — without reading the socket.
+    fn try_decode(&mut self) -> Result<Option<Vec<u8>>, SshError> {
+        if self.rbuf.len() < Protection::first_len() {
+            return Ok(None);
+        }
         let first: [u8; 4] = self.rbuf[..4].try_into().expect("4 bytes");
         let rest = self.open.remaining(self.recv_seq, first)?;
-        self.need(4 + rest).await?;
+        if self.rbuf.len() < 4 + rest {
+            return Ok(None);
+        }
         let packet: Vec<u8> = self.rbuf.drain(..4 + rest).collect();
         self.traffic += packet.len() as u64;
         let payload = self.open.open(self.recv_seq, packet)?;
@@ -228,7 +231,7 @@ impl Transport {
         if payload.is_empty() {
             return Err(SshError::Protocol("an empty packet".into()));
         }
-        Ok(payload)
+        Ok(Some(payload))
     }
 
     /// Send a message, rekeying first when the traffic limit has been reached.
@@ -243,11 +246,22 @@ impl Transport {
     /// The next message for the layers above: transport messages (ignore, debug,
     /// extension info, a rekey the server starts, a disconnect) are handled here.
     pub(crate) async fn recv(&mut self) -> Result<Vec<u8>, SshError> {
+        loop {
+            if let Some(p) = self.recv_buffered().await? {
+                return Ok(p);
+            }
+            self.fill().await?;
+        }
+    }
+
+    /// [`recv`](Self::recv) from what is already buffered: `None` when no whole
+    /// message is there (a key exchange the server starts still runs to the end).
+    pub(crate) async fn recv_buffered(&mut self) -> Result<Option<Vec<u8>>, SshError> {
         if let Some(p) = self.pending.pop_front() {
-            return Ok(p);
+            return Ok(Some(p));
         }
         loop {
-            let p = self.read_packet().await?;
+            let Some(p) = self.try_decode()? else { return Ok(None) };
             match msg(&p) {
                 MSG_DISCONNECT => return Err(disconnected(&p)),
                 MSG_IGNORE | MSG_DEBUG | MSG_UNIMPLEMENTED => {}
@@ -255,10 +269,10 @@ impl Transport {
                 MSG_KEXINIT => {
                     Box::pin(self.kex(Some(p))).await?;
                     if let Some(p) = self.pending.pop_front() {
-                        return Ok(p);
+                        return Ok(Some(p));
                     }
                 }
-                _ => return Ok(p),
+                _ => return Ok(Some(p)),
             }
         }
     }

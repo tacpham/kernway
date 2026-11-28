@@ -1198,6 +1198,7 @@ dependencies = [
  "kernway-log",
  "kernway-persist",
  "kernway-redis",
+ "kernway-wire",
  "ring",
  "rt-core",
  "serde",

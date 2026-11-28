@@ -21,22 +21,29 @@ cd "$DIR"
 
 # Fresh user keys (and the host keys for a native server).
 mkdir -p keys
-for k in id_ed25519 id_ecdsa id_ecdsa384 id_rsa id_rsa_pkcs8 id_rsa_pem id_ed25519_enc host_ed25519 host_ecdsa host_rsa; do rm -f "keys/$k" "keys/$k.pub"; done
+for k in id_ed25519 id_ecdsa id_ecdsa384 id_rsa id_rsa_pkcs8 id_rsa_pem id_ed25519_enc id_ecdsa_enc id_rsa_enc id_ed25519_gcm id_agent host_ed25519 host_ecdsa host_rsa; do rm -f "keys/$k" "keys/$k.pub"; done
 ssh-keygen -q -t ed25519 -N '' -C kw-ed25519 -f keys/id_ed25519
 ssh-keygen -q -t ecdsa -b 256 -N '' -C kw-ecdsa -f keys/id_ecdsa
 ssh-keygen -q -t ecdsa -b 384 -N '' -C kw-ecdsa384 -f keys/id_ecdsa384
 ssh-keygen -q -t rsa -b 3072 -N '' -C kw-rsa -f keys/id_rsa
+# Passphrase-protected, as ssh-keygen writes them (bcrypt_pbkdf + aes256-ctr), and
+# one with the AES-GCM cipher; a key only an ssh-agent holds.
 ssh-keygen -q -t ed25519 -N 'a passphrase' -C kw-enc -f keys/id_ed25519_enc
+ssh-keygen -q -t ecdsa -b 256 -N 'mật khẩu ✓' -C kw-ecdsa-enc -f keys/id_ecdsa_enc
+ssh-keygen -q -t rsa -b 3072 -N 'a passphrase' -C kw-rsa-enc -f keys/id_rsa_enc
+ssh-keygen -q -t ed25519 -N 'a passphrase' -Z aes256-gcm@openssh.com -C kw-gcm -f keys/id_ed25519_gcm
+ssh-keygen -q -t ed25519 -N '' -C kw-agent -f keys/id_agent
 # The same RSA key as PKCS#8 and PKCS#1 PEM, to prove those formats too.
 cp keys/id_rsa keys/id_rsa_pkcs8 && ssh-keygen -q -p -N '' -m PKCS8 -f keys/id_rsa_pkcs8 >/dev/null
 cp keys/id_rsa keys/id_rsa_pem && ssh-keygen -q -p -N '' -m PEM -f keys/id_rsa_pem >/dev/null
-cat keys/id_ed25519.pub keys/id_ecdsa.pub keys/id_ecdsa384.pub keys/id_rsa.pub > authorized_keys
+cat keys/id_ed25519.pub keys/id_ecdsa.pub keys/id_ecdsa384.pub keys/id_rsa.pub keys/id_ed25519_enc.pub \
+    keys/id_ecdsa_enc.pub keys/id_rsa_enc.pub keys/id_ed25519_gcm.pub keys/id_agent.pub > authorized_keys
 chmod 600 keys/* authorized_keys
 
 PASSWORD="pässwörd 123"
 if [ -n "${SSH_DOCKER:-}" ]; then
   IMAGE="${SSH_IMAGE:-lscr.io/linuxserver/openssh-server:latest}"
-  mkdir -p pub && rm -f pub/id_ed25519.pub pub/id_ecdsa.pub pub/id_ecdsa384.pub pub/id_rsa.pub pub/id_ed25519_enc.pub && cp keys/id_ed25519.pub keys/id_ecdsa.pub keys/id_ecdsa384.pub keys/id_rsa.pub pub/
+  rm -rf pub && mkdir -p pub && cp authorized_keys pub/all.pub
   docker rm -f kernway-sshd >/dev/null 2>&1 || true
   docker run -d --name kernway-sshd -p 2222:2222 -p 2223:2223 -e PUID=1000 -e PGID=1000 -e USER_NAME=kw \
     -e PASSWORD_ACCESS=true -e USER_PASSWORD="$PASSWORD" -e PUBLIC_KEY_DIR=/pubkeys -v "$DIR/pub":/pubkeys:ro "$IMAGE" >/dev/null
@@ -97,10 +104,21 @@ ssh-keyscan -p 2222 127.0.0.1 2>/dev/null > known_hosts
 ssh-keyscan -p 2223 127.0.0.1 2>/dev/null >> known_hosts
 [ -s known_hosts ] || { echo "sshd did not start" >&2; cat "$DIR"/sshd*.out >&2 2>/dev/null || true; docker logs kernway-sshd 2>&1 | tail -20 >&2 || true; exit 1; }
 
+# An ssh-agent holding id_agent (its key file is then moved away: only the agent can sign).
+# A Unix socket path is limited to ~104 bytes: keep it short, out of $DIR.
+AGENT_SOCK="/tmp/kw-ssh-agent-$(id -u).sock"
+if [ -f "$DIR/agent.pid" ]; then kill "$(cat "$DIR/agent.pid")" 2>/dev/null || true; fi
+rm -f "$AGENT_SOCK"
+eval "$(ssh-agent -a "$AGENT_SOCK" -s)" >/dev/null
+echo "$SSH_AGENT_PID" > "$DIR/agent.pid"
+SSH_AUTH_SOCK="$AGENT_SOCK" ssh-add -q keys/id_agent
+mv keys/id_agent keys/id_agent.held-by-agent
+
 echo "KERNWAY_SSH_HOST=127.0.0.1"
 echo "KERNWAY_SSH_PORT=2222"
 echo "KERNWAY_SSH_REKEY_PORT=2223"
 echo "KERNWAY_SSH_USER=$USER_NAME"
 echo "KERNWAY_SSH_PASSWORD=$PASSWORD"
 echo "KERNWAY_SSH_DIR=$DIR"
+echo "KERNWAY_SSH_AGENT_SOCK=$AGENT_SOCK"
 echo "KERNWAY_SSH_SERVER=$SERVER"
