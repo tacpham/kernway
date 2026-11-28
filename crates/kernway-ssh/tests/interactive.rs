@@ -135,18 +135,17 @@ fn a_console_is_a_real_terminal_that_resizes_and_takes_ctrl_c() {
         c.write("stty size\n").unwrap();
         wait_for(&mut c, &mut seen, "40 120", 10).await;
 
-        // Ctrl-C interrupts the foreground command; the shell carries on.
+        // Ctrl-C interrupts the foreground command; the shell carries on. (Whether a
+        // shell runs the rest of an interrupted `a; b` list differs — bash 3.2 does —
+        // so the command stands alone, and the proof is time: sleep 30 ends at once.)
         seen.clear();
-        // (The terminal echoes what is typed: the markers are computed, so only the
-        // command's own output can contain them.)
-        c.write("sleep 30; echo not-$((2+3))-int\n").unwrap();
+        c.write("sleep 30\n").unwrap();
         rt_core::sleep(Duration::from_millis(500)).await;
         let started = Instant::now();
         c.write([3u8]).unwrap();
         c.write("echo after-$((1+1))-int\n").unwrap();
         wait_for(&mut c, &mut seen, "after-2-int", 10).await;
-        assert!(started.elapsed() < Duration::from_secs(10));
-        assert!(!seen.contains("not-5-int"), "{seen}");
+        assert!(started.elapsed() < Duration::from_secs(10), "interrupted, not waited out");
 
         c.write("exit 3\n").unwrap();
         let mut exit = None;
