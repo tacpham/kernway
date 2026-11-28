@@ -182,6 +182,11 @@ impl Client {
 
     /// Connect with explicit options.
     pub async fn with_options(mut options: ClientOptions) -> Result<Self> {
+        // The Connection String spec asks for a WARN-level message per warning;
+        // they hold no text from the URI.
+        for w in &options.warnings {
+            kernway_log::warn!(target: "kernway_orm_mongodb", "connection string: {w}");
+        }
         if let Some(name) = options.srv.clone() {
             crate::dns::apply_srv(&mut options, &name).await?;
         }
@@ -241,7 +246,10 @@ impl Client {
             .or_insert_with(|| {
                 let generation = Rc::new(Cell::new(0));
                 let connect = ServerConnect { address: address.clone(), spec: self.inner.spec.clone(), generation: generation.clone() };
-                Rc::new(ServerPool { pool: kernway_wire::Pool::new(connect, self.inner.options.max_pool_size), generation })
+                Rc::new(ServerPool { pool: kernway_wire::Pool::new(connect, match self.inner.options.max_pool_size {
+                    0 => usize::MAX, // maxPoolSize=0: no limit
+                    n => n,
+                }), generation })
             })
             .clone()
     }

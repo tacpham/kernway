@@ -379,7 +379,7 @@ impl<T> Collection<T> {
             let mut end = start;
             let mut bytes = 0;
             while end < docs.len() && end - start < max_count {
-                let size = docs[end].to_bytes().len();
+                let size = docs[end].to_bytes()?.len();
                 if size > max_bson {
                     return Err(Error::new(ErrorKind::Command { code: 10334, code_name: "BSONObjectTooLarge".into() }, format!("document {end} is {size} bytes, above {max_bson}")));
                 }

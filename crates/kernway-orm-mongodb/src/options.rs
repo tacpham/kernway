@@ -16,32 +16,10 @@ pub enum Address {
 }
 
 impl Address {
-    /// Parse `host[:port]`, `[v6]:port`, or a `.sock` path.
+    /// Parse `host[:port]`, `[v6]:port`, or a `.sock` path (not
+    /// percent-encoded). Errors do not repeat the text.
     pub fn parse(s: &str) -> Result<Self> {
-        let bad = || Error::config(format!("bad host {s:?}"));
-        if s.ends_with(".sock") && (s.starts_with('/') || s.contains('%')) {
-            return Ok(Address::Unix(PathBuf::from(decode(s)?)));
-        }
-        if let Some(rest) = s.strip_prefix('[') {
-            let (h, after) = rest.split_once(']').ok_or_else(bad)?;
-            let port = match after.strip_prefix(':') {
-                Some(p) => p.parse().map_err(|_| bad())?,
-                None if after.is_empty() => 27017,
-                None => return Err(bad()),
-            };
-            return Ok(Address::Tcp(h.to_ascii_lowercase(), port));
-        }
-        match s.rsplit_once(':') {
-            Some((h, p)) => {
-                let port: u16 = p.parse().map_err(|_| bad())?;
-                if h.is_empty() || port == 0 {
-                    return Err(bad());
-                }
-                Ok(Address::Tcp(h.to_ascii_lowercase(), port))
-            }
-            None if !s.is_empty() => Ok(Address::Tcp(s.to_ascii_lowercase(), 27017)),
-            None => Err(bad()),
-        }
+        parse_decoded_host(s, "host")
     }
 }
 
@@ -68,8 +46,20 @@ pub enum AuthMechanism {
     Plain,
 }
 
-/// Credentials.
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl AuthMechanism {
+    /// The mechanism's canonical name (`SCRAM-SHA-256`, …).
+    pub fn name(self) -> &'static str {
+        match self {
+            AuthMechanism::ScramSha1 => "SCRAM-SHA-1",
+            AuthMechanism::ScramSha256 => "SCRAM-SHA-256",
+            AuthMechanism::X509 => "MONGODB-X509",
+            AuthMechanism::Plain => "PLAIN",
+        }
+    }
+}
+
+/// Credentials. `Debug` shows `<redacted>` for the user name and password.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Credential {
     /// User name (for X.509 optional: taken from the certificate).
     pub username: Option<String>,
@@ -79,6 +69,18 @@ pub struct Credential {
     pub source: String,
     /// Mechanism; `None` negotiates SCRAM-SHA-256 or -SHA-1 with the server.
     pub mechanism: Option<AuthMechanism>,
+}
+
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const R: &str = "<redacted>";
+        f.debug_struct("Credential")
+            .field("username", &self.username.as_ref().map(|_| R))
+            .field("password", &self.password.as_ref().map(|_| R))
+            .field("source", &self.source)
+            .field("mechanism", &self.mechanism)
+            .finish()
+    }
 }
 
 /// Read preference mode.
@@ -288,6 +290,11 @@ pub struct ClientOptions {
     pub max_pool_size: usize,
     /// `zlibCompressionLevel`.
     pub zlib_level: i32,
+    /// What parsing the connection string warned about (an unknown option, a
+    /// value of the wrong type, a repeated key…), per the Connection String
+    /// and URI Options specs: the option is ignored and parsing goes on. The
+    /// client logs each one when it is built.
+    pub warnings: Vec<String>,
 }
 
 impl Default for ClientOptions {
@@ -317,11 +324,38 @@ impl Default for ClientOptions {
             heartbeat_frequency: Duration::from_secs(10),
             max_pool_size: 10,
             zlib_level: -1,
+            warnings: Vec::new(),
         }
     }
 }
 
-fn decode(s: &str) -> Result<String> {
+/// Every URI option the Connection String / URI Options specs define, in its
+/// canonical spelling (matched case-insensitively).
+const KNOWN_OPTIONS: &[&str] = &[
+    "appname", "authMechanism", "authMechanismProperties", "authSource", "compressors", "connectTimeoutMS", "directConnection",
+    "enableOverloadRetargeting", "heartbeatFrequencyMS", "journal", "loadBalanced", "localThresholdMS", "maxAdaptiveRetries",
+    "maxConnecting", "maxIdleTimeMS", "maxPoolSize", "maxStalenessSeconds", "minPoolSize", "proxyHost", "proxyPassword", "proxyPort",
+    "proxyUsername", "readConcernLevel", "readPreference", "readPreferenceTags", "replicaSet", "retryReads", "retryWrites",
+    "serverMonitoringMode", "serverSelectionTimeoutMS", "serverSelectionTryOnce", "socketTimeoutMS", "srvAllowedHostsSuffix",
+    "srvMaxHosts", "srvServiceName", "ssl", "timeoutMS", "tls", "tlsAllowInvalidCertificates", "tlsAllowInvalidHostnames", "tlsCAFile",
+    "tlsCertificateKeyFile", "tlsCertificateKeyFilePassword", "tlsDisableCertificateRevocationCheck", "tlsDisableOCSPEndpointCheck",
+    "tlsInsecure", "w", "waitQueueTimeoutMS", "wTimeoutMS", "zlibCompressionLevel",
+];
+
+/// Renamed options still accepted under their old name: (old, new).
+const DEPRECATED_OPTIONS: &[(&str, &str)] = &[("wtimeout", "wTimeoutMS")];
+
+/// Options whose argument must never appear in a message (URI Options spec,
+/// "Sensitive options").
+const SENSITIVE_OPTIONS: &[&str] = &["proxyUsername", "proxyPassword", "tlsCertificateKeyFilePassword"];
+
+fn canonical_option(lower: &str) -> Option<&'static str> {
+    KNOWN_OPTIONS.iter().copied().find(|k| k.eq_ignore_ascii_case(lower))
+}
+
+/// Percent-decoding. Errors name only the component (`what`), never the text:
+/// the Connection String spec forbids repeating any part of a URI that did not parse.
+fn decode_part(s: &str, what: &str) -> Result<String> {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -333,44 +367,124 @@ fn decode(s: &str) -> Result<String> {
                     out.push((h * 16 + l) as u8);
                     i += 3;
                 }
-                _ => return Err(Error::config(format!("bad %-escape in {s:?}"))),
+                _ => return Err(Error::config(format!("the {what} holds a malformed percent-escape"))),
             }
         } else {
             out.push(b[i]);
             i += 1;
         }
     }
-    String::from_utf8(out).map_err(|_| Error::config(format!("{s:?} is not UTF-8 once decoded")))
+    String::from_utf8(out).map_err(|_| Error::config(format!("the {what} is not UTF-8 once percent-decoded")))
 }
 
-fn ms(k: &str, v: &str) -> Result<Duration> {
-    v.parse::<u64>().map(Duration::from_millis).map_err(|_| Error::config(format!("{k} must be milliseconds, not {v:?}")))
+/// One host identifier, still percent-encoded as written in the URI.
+fn parse_host(raw: &str, nth: usize) -> Result<Address> {
+    let what = format!("host identifier #{nth}");
+    if raw.is_empty() {
+        return Err(Error::config(format!("{what}: empty")));
+    }
+    parse_decoded_host(&decode_part(raw, &what)?, &what)
 }
 
-fn boolean(k: &str, v: &str) -> Result<bool> {
-    match v {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        _ => Err(Error::config(format!("{k} must be true or false, not {v:?}"))),
+fn parse_decoded_host(s: &str, what: &str) -> Result<Address> {
+    let bad = |why: &str| Error::config(format!("{what}: {why}"));
+    if s.is_empty() {
+        return Err(bad("empty"));
+    }
+    // A socket path is percent-encoded (it holds '/') and ends in ".sock".
+    if s.ends_with(".sock") && s.contains('/') {
+        return Ok(Address::Unix(PathBuf::from(s.to_string())));
+    }
+    let port = |p: &str| -> Result<u16> {
+        if p.is_empty() || !p.bytes().all(|c| c.is_ascii_digit()) {
+            return Err(bad("the port is not a number"));
+        }
+        match p.parse::<u32>() {
+            Ok(n) if (1..=65535).contains(&n) => Ok(n as u16),
+            _ => Err(bad("the port is outside 1-65535")),
+        }
+    };
+    if let Some(rest) = s.strip_prefix('[') {
+        let (h, after) = rest.split_once(']').ok_or_else(|| bad("an IP literal lacks its closing ']'"))?;
+        if h.is_empty() || !h.contains(':') {
+            return Err(bad("not an IPv6 literal"));
+        }
+        let p = match after.strip_prefix(':') {
+            Some(p) => port(p)?,
+            None if after.is_empty() => 27017,
+            None => return Err(bad("unexpected text after the IP literal")),
+        };
+        return Ok(Address::Tcp(h.to_ascii_lowercase(), p));
+    }
+    let (h, p) = match s.split_once(':') {
+        Some((h, p)) => (h, port(p)?),
+        None => (s, 27017),
+    };
+    if h.is_empty() {
+        return Err(bad("no host before the port"));
+    }
+    if h.contains(['/', '@', '?', '#', '[', ']', ' ']) {
+        return Err(bad("holds a character a host name cannot"));
+    }
+    Ok(Address::Tcp(h.to_ascii_lowercase(), p))
+}
+
+/// The option warnings and their wording: canonical names only, never text
+/// from the URI (Connection String spec, "Reporting an unsupported key or
+/// invalid value"); a parsed integer may be shown.
+struct Warn<'a>(&'a mut Vec<String>);
+
+impl Warn<'_> {
+    fn invalid(&mut self, name: &str, expected: &str) {
+        self.0.push(format!("ignored the invalid value of option '{name}' (expected {expected})"));
+    }
+    fn out_of_range(&mut self, name: &str, n: i64, expected: &str) {
+        self.0.push(format!("ignored option '{name}'={n} (expected {expected})"));
     }
 }
 
 impl ClientOptions {
+    /// URI options the specs define that this driver does not implement: each
+    /// is accepted, warned about and ignored, as the Connection String spec
+    /// asks for unsupported keys.
+    pub const UNSUPPORTED_OPTIONS: &'static [&'static str] = &[
+        "authMechanismProperties",
+        "enableOverloadRetargeting",
+        "maxAdaptiveRetries",
+        "maxConnecting",
+        "maxIdleTimeMS",
+        "minPoolSize",
+        "proxyHost",
+        "proxyPassword",
+        "proxyPort",
+        "proxyUsername",
+        "serverMonitoringMode",
+        "serverSelectionTryOnce",
+        "srvAllowedHostsSuffix",
+        "timeoutMS",
+        "tlsCertificateKeyFilePassword",
+        "tlsDisableCertificateRevocationCheck",
+        "tlsDisableOCSPEndpointCheck",
+        "waitQueueTimeoutMS",
+    ];
+
+    /// Authentication mechanisms the auth spec defines that this driver does
+    /// not implement: naming one is an error.
+    pub const UNSUPPORTED_MECHANISMS: &'static [&'static str] = &["GSSAPI", "MONGODB-AWS", "MONGODB-OIDC"];
+
     /// Parse `mongodb://[user:pass@]host1[:port1][,host2…][/[db]][?options]`
-    /// or `mongodb+srv://[user:pass@]host[/[db]][?options]`.
+    /// or `mongodb+srv://[user:pass@]host[/[db]][?options]`, as the MongoDB
+    /// Connection String and URI Options specifications define.
     ///
-    /// Option names are case-insensitive. Supported: `authSource`,
-    /// `authMechanism`, `tls` / `ssl`, `tlsCAFile`, `tlsCertificateKeyFile`,
-    /// `tlsInsecure`, `tlsAllowInvalidCertificates`,
-    /// `tlsAllowInvalidHostnames`, `replicaSet`, `directConnection`,
-    /// `loadBalanced`, `appName`, `readPreference`, `readPreferenceTags`
-    /// (repeatable), `maxStalenessSeconds`, `readConcernLevel`, `w`,
-    /// `journal`, `wTimeoutMS`, `retryWrites`, `retryReads`, `compressors`,
-    /// `zlibCompressionLevel`, `connectTimeoutMS`, `socketTimeoutMS`,
-    /// `serverSelectionTimeoutMS`, `localThresholdMS`,
-    /// `heartbeatFrequencyMS`, `maxPoolSize`, `srvMaxHosts`,
-    /// `srvServiceName`. Unknown options are an error (a typo would
-    /// otherwise silently change nothing).
+    /// - Option names are case-insensitive. An unknown option, an option this
+    ///   driver does not implement ([`Self::UNSUPPORTED_OPTIONS`]), an invalid
+    ///   value, an empty value, a repeated option and a deprecated name are
+    ///   each ignored with a warning in [`ClientOptions::warnings`].
+    /// - Conflicting TLS options, `directConnection=true` with several hosts
+    ///   or SRV, SRV-only options without SRV, and malformed URIs are errors.
+    /// - No error or warning repeats text from the URI (user, password, host,
+    ///   option names or values), so they are safe to log.
+    /// - `connectTimeoutMS=0` means no connect timeout, `maxPoolSize=0` no limit.
     pub fn parse(uri: &str) -> Result<Self> {
         let (srv, rest) = if let Some(r) = uri.strip_prefix("mongodb+srv://") {
             (true, r)
@@ -379,180 +493,370 @@ impl ClientOptions {
         } else {
             return Err(Error::config("a connection string starts with mongodb:// or mongodb+srv://"));
         };
-        let (rest, query) = rest.split_once('?').unwrap_or((rest, ""));
+        let (rest, query) = match rest.split_once('?') {
+            Some((r, q)) => (r, Some(q)),
+            None => (rest, None),
+        };
         let (auth, rest) = match rest.rsplit_once('@') {
             Some((a, r)) => (Some(a), r),
             None => (None, rest),
         };
-        // The path is after the first '/' that is not part of a socket path
-        // (socket paths in host lists are percent-encoded).
-        let (hostlist, db) = rest.split_once('/').unwrap_or((rest, ""));
+        let (hostlist, db) = match rest.split_once('/') {
+            Some((h, d)) => (h, Some(d)),
+            None => (rest, None),
+        };
+        if query.is_some() && db.is_none() && !srv && hostlist.contains('?') {
+            return Err(Error::config("options must follow a '/' after the hosts"));
+        }
         let mut o = ClientOptions::default();
         if hostlist.is_empty() {
-            return Err(Error::config("no host"));
+            return Err(Error::config("no host identifier"));
         }
         if srv {
-            if hostlist.contains(',') || hostlist.contains(':') {
-                return Err(Error::config("mongodb+srv:// takes one host name without a port"));
+            if hostlist.contains(',') {
+                return Err(Error::config("mongodb+srv:// takes exactly one host name"));
             }
-            o.srv = Some(hostlist.to_ascii_lowercase());
+            if hostlist.contains(':') {
+                return Err(Error::config("mongodb+srv:// takes a host name without a port"));
+            }
+            let name = decode_part(hostlist, "SRV host name")?;
+            if name.split('.').filter(|p| !p.is_empty()).count() < 2 {
+                return Err(Error::config("an SRV host name needs at least two dot-separated parts"));
+            }
+            o.srv = Some(name.to_ascii_lowercase());
             o.hosts.clear();
             o.tls = Some(TlsOptions::default());
         } else {
-            o.hosts = hostlist.split(',').map(|h| Address::parse(&decode(h)?)).collect::<Result<_>>()?;
+            o.hosts = hostlist.split(',').enumerate().map(|(i, h)| parse_host(h, i + 1)).collect::<Result<_>>()?;
         }
-        if !db.is_empty() {
-            let db = decode(db)?;
+        if let Some(db) = db.filter(|d| !d.is_empty()) {
+            let db = decode_part(db, "auth database")?;
             if db.contains(['/', '\\', ' ', '"', '$']) {
-                return Err(Error::config(format!("bad database name {db:?}")));
+                return Err(Error::config("the auth database holds a character a database name cannot (/ \\ space \" $)"));
             }
             o.default_database = Some(db);
         }
-        let mut cred = auth
-            .map(|a| -> Result<Credential> {
+        let mut cred = match auth {
+            None => None,
+            Some(a) => {
                 let (u, p) = match a.split_once(':') {
                     Some((u, p)) => (u, Some(p)),
                     None => (a, None),
                 };
-                if u.contains(['@', '/', ':']) || p.is_some_and(|p| p.contains(['@', '/', ':'])) {
-                    return Err(Error::config("user and password must be percent-encoded (@ / : are reserved)"));
+                if a.contains('@') || p.is_some_and(|p| p.contains(':')) || u.contains('/') || p.is_some_and(|p| p.contains('/')) {
+                    return Err(Error::config("the user name and password must be percent-encoded (@ : / are reserved)"));
                 }
-                Ok(Credential {
-                    username: Some(decode(u)?),
-                    password: p.map(decode).transpose()?,
+                Some(Credential {
+                    username: Some(decode_part(u, "user name")?),
+                    password: p.map(|p| decode_part(p, "password")).transpose()?,
                     source: o.default_database.clone().unwrap_or_else(|| "admin".into()),
                     mechanism: None,
                 })
-            })
-            .transpose()?;
+            }
+        };
+
+        // Collect the options: key (canonical, or unknown) → values in order.
+        let mut warn = Warn(&mut o.warnings);
+        let mut given: Vec<(&'static str, String)> = Vec::new();
+        let mut offset = 0usize;
+        for pair in query.unwrap_or("").split('&') {
+            let at = offset;
+            offset += pair.len() + 1;
+            if pair.is_empty() {
+                continue;
+            }
+            let Some((k, v)) = pair.split_once('=') else {
+                return Err(Error::config(format!("the option at offset {at} in the query segment has no '='")));
+            };
+            let lower = k.to_ascii_lowercase();
+            let name = match canonical_option(&lower) {
+                Some(n) => n,
+                None => match DEPRECATED_OPTIONS.iter().find(|(old, _)| old.eq_ignore_ascii_case(&lower)) {
+                    Some((old, new)) => {
+                        warn.0.push(format!("option '{old}' is deprecated; use '{new}'"));
+                        // Applied only when its replacement is absent (checked below).
+                        given.push((old, decode_part(v, "option value")?));
+                        continue;
+                    }
+                    None => {
+                        warn.0.push(format!("ignored an unknown option at offset {at} in the query segment"));
+                        continue;
+                    }
+                },
+            };
+            let v = match decode_part(v, "option value") {
+                Ok(v) => v,
+                Err(_) if SENSITIVE_OPTIONS.contains(&name) => return Err(Error::config(format!("option '{name}' holds a malformed value"))),
+                Err(e) => return Err(e),
+            };
+            given.push((name, v));
+        }
+        let present = |n: &str| given.iter().any(|(k, _)| *k == n);
+        // Spec-mandated errors for conflicting TLS options (URI Options spec).
+        for (a, b) in [
+            ("tlsInsecure", "tlsAllowInvalidCertificates"),
+            ("tlsInsecure", "tlsAllowInvalidHostnames"),
+            ("tlsInsecure", "tlsDisableOCSPEndpointCheck"),
+            ("tlsInsecure", "tlsDisableCertificateRevocationCheck"),
+            ("tlsAllowInvalidCertificates", "tlsDisableOCSPEndpointCheck"),
+            ("tlsAllowInvalidCertificates", "tlsDisableCertificateRevocationCheck"),
+            ("tlsDisableOCSPEndpointCheck", "tlsDisableCertificateRevocationCheck"),
+        ] {
+            if present(a) && present(b) {
+                return Err(Error::config(format!("options '{a}' and '{b}' cannot both be given")));
+            }
+        }
+        {
+            let tls_values: Vec<&str> = given.iter().filter(|(k, _)| *k == "tls" || *k == "ssl").map(|(_, v)| v.as_str()).collect();
+            if tls_values.windows(2).any(|w| w[0] != w[1]) {
+                return Err(Error::config("options 'tls' and 'ssl' must all have the same value"));
+            }
+        }
+        // A repeated key that is not a list: warn; the last one wins.
+        let mut seen: Vec<&str> = Vec::new();
+        for (k, _) in &given {
+            if *k != "readPreferenceTags" && seen.contains(k) {
+                warn.0.push(format!("option '{k}' is repeated; the last value is used"));
+            }
+            seen.push(k);
+        }
+        let replaced: Vec<&str> = DEPRECATED_OPTIONS.iter().filter(|(_, new)| present(new)).map(|(old, _)| *old).collect();
+
         let mut auth_source = None;
         let mut mechanism = None;
         let mut tls_on: Option<bool> = if srv { Some(true) } else { None };
         let mut tls = TlsOptions::default();
-        let mut tags_given = false;
+        let mut tags: Vec<Vec<(String, String)>> = Vec::new();
         let mut read_mode = None;
         let mut max_staleness = None;
-        for pair in query.split('&').filter(|p| !p.is_empty()) {
-            let (k, v) = pair.split_once('=').ok_or_else(|| Error::config(format!("option {pair:?} has no value")))?;
-            let v = decode(v)?;
-            let key = k.to_ascii_lowercase();
-            match key.as_str() {
-                "authsource" => auth_source = Some(v),
-                "authmechanism" => {
-                    mechanism = Some(match v.as_str() {
+        let mut zlib_level = None;
+        for (name, v) in &given {
+            let name: &str = name;
+            if replaced.contains(&name) {
+                warn.0.push(format!("option '{name}' is ignored: its replacement is given"));
+                continue;
+            }
+            if ClientOptions::UNSUPPORTED_OPTIONS.contains(&name) {
+                warn.0.push(format!("ignored option '{name}': this driver does not implement it"));
+                continue;
+            }
+            // Typed values; an empty one is ignored (Connection String spec, "Values").
+            let int = |warn: &mut Warn<'_>, min: i64, max: i64, expected: &str| -> Option<i64> {
+                if v.is_empty() {
+                    warn.0.push(format!("ignored option '{name}': empty value"));
+                    return None;
+                }
+                match v.parse::<i64>() {
+                    Ok(n) if (min..=max).contains(&n) => Some(n),
+                    Ok(n) => {
+                        warn.out_of_range(name, n, expected);
+                        None
+                    }
+                    Err(_) => {
+                        warn.invalid(name, expected);
+                        None
+                    }
+                }
+            };
+            let boolean = |warn: &mut Warn<'_>| -> Option<bool> {
+                match v.as_str() {
+                    "true" => Some(true),
+                    "false" => Some(false),
+                    "" => {
+                        warn.0.push(format!("ignored option '{name}': empty value"));
+                        None
+                    }
+                    _ => {
+                        warn.invalid(name, "true or false");
+                        None
+                    }
+                }
+            };
+            let millis = |warn: &mut Warn<'_>| int(warn, 0, i32::MAX as i64, "a non-negative number of milliseconds").map(|n| Duration::from_millis(n as u64));
+            match name {
+                "authSource" => {
+                    if v.is_empty() {
+                        return Err(Error::config("option 'authSource' is empty"));
+                    }
+                    auth_source = Some(v.clone())
+                }
+                "authMechanism" => {
+                    let upper = v.to_ascii_uppercase();
+                    mechanism = Some(match upper.as_str() {
                         "SCRAM-SHA-1" => AuthMechanism::ScramSha1,
                         "SCRAM-SHA-256" => AuthMechanism::ScramSha256,
                         "MONGODB-X509" => AuthMechanism::X509,
                         "PLAIN" => AuthMechanism::Plain,
-                        "GSSAPI" | "MONGODB-AWS" | "MONGODB-OIDC" | "MONGODB-CR" => {
-                            return Err(Error::config(format!("authMechanism {v} is not supported (SCRAM-SHA-256, SCRAM-SHA-1, MONGODB-X509, PLAIN are)")))
+                        m => {
+                            return Err(match ClientOptions::UNSUPPORTED_MECHANISMS.iter().find(|x| **x == m) {
+                                Some(known) => Error::config(format!("authMechanism {known} is not supported by this driver (SCRAM-SHA-256, SCRAM-SHA-1, MONGODB-X509, PLAIN are)")),
+                                None => Error::config("option 'authMechanism' names an unknown mechanism"),
+                            })
                         }
-                        _ => return Err(Error::config(format!("unknown authMechanism {v:?}"))),
                     })
                 }
-                "authmechanismproperties" => return Err(Error::config("authMechanismProperties: no supported mechanism takes properties")),
                 "tls" | "ssl" => {
-                    let on = boolean(k, &v)?;
-                    if tls_on.is_some_and(|t| t != on) && !srv {
-                        return Err(Error::config("tls and ssl disagree"));
+                    if let Some(on) = boolean(&mut warn) {
+                        tls_on = Some(on);
                     }
-                    tls_on = Some(on);
                 }
-                "tlscafile" => tls.ca_file = Some(v.into()),
-                "tlscertificatekeyfile" => tls.cert_key_file = Some(v.into()),
-                "tlsinsecure" => {
-                    let b = boolean(k, &v)?;
-                    tls.allow_invalid_certificates = b;
-                    tls.allow_invalid_hostnames = b;
+                "tlsCAFile" => tls.ca_file = Some(v.into()),
+                "tlsCertificateKeyFile" => tls.cert_key_file = Some(v.into()),
+                "tlsInsecure" => {
+                    if let Some(b) = boolean(&mut warn) {
+                        tls.allow_invalid_certificates = b;
+                        tls.allow_invalid_hostnames = b;
+                    }
                 }
-                "tlsallowinvalidcertificates" => tls.allow_invalid_certificates = boolean(k, &v)?,
-                "tlsallowinvalidhostnames" => tls.allow_invalid_hostnames = boolean(k, &v)?,
-                "tlscertificatekeyfilepassword" => return Err(Error::config("tlsCertificateKeyFilePassword: encrypted keys are not supported; decrypt the PEM")),
-                "replicaset" => o.replica_set = Some(v),
-                "directconnection" => o.direct_connection = Some(boolean(k, &v)?),
-                "loadbalanced" => o.load_balanced = boolean(k, &v)?,
+                "tlsAllowInvalidCertificates" => {
+                    if let Some(b) = boolean(&mut warn) {
+                        tls.allow_invalid_certificates = b;
+                    }
+                }
+                "tlsAllowInvalidHostnames" => {
+                    if let Some(b) = boolean(&mut warn) {
+                        tls.allow_invalid_hostnames = b;
+                    }
+                }
+                "replicaSet" => o.replica_set = Some(v.clone()),
+                "directConnection" => {
+                    if let Some(b) = boolean(&mut warn) {
+                        o.direct_connection = Some(b);
+                    }
+                }
+                "loadBalanced" => {
+                    if let Some(b) = boolean(&mut warn) {
+                        o.load_balanced = b;
+                    }
+                }
                 "appname" => {
                     if v.len() > 128 {
-                        return Err(Error::config("appName is longer than 128 bytes"));
+                        warn.invalid(name, "at most 128 bytes");
+                    } else {
+                        o.app_name = Some(v.clone());
                     }
-                    o.app_name = Some(v)
                 }
-                "readpreference" => {
+                "readPreference" => {
                     read_mode = Some(match v.as_str() {
                         "primary" => ReadMode::Primary,
                         "primaryPreferred" => ReadMode::PrimaryPreferred,
                         "secondary" => ReadMode::Secondary,
                         "secondaryPreferred" => ReadMode::SecondaryPreferred,
                         "nearest" => ReadMode::Nearest,
-                        _ => return Err(Error::config(format!("unknown readPreference {v:?}"))),
+                        _ => return Err(Error::config("option 'readPreference' names an unknown mode")),
                     })
                 }
-                "readpreferencetags" => {
-                    tags_given = true;
-                    let set: Result<Vec<(String, String)>> = v
-                        .split(',')
-                        .filter(|t| !t.is_empty())
-                        .map(|t| t.split_once(':').map(|(a, b)| (a.to_string(), b.to_string())).ok_or_else(|| Error::config(format!("bad tag {t:?}"))))
-                        .collect();
-                    o.read_preference.tag_sets.push(set?);
-                }
-                "maxstalenessseconds" => {
-                    let s: i64 = v.parse().map_err(|_| Error::config("maxStalenessSeconds must be a number"))?;
-                    if s >= 0 {
-                        if s < 90 {
-                            return Err(Error::config("maxStalenessSeconds must be at least 90"));
-                        }
-                        max_staleness = Some(Duration::from_secs(s as u64));
+                "readPreferenceTags" => {
+                    let set: Option<Vec<(String, String)>> =
+                        v.split(',').filter(|t| !t.is_empty()).map(|t| t.split_once(':').map(|(a, b)| (a.to_string(), b.to_string()))).collect();
+                    match set {
+                        Some(s) => tags.push(s),
+                        None => warn.invalid(name, "comma-separated key:value pairs"),
                     }
                 }
-                "readconcernlevel" => o.read_concern = Some(ReadConcern(v)),
-                "w" => {
-                    o.write_concern.w = Some(match v.parse::<i32>() {
-                        Ok(n) if n >= 0 => Bson::Int32(n),
-                        Ok(_) => return Err(Error::config("w must not be negative")),
-                        Err(_) => Bson::String(v),
-                    })
+                "maxStalenessSeconds" => {
+                    if let Some(s) = int(&mut warn, -1, i32::MAX as i64, "-1 or a number of seconds") {
+                        max_staleness = Some(s);
+                    }
                 }
-                "journal" => o.write_concern.journal = Some(boolean(k, &v)?),
-                "wtimeoutms" => o.write_concern.timeout = Some(ms(k, &v)?),
-                "retrywrites" => o.retry_writes = boolean(k, &v)?,
-                "retryreads" => o.retry_reads = boolean(k, &v)?,
+                "readConcernLevel" => o.read_concern = Some(ReadConcern(v.clone())),
+                "w" => {
+                    if v.is_empty() {
+                        warn.0.push("ignored option 'w': empty value".into());
+                    } else {
+                        o.write_concern.w = Some(match v.parse::<i64>() {
+                            Ok(n) if (0..=i32::MAX as i64).contains(&n) => Bson::Int32(n as i32),
+                            Ok(n) => {
+                                warn.out_of_range(name, n, "a non-negative number or a tag set name");
+                                continue;
+                            }
+                            Err(_) => Bson::String(v.clone()),
+                        })
+                    }
+                }
+                "journal" => {
+                    if let Some(b) = boolean(&mut warn) {
+                        o.write_concern.journal = Some(b);
+                    }
+                }
+                "wTimeoutMS" | "wtimeout" => {
+                    if let Some(n) = int(&mut warn, 0, i64::MAX, "a non-negative number of milliseconds") {
+                        o.write_concern.timeout = Some(Duration::from_millis(n as u64));
+                    }
+                }
+                "retryWrites" => {
+                    if let Some(b) = boolean(&mut warn) {
+                        o.retry_writes = b;
+                    }
+                }
+                "retryReads" => {
+                    if let Some(b) = boolean(&mut warn) {
+                        o.retry_reads = b;
+                    }
+                }
                 "compressors" => {
+                    o.compressors.clear();
                     for c in v.split(',') {
                         match c {
                             "snappy" => o.compressors.push(Compressor::Snappy),
                             "zlib" => o.compressors.push(Compressor::Zlib(-1)),
-                            // Unsupported ones are skipped, as the spec asks.
-                            _ => {}
+                            // zstd and unknown ones are skipped, as the compression spec asks.
+                            _ => warn.0.push("ignored a compressor this driver does not implement".into()),
                         }
                     }
                 }
-                "zlibcompressionlevel" => {
-                    let l: i32 = v.parse().map_err(|_| Error::config("zlibCompressionLevel must be -1..=9"))?;
-                    if !(-1..=9).contains(&l) {
-                        return Err(Error::config("zlibCompressionLevel must be -1..=9"));
+                "zlibCompressionLevel" => zlib_level = int(&mut warn, -1, 9, "-1 to 9"),
+                "connectTimeoutMS" => {
+                    if let Some(d) = millis(&mut warn) {
+                        o.connect_timeout = d;
                     }
-                    o.zlib_level = l;
                 }
-                "connecttimeoutms" => o.connect_timeout = ms(k, &v)?.max(Duration::from_millis(1)),
-                "sockettimeoutms" => {
-                    let d = ms(k, &v)?;
-                    o.socket_timeout = (!d.is_zero()).then_some(d);
-                }
-                "serverselectiontimeoutms" => o.server_selection_timeout = ms(k, &v)?,
-                "localthresholdms" => o.local_threshold = ms(k, &v)?,
-                "heartbeatfrequencyms" => {
-                    let d = ms(k, &v)?;
-                    if d < Duration::from_millis(500) {
-                        return Err(Error::config("heartbeatFrequencyMS must be at least 500"));
+                "socketTimeoutMS" => {
+                    if let Some(d) = millis(&mut warn) {
+                        o.socket_timeout = (!d.is_zero()).then_some(d);
                     }
-                    o.heartbeat_frequency = d;
                 }
-                "maxpoolsize" => o.max_pool_size = v.parse::<usize>().map_err(|_| Error::config("maxPoolSize must be a number"))?.max(1),
-                "srvmaxhosts" => o.srv_max_hosts = v.parse().map_err(|_| Error::config("srvMaxHosts must be a number"))?,
-                "srvservicename" => o.srv_service_name = v,
-                _ => return Err(Error::config(format!("unknown option {k:?}"))),
+                "serverSelectionTimeoutMS" => {
+                    if let Some(n) = int(&mut warn, 1, i32::MAX as i64, "a positive number of milliseconds") {
+                        o.server_selection_timeout = Duration::from_millis(n as u64);
+                    }
+                }
+                "localThresholdMS" => {
+                    if let Some(d) = millis(&mut warn) {
+                        o.local_threshold = d;
+                    }
+                }
+                "heartbeatFrequencyMS" => {
+                    if let Some(n) = int(&mut warn, 500, i32::MAX as i64, "at least 500 milliseconds") {
+                        o.heartbeat_frequency = Duration::from_millis(n as u64);
+                    }
+                }
+                "maxPoolSize" => {
+                    if let Some(n) = int(&mut warn, 0, i32::MAX as i64, "a non-negative number (0: no limit)") {
+                        o.max_pool_size = n as usize;
+                    }
+                }
+                "srvMaxHosts" | "srvServiceName" if !srv => {
+                    return Err(Error::config(format!("option '{name}' applies only to mongodb+srv://")));
+                }
+                "srvMaxHosts" => {
+                    if let Some(n) = int(&mut warn, 0, i32::MAX as i64, "a non-negative number (0: no limit)") {
+                        o.srv_max_hosts = n as usize;
+                    }
+                }
+                "srvServiceName" => {
+                    let ok = !v.is_empty() && v.len() <= 15 && v.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-');
+                    if ok {
+                        o.srv_service_name = v.clone();
+                    } else {
+                        warn.invalid(name, "an RFC 6335 service name");
+                    }
+                }
+                _ => warn.0.push(format!("ignored option '{name}': this driver does not implement it")),
             }
+        }
+        if let Some(l) = zlib_level {
+            o.zlib_level = l as i32;
         }
         for c in &mut o.compressors {
             if let Compressor::Zlib(l) = c {
@@ -562,16 +866,21 @@ impl ClientOptions {
         if let Some(m) = read_mode {
             o.read_preference.mode = m;
         }
-        o.read_preference.max_staleness = max_staleness;
-        if o.read_preference.mode == ReadMode::Primary && (tags_given || max_staleness.is_some()) {
+        o.read_preference.tag_sets = tags;
+        // -1 (or absent) is no limit; the max-staleness spec makes 1..89 an error.
+        o.read_preference.max_staleness = match max_staleness {
+            Some(s) if (0..90).contains(&s) => return Err(Error::config(format!("option 'maxStalenessSeconds'={s} is below the minimum of 90"))),
+            Some(s) if s >= 90 => Some(Duration::from_secs(s as u64)),
+            _ => None,
+        };
+        if o.read_preference.mode == ReadMode::Primary && (!o.read_preference.tag_sets.is_empty() || o.read_preference.max_staleness.is_some()) {
             return Err(Error::config("readPreferenceTags / maxStalenessSeconds do not apply to readPreference=primary"));
         }
-        // TLS on when asked for, or when any TLS file is given.
-        let wants_tls = tls_on.unwrap_or(tls.ca_file.is_some() || tls.cert_key_file.is_some());
+        // TLS on when asked for, or — unless tls/ssl says otherwise — when any
+        // other tls* option is given (the URI Options spec leaves this to drivers).
+        let implied = given.iter().any(|(k, _)| k.starts_with("tls") && *k != "tls");
+        let wants_tls = tls_on.unwrap_or(implied);
         o.tls = wants_tls.then_some(tls);
-        if tls_on == Some(false) && o.srv.is_some() {
-            o.tls = None;
-        }
         // Credentials and their source.
         if let Some(m) = mechanism {
             match m {
@@ -587,13 +896,17 @@ impl ClientOptions {
                 }
                 AuthMechanism::Plain => {
                     let c = cred.as_mut().ok_or_else(|| Error::config("PLAIN needs a user name"))?;
+                    // SASL PLAIN separates its fields with NUL (RFC 4616).
+                    if c.username.as_deref().is_some_and(|u| u.contains('\0')) || c.password.as_deref().is_some_and(|p| p.contains('\0')) {
+                        return Err(Error::config("PLAIN user names and passwords cannot hold a NUL character"));
+                    }
                     if c.source == "admin" && auth_source.is_none() {
                         c.source = "$external".into();
                     }
                 }
                 _ => {
                     if cred.is_none() {
-                        return Err(Error::config(format!("{m:?} needs a user name")));
+                        return Err(Error::config(format!("{} needs a user name", m.name())));
                     }
                 }
             }
@@ -621,8 +934,12 @@ impl ClientOptions {
         if o.load_balanced && (o.hosts.len() > 1 || o.replica_set.is_some() || o.direct_connection == Some(true)) {
             return Err(Error::config("loadBalanced=true takes one host, no replicaSet, no directConnection"));
         }
+        if o.srv_max_hosts > 0 && (o.replica_set.is_some() || o.load_balanced) {
+            return Err(Error::config("srvMaxHosts cannot be combined with replicaSet or loadBalanced=true"));
+        }
         Ok(o)
     }
+
 
     /// For `mongodb+srv://`: replace the seed list with the SRV records
     /// targets and merge the TXT record's options (the client does this when
@@ -697,8 +1014,6 @@ mod tests {
             "mongodb://h:0",
             "mongodb://h:port",
             "mongodb://u:p@w@h",
-            "mongodb://h/?nope=1",
-            "mongodb://h/?w=-1",
             "mongodb://h/?authMechanism=GSSAPI",
             "mongodb://u:p@h/?authMechanism=MONGODB-X509",
             "mongodb://h/?readPreferenceTags=dc:ny",
@@ -706,11 +1021,32 @@ mod tests {
             "mongodb://a,b/?directConnection=true",
             "mongodb+srv://a.example:27017",
             "mongodb+srv://a.example,b.example",
-            "mongodb://h/?heartbeatFrequencyMS=100",
             "mongodb://h/?tls=true&ssl=false",
             "mongodb://h/bad$db",
         ] {
             assert!(ClientOptions::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn unknown_or_invalid_options_warn_and_are_ignored() {
+        for (uri, why) in [
+            ("mongodb://h/?nope=1", "unknown option"),
+            ("mongodb://h/?w=-1", "negative w"),
+            ("mongodb://h/?heartbeatFrequencyMS=100", "below 500"),
+            ("mongodb://h/?journal=", "empty value"),
+            ("mongodb://h/?replicaSet=a&replicaSet=a", "repeated"),
+            ("mongodb://h/?minPoolSize=1", "not implemented"),
+        ] {
+            let o = ClientOptions::parse(uri).unwrap_or_else(|e| panic!("{why}: {e}"));
+            assert!(!o.warnings.is_empty(), "{why}: no warning");
+        }
+        let o = ClientOptions::parse("mongodb://h/?heartbeatFrequencyMS=100").unwrap();
+        assert_eq!(o.heartbeat_frequency, ClientOptions::default().heartbeat_frequency, "the invalid value is ignored");
+        // Messages never repeat URI text.
+        let o = ClientOptions::parse("mongodb://h/?s3cretKey=s3cretValue").unwrap();
+        assert!(o.warnings.iter().all(|w| !w.contains("s3cret")), "{:?}", o.warnings);
+        let e = ClientOptions::parse("mongodb://us3r:p4ss@h:99999").unwrap_err().to_string();
+        assert!(!e.contains("us3r") && !e.contains("p4ss") && !e.contains("99999"), "{e}");
     }
 }

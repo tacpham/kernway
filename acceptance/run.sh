@@ -170,6 +170,9 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     log "MongoDB (${MONGO_IMAGE:-mongo:8.0}): standalone, TLS, replica set, sharded cluster"
     "$ROOT/crates/kernway-orm-mongodb/tests/support/mongo-setup.sh" "$WORK/mongo" > "$WORK/mongo.env"
     set -a; . "$WORK/mongo.env"; set +a
+    # The official specifications' test data (BSON corpus, URI tests…), pinned.
+    "$ROOT/crates/kernway-orm-mongodb/tests/support/specs-fetch.sh" "$WORK/mongo-specs" > "$WORK/mongo-specs.env"
+    set -a; . "$WORK/mongo-specs.env"; set +a
     VERSION="MongoDB $(docker exec "$C" mongod --version | sed -n 1p | sed 's/db version v//')"
     CRATE=kernway-orm-mongodb; FEATURES=(); TITLE=MongoDB
     # The Unix-socket test runs inside the container (in_container_tests).

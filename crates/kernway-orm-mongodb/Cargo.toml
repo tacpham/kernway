@@ -12,6 +12,8 @@ serde_json       = { workspace = true }
 rt-core          = { workspace = true }
 rt-net           = { workspace = true }
 kernway-tls      = { workspace = true }
+# WARN-level messages for connection-string warnings (the Connection String spec asks for them).
+kernway-log      = { workspace = true }
 # Socket / TLS stream, pool, blocking-pool offload, and the shared SCRAM client.
 kernway-wire     = { workspace = true, features = ["scram"] }
 # SCRAM-SHA-1 hashes the password with MD5 first (MONGODB-CR's digest).

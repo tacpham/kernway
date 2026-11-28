@@ -7,7 +7,7 @@
 //! (the command document) and kind 1 (`size`, identifier, documents: e.g.
 //! the `documents` of an insert, sent without nesting them in the command).
 
-use crate::bson::Document;
+use crate::bson::{BsonError, Document};
 use crate::error::{Error, Result};
 use crate::options::Compressor;
 
@@ -30,12 +30,12 @@ pub(crate) struct Sequence<'a> {
 
 /// Encode one `OP_MSG` request into `out` (cleared), compressed with
 /// `compressor` unless the command must not be.
-pub(crate) fn encode_msg(out: &mut Vec<u8>, request_id: i32, flags: u32, command: &Document, seqs: &[Sequence<'_>], compressor: Option<Compressor>) {
+pub(crate) fn encode_msg(out: &mut Vec<u8>, request_id: i32, flags: u32, command: &Document, seqs: &[Sequence<'_>], compressor: Option<Compressor>) -> std::result::Result<(), BsonError> {
     out.clear();
     let mut body = Vec::with_capacity(256);
     body.extend_from_slice(&flags.to_le_bytes());
     body.push(0);
-    command.encode_into(&mut body);
+    command.encode_into(&mut body)?;
     for s in seqs {
         body.push(1);
         let at = body.len();
@@ -43,7 +43,7 @@ pub(crate) fn encode_msg(out: &mut Vec<u8>, request_id: i32, flags: u32, command
         body.extend_from_slice(s.identifier.as_bytes());
         body.push(0);
         for d in s.documents {
-            d.encode_into(&mut body);
+            d.encode_into(&mut body)?;
         }
         let size = (body.len() - at) as i32;
         body[at..at + 4].copy_from_slice(&size.to_le_bytes());
@@ -67,6 +67,7 @@ pub(crate) fn encode_msg(out: &mut Vec<u8>, request_id: i32, flags: u32, command
             out.extend_from_slice(&data);
         }
     }
+    Ok(())
 }
 
 fn header(out: &mut Vec<u8>, request_id: i32, op: i32, len: usize) {
@@ -188,7 +189,7 @@ mod tests {
         let docs = vec![doc! { "a" => 1 }, doc! { "a" => 2 }];
         for comp in [None, Some(Compressor::Snappy), Some(Compressor::Zlib(6))] {
             let mut out = Vec::new();
-            encode_msg(&mut out, 7, 0, &cmd, &[Sequence { identifier: "documents", documents: &docs }], comp);
+            encode_msg(&mut out, 7, 0, &cmd, &[Sequence { identifier: "documents", documents: &docs }], comp).unwrap();
             assert_eq!(i32::from_le_bytes(out[..4].try_into().unwrap()) as usize, out.len());
             let op = i32::from_le_bytes(out[12..16].try_into().unwrap());
             assert_eq!(op, if comp.is_some() { OP_COMPRESSED } else { OP_MSG });
@@ -197,7 +198,7 @@ mod tests {
         }
         // hello is never compressed.
         let mut out = Vec::new();
-        encode_msg(&mut out, 1, 0, &doc! { "hello" => 1 }, &[], Some(Compressor::Snappy));
+        encode_msg(&mut out, 1, 0, &doc! { "hello" => 1 }, &[], Some(Compressor::Snappy)).unwrap();
         assert_eq!(i32::from_le_bytes(out[12..16].try_into().unwrap()), OP_MSG);
         assert!(decode_reply(&out[..10], 1 << 20).is_err());
     }

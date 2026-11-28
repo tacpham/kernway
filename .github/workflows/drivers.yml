@@ -246,6 +246,10 @@ jobs:
           MONGO_BIN="$(ls -d "$T"/mongodb-win32-x86_64-*/bin | sed -n 1p)" MONGOSH="$T/mongosh-$MONGOSH_VERSION-win32-x64/bin/mongosh.exe" \
             crates/kernway-orm-mongodb/tests/support/mongo-setup.sh "$T/mongo" >> "$GITHUB_ENV"
 
+      - name: MongoDB specifications test data (pinned commit)
+        shell: bash
+        run: crates/kernway-orm-mongodb/tests/support/specs-fetch.sh "$RUNNER_TEMP/mongo-specs" >> "$GITHUB_ENV"
+
       - name: MongoDB driver — all tests, live
         shell: bash
         run: cargo test -p kernway-orm-mongodb -- --test-threads=1 --nocapture 2>&1 | tee mongo.log
@@ -255,6 +259,8 @@ jobs:
         run: |
           ! grep -q "skip:" mongo.log
           grep -q "^test transactions_and_no_lost_update" mongo.log
+          grep -q "^bson-corpus top: " mongo.log
+          grep -q "^connection-string/credential-disclosure.json: " mongo.log
 
   # NATS is one static binary on every OS: the setup script downloads the
   # official release and starts plain / auth / token / TLS / mTLS servers and

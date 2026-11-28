@@ -160,6 +160,10 @@ impl Connection {
             c.handshake(spec, authenticate).await?;
             Ok(c)
         };
+        if spec.connect_timeout.is_zero() {
+            // connectTimeoutMS=0: no timeout.
+            return open.await;
+        }
         match rt_core::timeout(spec.connect_timeout, open).await {
             Ok(r) => r,
             Err(_) => Err(Error::network(format!("connect {address}: timed out after {:?}", spec.connect_timeout))),
@@ -333,7 +337,7 @@ impl Connection {
         let id = next_request_id();
         self.next_request = id;
         let compressor = self.compressor;
-        wire::encode_msg(self.io.write_buf(), id, flags, &command, seqs, compressor);
+        wire::encode_msg(self.io.write_buf(), id, flags, &command, seqs, compressor)?;
         let max = self.hello.max_message_size().max(48_000_000);
         if self.io.write_buf_append().len() > max {
             return Err(Error::new(crate::error::ErrorKind::Command { code: 10334, code_name: "BSONObjectTooLarge".into() }, "message larger than maxMessageSizeBytes"));

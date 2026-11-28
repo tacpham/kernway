@@ -5,7 +5,7 @@
 //! first key). Decoding checks every length against the input and bounds
 //! nesting, so hostile input is an error, never a panic or a huge allocation.
 
-use crate::ordered_json::OJ;
+use crate::ordered_json::{OMap, OJ};
 use std::fmt;
 
 /// Nesting deeper than this is refused (the server's own limit is 100).
@@ -107,7 +107,10 @@ impl DateTime {
         if !(1970..=9999).contains(&y) {
             return None;
         }
-        Some(format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{milli:03}Z", sod / 3600, sod % 3600 / 60, sod % 60))
+        // Exactly three fraction digits when non-zero, none when zero
+        // (Extended JSON spec, footnote 5).
+        let frac = if milli == 0 { String::new() } else { format!(".{milli:03}") };
+        Some(format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}{frac}Z", sod / 3600, sod % 3600 / 60, sod % 60))
     }
 
     /// Parse `YYYY-MM-DDTHH:MM:SS[.fff][Z|±HH:MM]`.
@@ -418,6 +421,17 @@ impl fmt::Display for Decimal128 {
 }
 
 /// An ordered BSON document.
+///
+/// Repeated keys (BSON allows them; the server treats them inconsistently):
+/// - [`insert`](Self::insert) replaces an existing key's value in place, so a
+///   document built with it never repeats a key;
+/// - decoding BSON keeps every element, in order: [`iter`](Self::iter),
+///   [`to_bytes`](Self::to_bytes) and the `*_json_string` writers reproduce
+///   them all, and [`get`](Self::get) returns the first;
+/// - Extended JSON text with a repeated key keeps the last value, in the
+///   key's first position (as JSON parsers do);
+/// - [`to_relaxed_json`](Self::to_relaxed_json) builds a `serde_json` map,
+///   where the last value wins.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Document {
     entries: Vec<(String, Bson)>,
@@ -529,16 +543,18 @@ impl Document {
         }
     }
 
-    /// Encode to BSON bytes.
-    pub fn to_bytes(&self) -> Vec<u8> {
+    /// Encode to BSON bytes. A key, regex pattern or regex options holding
+    /// a NUL byte cannot be encoded (BSON's cstrings end at NUL) and is an
+    /// error rather than silently cut short.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, BsonError> {
         let mut out = Vec::with_capacity(64);
-        encode_document(self, &mut out);
-        out
+        encode_document(self, &mut out)?;
+        Ok(out)
     }
 
-    /// Append the BSON encoding to `out`.
-    pub fn encode_into(&self, out: &mut Vec<u8>) {
-        encode_document(self, out);
+    /// Append the BSON encoding to `out` (see [`Document::to_bytes`]).
+    pub fn encode_into(&self, out: &mut Vec<u8>) -> Result<(), BsonError> {
+        encode_document(self, out)
     }
 
     /// Decode one document that spans `bytes` exactly.
@@ -820,110 +836,179 @@ impl Bson {
             J::String(s) => Bson::String(s.clone()),
             J::Array(a) => Bson::Array(a.iter().map(Bson::from_ordered).collect::<Result<_, _>>()?),
             J::Object(m) => {
-                let key = |k: &str| m.get(k);
-                let only = |k: &str| m.len() == 1 && m.contains_key(k);
-                if only("$oid") {
-                    let s = key("$oid").and_then(J::as_str).ok_or_else(|| bad("$oid must be a string"))?;
-                    return ObjectId::parse_str(s).map(Bson::ObjectId).ok_or_else(|| bad("bad $oid"));
-                }
-                if only("$numberInt") {
-                    let s = key("$numberInt").and_then(J::as_str).ok_or_else(|| bad("$numberInt must be a string"))?;
-                    return s.parse().map(Bson::Int32).map_err(|_| bad("bad $numberInt"));
-                }
-                if only("$numberLong") {
-                    let s = key("$numberLong").and_then(J::as_str).ok_or_else(|| bad("$numberLong must be a string"))?;
-                    return s.parse().map(Bson::Int64).map_err(|_| bad("bad $numberLong"));
-                }
-                if only("$numberDouble") {
-                    let s = key("$numberDouble").and_then(J::as_str).ok_or_else(|| bad("$numberDouble must be a string"))?;
-                    return parse_double_text(s).map(Bson::Double).ok_or_else(|| bad("bad $numberDouble"));
-                }
-                if only("$numberDecimal") {
-                    let s = key("$numberDecimal").and_then(J::as_str).ok_or_else(|| bad("$numberDecimal must be a string"))?;
-                    return Decimal128::parse(s).map(Bson::Decimal128).ok_or_else(|| bad("bad $numberDecimal"));
-                }
-                if only("$date") {
-                    return match key("$date") {
-                        Some(J::String(s)) => DateTime::parse_rfc3339(s).map(Bson::DateTime).ok_or_else(|| bad("bad $date")),
-                        Some(J::Number(n)) => n.as_i64().map(|i| Bson::DateTime(DateTime(i))).ok_or_else(|| bad("bad $date")),
-                        Some(J::Object(o)) => o
-                            .get("$numberLong")
-                            .and_then(J::as_str)
-                            .and_then(|s| s.parse().ok())
-                            .map(|i| Bson::DateTime(DateTime(i)))
-                            .ok_or_else(|| bad("bad $date")),
-                        _ => Err(bad("bad $date")),
-                    };
-                }
-                if only("$binary") {
-                    let b = key("$binary").and_then(J::as_object).ok_or_else(|| bad("$binary must be an object"))?;
-                    let bytes = b.get("base64").and_then(J::as_str).and_then(kernway_wire::scram::b64_decode).ok_or_else(|| bad("bad $binary.base64"))?;
-                    let subtype = b
-                        .get("subType")
-                        .and_then(J::as_str)
-                        .and_then(|s| u8::from_str_radix(s, 16).ok())
-                        .ok_or_else(|| bad("bad $binary.subType"))?;
-                    return Ok(Bson::Binary(Binary { subtype, bytes }));
-                }
-                if only("$uuid") {
-                    let s = key("$uuid").and_then(J::as_str).ok_or_else(|| bad("$uuid must be a string"))?;
-                    let hex: String = s.chars().filter(|c| *c != '-').collect();
-                    if hex.len() != 32 {
-                        return Err(bad("bad $uuid"));
-                    }
-                    let bytes = (0..16).map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)).collect::<Result<Vec<_>, _>>().map_err(|_| bad("bad $uuid"))?;
-                    return Ok(Bson::Binary(Binary { subtype: 4, bytes }));
-                }
-                if only("$timestamp") {
-                    let t = key("$timestamp").and_then(J::as_object).ok_or_else(|| bad("bad $timestamp"))?;
-                    let get = |k: &str| t.get(k).and_then(J::as_u64).and_then(|v| u32::try_from(v).ok());
-                    return match (get("t"), get("i")) {
-                        (Some(time), Some(increment)) => Ok(Bson::Timestamp(Timestamp { time, increment })),
-                        _ => Err(bad("bad $timestamp")),
-                    };
-                }
-                if only("$regularExpression") {
-                    let r = key("$regularExpression").and_then(J::as_object).ok_or_else(|| bad("bad $regularExpression"))?;
-                    let pattern = r.get("pattern").and_then(J::as_str).ok_or_else(|| bad("bad $regularExpression"))?;
-                    let options = r.get("options").and_then(J::as_str).ok_or_else(|| bad("bad $regularExpression"))?;
-                    return Ok(Bson::RegularExpression(Regex::new(pattern, options)));
-                }
-                if only("$minKey") {
-                    return Ok(Bson::MinKey);
-                }
-                if only("$maxKey") {
-                    return Ok(Bson::MaxKey);
-                }
-                if only("$undefined") {
-                    return Ok(Bson::Undefined);
-                }
-                if only("$symbol") {
-                    return Ok(Bson::Symbol(key("$symbol").and_then(J::as_str).ok_or_else(|| bad("bad $symbol"))?.to_string()));
-                }
-                if only("$code") {
-                    return Ok(Bson::JavaScriptCode(key("$code").and_then(J::as_str).ok_or_else(|| bad("bad $code"))?.to_string()));
-                }
-                if m.len() == 2 && m.contains_key("$code") && m.contains_key("$scope") {
-                    let code = key("$code").and_then(J::as_str).ok_or_else(|| bad("bad $code"))?.to_string();
-                    let Bson::Document(scope) = Bson::from_ordered(&m["$scope"])? else { return Err(bad("bad $scope")) };
-                    return Ok(Bson::JavaScriptCodeWithScope(code, scope));
-                }
-                if only("$dbPointer") {
-                    let p = key("$dbPointer").and_then(J::as_object).ok_or_else(|| bad("bad $dbPointer"))?;
-                    let ns = p.get("$ref").and_then(J::as_str).ok_or_else(|| bad("bad $dbPointer"))?.to_string();
-                    let Bson::ObjectId(id) = Bson::from_ordered(p.get("$id").ok_or_else(|| bad("bad $dbPointer"))?)? else {
-                        return Err(bad("bad $dbPointer.$id"));
-                    };
-                    return Ok(Bson::DbPointer(ns, id));
+                if let Some(b) = Bson::type_wrapper(m)? {
+                    return Ok(b);
                 }
                 let mut d = Document::new();
                 for (k, v) in m {
+                    if k.contains('\0') {
+                        return Err(bad(&format!("key {k:?} holds a NUL byte")));
+                    }
                     d.insert(k.clone(), Bson::from_ordered(v)?);
                 }
                 Bson::Document(d)
             }
         })
     }
+
+    /// An object holding a type wrapper's key (`$oid`, `$binary`, …) is that
+    /// wrapper: per the Extended JSON spec ("Parsers") it must have exactly
+    /// the wrapper's keys, with values of the right type — anything else is
+    /// an error. Other `$` keys (`$regex`, `$type`, `$in`, a DBRef's `$ref`)
+    /// are not wrappers and leave the object a plain document (`None`).
+    fn type_wrapper(m: &OMap) -> Result<Option<Bson>, BsonError> {
+        use OJ as J;
+        const WRAPPER_KEYS: [&str; 17] = [
+            "$oid", "$symbol", "$numberInt", "$numberLong", "$numberDouble", "$numberDecimal", "$binary", "$uuid", "$code",
+            "$scope", "$timestamp", "$regularExpression", "$dbPointer", "$date", "$minKey", "$maxKey", "$undefined",
+        ];
+        let Some(kind) = WRAPPER_KEYS.iter().find(|k| m.contains_key(k)) else { return Ok(None) };
+        let bad = |m: &str| BsonError(format!("Extended JSON {kind}: {m}"));
+        // The wrapper's exact key set.
+        let keys_are = |want: &[&str]| m.len() == want.len() && want.iter().all(|k| m.contains_key(k));
+        let inner_keys_are = |o: &OMap, want: &[&str]| o.len() == want.len() && want.iter().all(|k| o.contains_key(k));
+        let string = |k: &str| m.get(k).and_then(J::as_str).ok_or_else(|| bad(&format!("{k} must be a string")));
+        let one = |k: &str| if keys_are(&[k]) { Ok(()) } else { Err(bad("unexpected or missing keys")) };
+        let b = match *kind {
+            "$oid" => {
+                one("$oid")?;
+                Bson::ObjectId(ObjectId::parse_str(string("$oid")?).ok_or_else(|| bad("not 24 hex digits"))?)
+            }
+            "$symbol" => {
+                one("$symbol")?;
+                Bson::Symbol(string("$symbol")?.to_string())
+            }
+            "$numberInt" => {
+                one("$numberInt")?;
+                Bson::Int32(string("$numberInt")?.parse().map_err(|_| bad("not a 32-bit integer"))?)
+            }
+            "$numberLong" => {
+                one("$numberLong")?;
+                Bson::Int64(string("$numberLong")?.parse().map_err(|_| bad("not a 64-bit integer"))?)
+            }
+            "$numberDouble" => {
+                one("$numberDouble")?;
+                Bson::Double(parse_double_text(string("$numberDouble")?).ok_or_else(|| bad("not a double"))?)
+            }
+            "$numberDecimal" => {
+                one("$numberDecimal")?;
+                Bson::Decimal128(Decimal128::parse(string("$numberDecimal")?).ok_or_else(|| bad("not a decimal"))?)
+            }
+            "$binary" => {
+                one("$binary")?;
+                let o = m.get("$binary").and_then(J::as_object).ok_or_else(|| bad("must be an object"))?;
+                if !inner_keys_are(o, &["base64", "subType"]) {
+                    return Err(bad("must hold exactly base64 and subType"));
+                }
+                let bytes = o.get("base64").and_then(J::as_str).and_then(kernway_wire::scram::b64_decode).ok_or_else(|| bad("bad base64"))?;
+                let subtype = o
+                    .get("subType")
+                    .and_then(J::as_str)
+                    .filter(|s| (1..=2).contains(&s.len()))
+                    .and_then(|s| u8::from_str_radix(s, 16).ok())
+                    .ok_or_else(|| bad("subType must be one or two hex digits"))?;
+                Bson::Binary(Binary { subtype, bytes })
+            }
+            "$uuid" => {
+                one("$uuid")?;
+                Bson::Binary(Binary { subtype: 4, bytes: parse_uuid(string("$uuid")?).ok_or_else(|| bad("not a UUID"))? })
+            }
+            "$code" | "$scope" => {
+                let code = string("$code")?.to_string();
+                if keys_are(&["$code"]) {
+                    Bson::JavaScriptCode(code)
+                } else if keys_are(&["$code", "$scope"]) {
+                    let scope = match m.get("$scope") {
+                        Some(v @ J::Object(_)) => match Bson::from_ordered(v)? {
+                            Bson::Document(d) => d,
+                            _ => return Err(bad("$scope must be a document")),
+                        },
+                        _ => return Err(bad("$scope must be a document")),
+                    };
+                    Bson::JavaScriptCodeWithScope(code, scope)
+                } else {
+                    return Err(bad("unexpected or missing keys"));
+                }
+            }
+            "$timestamp" => {
+                one("$timestamp")?;
+                let o = m.get("$timestamp").and_then(J::as_object).ok_or_else(|| bad("must be an object"))?;
+                if !inner_keys_are(o, &["t", "i"]) {
+                    return Err(bad("must hold exactly t and i"));
+                }
+                let get = |k: &str| o.get(k).and_then(J::as_u64).and_then(|v| u32::try_from(v).ok()).ok_or_else(|| bad(&format!("{k} must be a 32-bit unsigned number")));
+                Bson::Timestamp(Timestamp { time: get("t")?, increment: get("i")? })
+            }
+            "$regularExpression" => {
+                one("$regularExpression")?;
+                let o = m.get("$regularExpression").and_then(J::as_object).ok_or_else(|| bad("must be an object"))?;
+                if !inner_keys_are(o, &["pattern", "options"]) {
+                    return Err(bad("must hold exactly pattern and options"));
+                }
+                let get = |k: &str| o.get(k).and_then(J::as_str).filter(|s| !s.contains('\0')).ok_or_else(|| bad(&format!("{k} must be a string without NUL")));
+                Bson::RegularExpression(Regex::new(get("pattern")?, get("options")?))
+            }
+            "$dbPointer" => {
+                one("$dbPointer")?;
+                let o = m.get("$dbPointer").and_then(J::as_object).ok_or_else(|| bad("must be an object"))?;
+                if !inner_keys_are(o, &["$ref", "$id"]) {
+                    return Err(bad("must hold exactly $ref and $id"));
+                }
+                let ns = o.get("$ref").and_then(J::as_str).ok_or_else(|| bad("$ref must be a string"))?.to_string();
+                let Bson::ObjectId(id) = Bson::from_ordered(&o["$id"])? else { return Err(bad("$id must be an ObjectId")) };
+                Bson::DbPointer(ns, id)
+            }
+            "$date" => {
+                one("$date")?;
+                match m.get("$date") {
+                    Some(J::String(s)) => Bson::DateTime(DateTime::parse_rfc3339(s).ok_or_else(|| bad("not an RFC 3339 date"))?),
+                    Some(J::Object(o)) if inner_keys_are(o, &["$numberLong"]) => Bson::DateTime(DateTime(
+                        o.get("$numberLong").and_then(J::as_str).and_then(|s| s.parse().ok()).ok_or_else(|| bad("bad $numberLong"))?,
+                    )),
+                    _ => return Err(bad("must be an RFC 3339 string or {\"$numberLong\": …}")),
+                }
+            }
+            "$minKey" | "$maxKey" => {
+                one(kind)?;
+                if m.get(kind).and_then(J::as_u64) != Some(1) || matches!(m.get(kind), Some(J::Bool(_))) {
+                    return Err(bad("must be the integer 1"));
+                }
+                if *kind == "$minKey" {
+                    Bson::MinKey
+                } else {
+                    Bson::MaxKey
+                }
+            }
+            _ => {
+                one("$undefined")?;
+                if !matches!(m.get("$undefined"), Some(J::Bool(true))) {
+                    return Err(bad("must be true"));
+                }
+                Bson::Undefined
+            }
+        };
+        Ok(Some(b))
+    }
+}
+
+/// A UUID's 16 bytes from its RFC 4122 text (`8-4-4-4-12` hex digits), or
+/// the same 32 digits without hyphens (the Extended JSON spec allows both).
+fn parse_uuid(s: &str) -> Option<Vec<u8>> {
+    let hex: String = match s.len() {
+        36 => {
+            let b = s.as_bytes();
+            if [8, 13, 18, 23].iter().any(|&i| b[i] != b'-') {
+                return None;
+            }
+            s.split('-').collect()
+        }
+        32 => s.to_string(),
+        _ => return None,
+    };
+    if hex.len() != 32 || !hex.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    (0..16).map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()).collect()
 }
 
 impl Regex {
@@ -960,22 +1045,25 @@ fn parse_double_text(s: &str) -> Option<f64> {
 
 // ---- binary codec ----------------------------------------------------------
 
-fn encode_document(d: &Document, out: &mut Vec<u8>) {
+fn encode_document(d: &Document, out: &mut Vec<u8>) -> Result<(), BsonError> {
     let start = out.len();
     out.extend_from_slice(&[0; 4]);
     for (k, v) in &d.entries {
-        encode_element(k, v, out);
+        encode_element(k, v, out)?;
     }
     out.push(0);
     let len = (out.len() - start) as i32;
     out[start..start + 4].copy_from_slice(&len.to_le_bytes());
+    Ok(())
 }
 
-fn cstring(s: &str, out: &mut Vec<u8>) {
-    // A key or pattern with NUL cannot be encoded: cut at the NUL rather than
-    // corrupt the document (the server would reject it anyway).
-    out.extend_from_slice(s.split('\0').next().unwrap_or("").as_bytes());
+fn cstring(s: &str, out: &mut Vec<u8>) -> Result<(), BsonError> {
+    if s.contains('\0') {
+        return Err(err(format!("{s:?} holds a NUL byte, which a BSON key or regex cannot")));
+    }
+    out.extend_from_slice(s.as_bytes());
     out.push(0);
+    Ok(())
 }
 
 fn string(s: &str, out: &mut Vec<u8>) {
@@ -984,22 +1072,22 @@ fn string(s: &str, out: &mut Vec<u8>) {
     out.push(0);
 }
 
-fn encode_element(key: &str, v: &Bson, out: &mut Vec<u8>) {
+fn encode_element(key: &str, v: &Bson, out: &mut Vec<u8>) -> Result<(), BsonError> {
     out.push(v.element_type());
-    cstring(key, out);
-    encode_value(v, out);
+    cstring(key, out)?;
+    encode_value(v, out)
 }
 
-fn encode_value(v: &Bson, out: &mut Vec<u8>) {
+fn encode_value(v: &Bson, out: &mut Vec<u8>) -> Result<(), BsonError> {
     match v {
         Bson::Double(f) => out.extend_from_slice(&f.to_le_bytes()),
         Bson::String(s) | Bson::JavaScriptCode(s) | Bson::Symbol(s) => string(s, out),
-        Bson::Document(d) => encode_document(d, out),
+        Bson::Document(d) => encode_document(d, out)?,
         Bson::Array(a) => {
             let start = out.len();
             out.extend_from_slice(&[0; 4]);
             for (i, x) in a.iter().enumerate() {
-                encode_element(&i.to_string(), x, out);
+                encode_element(&i.to_string(), x, out)?;
             }
             out.push(0);
             let len = (out.len() - start) as i32;
@@ -1022,8 +1110,8 @@ fn encode_value(v: &Bson, out: &mut Vec<u8>) {
         Bson::Boolean(b) => out.push(u8::from(*b)),
         Bson::DateTime(d) => out.extend_from_slice(&d.0.to_le_bytes()),
         Bson::RegularExpression(r) => {
-            cstring(&r.pattern, out);
-            cstring(&r.options, out);
+            cstring(&r.pattern, out)?;
+            cstring(&r.options, out)?;
         }
         Bson::DbPointer(ns, id) => {
             string(ns, out);
@@ -1033,7 +1121,7 @@ fn encode_value(v: &Bson, out: &mut Vec<u8>) {
             let start = out.len();
             out.extend_from_slice(&[0; 4]);
             string(code, out);
-            encode_document(scope, out);
+            encode_document(scope, out)?;
             let len = (out.len() - start) as i32;
             out[start..start + 4].copy_from_slice(&len.to_le_bytes());
         }
@@ -1045,6 +1133,7 @@ fn encode_value(v: &Bson, out: &mut Vec<u8>) {
         Bson::Int64(i) => out.extend_from_slice(&i.to_le_bytes()),
         Bson::Decimal128(d) => out.extend_from_slice(&d.0),
     }
+    Ok(())
 }
 
 fn err(m: impl Into<String>) -> BsonError {
@@ -1164,7 +1253,7 @@ fn decode_value(t: u8, c: &mut Cur<'_>, depth: usize) -> Result<Bson, BsonError>
         0x0B => {
             let pattern = c.cstr()?;
             let options = c.cstr()?;
-            Bson::RegularExpression(Regex { pattern, options })
+            Bson::RegularExpression(Regex::new(&pattern, &options))
         }
         0x0C => {
             let ns = c.string()?;
@@ -1315,7 +1404,7 @@ mod tests {
         ] {
             let raw = unhex(bytes);
             let d = Document::from_bytes(&raw).unwrap_or_else(|e| panic!("{bytes}: {e}"));
-            assert_eq!(hex(&d.to_bytes()), bytes, "re-encode");
+            assert_eq!(hex(&d.to_bytes().unwrap()), bytes, "re-encode");
             let canonical = Bson::Document(d.clone()).to_canonical_json();
             assert_eq!(canonical, serde_json::from_str::<serde_json::Value>(json).unwrap(), "{bytes}");
             let back = Bson::from_extended_json(&canonical).unwrap();
@@ -1343,7 +1432,7 @@ mod tests {
         for _ in 0..300 {
             d = doc! { "a" => d };
         }
-        assert!(Document::from_bytes(&d.to_bytes()).is_err());
+        assert!(Document::from_bytes(&d.to_bytes().unwrap()).is_err());
     }
 
     #[test]
@@ -1378,7 +1467,7 @@ mod tests {
         let d = DateTime::parse_rfc3339("2024-02-29T12:34:56.789Z").unwrap();
         assert_eq!(d.to_rfc3339().as_deref(), Some("2024-02-29T12:34:56.789Z"));
         assert_eq!(DateTime::parse_rfc3339("1970-01-01T01:00:00+01:00"), Some(DateTime(0)));
-        assert_eq!(DateTime(0).to_rfc3339().as_deref(), Some("1970-01-01T00:00:00.000Z"));
+        assert_eq!(DateTime(0).to_rfc3339().as_deref(), Some("1970-01-01T00:00:00Z"));
         assert!(DateTime::parse_rfc3339("2024-13-01T00:00:00Z").is_none());
         let a = ObjectId::new();
         let b = ObjectId::new();
@@ -1405,7 +1494,7 @@ mod tests {
         assert!(matches!(d.get("_id"), Some(Bson::ObjectId(_))));
         assert!(matches!(d.get("at"), Some(Bson::DateTime(_))));
         assert_eq!(d.get("qty"), Some(&Bson::Int64(1 << 40)));
-        let back: Item = from_document(&Document::from_bytes(&d.to_bytes()).unwrap()).unwrap();
+        let back: Item = from_document(&Document::from_bytes(&d.to_bytes().unwrap()).unwrap()).unwrap();
         assert_eq!(back, it);
     }
 

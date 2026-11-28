@@ -1029,6 +1029,7 @@ name = "kernway-orm-mongodb"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "kernway-log",
  "kernway-orm-core",
  "kernway-orm-macro",
  "kernway-tls",
