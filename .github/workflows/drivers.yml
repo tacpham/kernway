@@ -263,6 +263,8 @@ jobs:
           grep -q "connection-string/credential-disclosure.json: 102 passed, 0 failed" mongo.log
           grep -q "sdam/errors: 72 files, 72 passed, 0 failed" mongo.log
           grep -q "server-selection/server_selection: 88 files, 88 passed, 0 failed" mongo.log
+          grep -q "unified/crud: .* 0 failed" mongo.log
+          grep -q "unified/transactions: .* 0 failed" mongo.log
 
   # NATS is one static binary on every OS: the setup script downloads the
   # official release and starts plain / auth / token / TLS / mTLS servers and

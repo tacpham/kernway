@@ -290,6 +290,11 @@ pub struct ClientOptions {
     pub max_pool_size: usize,
     /// `zlibCompressionLevel`.
     pub zlib_level: i32,
+    /// `maxAdaptiveRetries`: retries of a command the server rejects as
+    /// overloaded (client backpressure spec; default 2).
+    pub max_adaptive_retries: u32,
+    /// `enableOverloadRetargeting`: retry an overloaded command on another server.
+    pub overload_retargeting: bool,
     /// What parsing the connection string warned about (an unknown option, a
     /// value of the wrong type, a repeated key…), per the Connection String
     /// and URI Options specs: the option is ignored and parsing goes on. The
@@ -324,6 +329,8 @@ impl Default for ClientOptions {
             heartbeat_frequency: Duration::from_secs(10),
             max_pool_size: 10,
             zlib_level: -1,
+            max_adaptive_retries: 2,
+            overload_retargeting: false,
             warnings: Vec::new(),
         }
     }
@@ -449,8 +456,6 @@ impl ClientOptions {
     /// asks for unsupported keys.
     pub const UNSUPPORTED_OPTIONS: &'static [&'static str] = &[
         "authMechanismProperties",
-        "enableOverloadRetargeting",
-        "maxAdaptiveRetries",
         "maxConnecting",
         "maxIdleTimeMS",
         "minPoolSize",
@@ -834,6 +839,16 @@ impl ClientOptions {
                 "maxPoolSize" => {
                     if let Some(n) = int(&mut warn, 0, i32::MAX as i64, "a non-negative number (0: no limit)") {
                         o.max_pool_size = n as usize;
+                    }
+                }
+                "maxAdaptiveRetries" => {
+                    if let Some(n) = int(&mut warn, 0, i32::MAX as i64, "a non-negative number") {
+                        o.max_adaptive_retries = n as u32;
+                    }
+                }
+                "enableOverloadRetargeting" => {
+                    if let Some(b) = boolean(&mut warn) {
+                        o.overload_retargeting = b;
                     }
                 }
                 "srvMaxHosts" | "srvServiceName" if !srv => {

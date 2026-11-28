@@ -123,6 +123,8 @@ fn parsed_options(o: &ClientOptions) -> BTreeMap<String, Value> {
     }
     put("retryWrites", json!(o.retry_writes));
     put("retryReads", json!(o.retry_reads));
+    put("maxAdaptiveRetries", json!(o.max_adaptive_retries));
+    put("enableOverloadRetargeting", json!(o.overload_retargeting));
     if !o.compressors.is_empty() {
         put(
             "compressors",

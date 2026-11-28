@@ -56,7 +56,7 @@ impl GridFsBucket {
             .collect();
         if !chunks.is_empty() {
             if let Err(e) = self.chunks.insert_many_documents(chunks, true).await {
-                let _ = self.chunks.delete_many(doc! { "files_id" => id }).await;
+                let _ = self.chunks.delete_many(doc! { "files_id" => eq(id) }).await;
                 return Err(e);
             }
         }
@@ -75,8 +75,9 @@ impl GridFsBucket {
     }
 
     /// The file's bytes, checking every chunk is present and sized right.
-    pub async fn download(&self, id: ObjectId) -> Result<Vec<u8>> {
-        let file = self.files.find_one(doc! { "_id" => id }, FindOptions::default()).await?.ok_or_else(|| Error::config(format!("no GridFS file {id}")))?;
+    pub async fn download(&self, id: impl Into<Bson>) -> Result<Vec<u8>> {
+        let id = id.into();
+        let file = self.files.find_one(doc! { "_id" => eq(id.clone()) }, FindOptions::default()).await?.ok_or_else(|| Error::config(format!("no GridFS file {id:?}")))?;
         self.read_file(&file).await
     }
 
@@ -93,8 +94,12 @@ impl GridFsBucket {
         let length = file.get_i64("length").unwrap_or(0) as usize;
         let chunk_size = file.get_i64("chunkSize").unwrap_or(DEFAULT_CHUNK_SIZE as i64).max(1) as usize;
         let expected = length.div_ceil(chunk_size);
+        if length == 0 {
+            // An empty file: any (empty) chunk is irrelevant (GridFS spec).
+            return Ok(Vec::new());
+        }
         let mut out = Vec::with_capacity(length);
-        let mut cur = self.chunks.find(doc! { "files_id" => id }, FindOptions { sort: Some(doc! { "n" => 1 }), ..Default::default() }).await?;
+        let mut cur = self.chunks.find(doc! { "files_id" => eq(id) }, FindOptions { sort: Some(doc! { "n" => 1 }), ..Default::default() }).await?;
         let mut n = 0usize;
         while let Some(c) = cur.next().await {
             let c = c?;
@@ -121,21 +126,56 @@ impl GridFsBucket {
     }
 
     /// Delete a file and its chunks.
-    pub async fn delete(&self, id: ObjectId) -> Result<()> {
-        let n = self.files.delete_one(doc! { "_id" => id }).await?;
-        self.chunks.delete_many(doc! { "files_id" => id }).await?;
+    pub async fn delete(&self, id: impl Into<Bson>) -> Result<()> {
+        let id = id.into();
+        let n = self.files.delete_one(doc! { "_id" => eq(id.clone()) }).await?;
+        self.chunks.delete_many(doc! { "files_id" => eq(id.clone()) }).await?;
         if n == 0 {
-            return Err(Error::config(format!("no GridFS file {id}")));
+            return Err(Error::config(format!("no GridFS file {id:?}")));
         }
         Ok(())
     }
 
+    /// Delete every revision of `filename`, and their chunks.
+    pub async fn delete_by_name(&self, filename: &str) -> Result<()> {
+        let files = self.files.find(doc! { "filename" => eq(filename) }, FindOptions { projection: Some(doc! { "_id" => 1 }), ..Default::default() }).await?.collect().await?;
+        if files.is_empty() {
+            return Err(Error::config(format!("no GridFS file {filename:?}")));
+        }
+        let ids: Vec<Bson> = files.iter().filter_map(|f| f.get("_id").cloned()).collect();
+        self.files.delete_many(doc! { "_id" => doc! { "$in" => ids.clone() } }).await?;
+        self.chunks.delete_many(doc! { "files_id" => doc! { "$in" => ids } }).await?;
+        Ok(())
+    }
+
     /// Rename a file.
-    pub async fn rename(&self, id: ObjectId, new_name: &str) -> Result<()> {
-        let r = self.files.update_one(doc! { "_id" => id }, doc! { "$set" => doc! { "filename" => new_name } }, Default::default()).await?;
+    pub async fn rename(&self, id: impl Into<Bson>, new_name: &str) -> Result<()> {
+        let id = id.into();
+        let r = self.files.update_one(doc! { "_id" => eq(id.clone()) }, doc! { "$set" => doc! { "filename" => new_name } }, Default::default()).await?;
         if r.matched == 0 {
-            return Err(Error::config(format!("no GridFS file {id}")));
+            return Err(Error::config(format!("no GridFS file {id:?}")));
         }
         Ok(())
     }
+
+    /// Rename every revision of `filename`.
+    pub async fn rename_by_name(&self, filename: &str, new_name: &str) -> Result<()> {
+        let r = self.files.update_many(doc! { "filename" => eq(filename) }, doc! { "$set" => doc! { "filename" => new_name } }, Default::default()).await?;
+        if r.matched == 0 {
+            return Err(Error::config(format!("no GridFS file {filename:?}")));
+        }
+        Ok(())
+    }
+
+    /// Drop the bucket's files and chunks collections.
+    pub async fn drop(&self) -> Result<()> {
+        self.files.drop().await?;
+        self.chunks.drop().await
+    }
+}
+
+/// `{$eq: id}`: a query on a file id matches that value, even when the id
+/// is a document an application chose (the GridFS spec requires it).
+fn eq(id: impl Into<crate::bson::Bson>) -> crate::bson::Document {
+    doc! { "$eq" => id }
 }

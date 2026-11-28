@@ -23,7 +23,7 @@
 set -euo pipefail
 DIR="${1:-$(cd "$(dirname "$0")/../../../.." && pwd)/target/mongo}"
 shift || true
-WHAT="${*:-standalone tls rs sharded}"
+WHAT="${*:-standalone tls single rs sharded}"
 IMAGE="${MONGO_IMAGE:-mongo:8.0}"
 mkdir -p "$DIR"
 DIR="$(cd "$DIR" && pwd)"
@@ -121,6 +121,13 @@ if [ -z "${MONGO_BIN:-}" ]; then
     sh_in kernway-mongo-tls "${TLS_SH[@]}" admin --eval 'db.createUser({user:"root",pwd:"root_pw",roles:["root"]})' >/dev/null
     sh_in kernway-mongo-tls "${TLS_SH[@]}" -u root -p root_pw < x509.js >/dev/null
   fi
+  if has single; then
+    # A standalone without auth, with test commands (fail points): the
+    # official unified tests' "single" topology.
+    docker rm -f kernway-mongo-single >/dev/null 2>&1 || true
+    run kernway-mongo-single -p 27102:27102 "$IMAGE" mongod --port 27102 --bind_ip_all --setParameter enableTestCommands=1
+    for _ in $(seq 1 60); do sh_in kernway-mongo-single mongosh --quiet --port 27102 --eval 'db.runCommand({ping:1}).ok' >/dev/null 2>&1 && break; sleep 1; done
+  fi
   if has rs; then
     docker rm -f kernway-mongo-rs >/dev/null 2>&1 || true
     run kernway-mongo-rs -p 27111:27111 -p 27112:27112 -p 27113:27113 "$IMAGE" bash -c '
@@ -180,6 +187,10 @@ else
     "$MONGOSH" --quiet "${TLS_SH[@]}" admin --eval 'db.createUser({user:"root",pwd:"root_pw",roles:["root"]})' >/dev/null
     "$MONGOSH" --quiet "${TLS_SH[@]}" -u root -p root_pw < x509.js >/dev/null
   fi
+  if has single; then
+    start single --port 27102 --bind_ip 127.0.0.1 --setParameter enableTestCommands=1
+    wait_up --port 27102
+  fi
   if has rs; then
     for p in 27111 27112 27113; do start "rs$p" --replSet rs0 --port $p --bind_ip 127.0.0.1 --setParameter enableTestCommands=1; done
     for p in 27111 27112 27113; do wait_up --port $p; done
@@ -207,6 +218,7 @@ fi
 echo "$VERSION" >&2
 has standalone && echo "KERNWAY_MONGO_URL=mongodb://kernway:kernway_pw@127.0.0.1:27100/kernway_test?authSource=admin"
 has tls && echo "KERNWAY_MONGO_TLS_DIR=$(native_path "$DIR")"
+has single && echo "KERNWAY_MONGO_SINGLE_URL=mongodb://127.0.0.1:27102/"
 has rs && echo "KERNWAY_MONGO_RS_URL=mongodb://127.0.0.1:27111,127.0.0.1:27112/kernway_test?replicaSet=rs0"
 has sharded && echo "KERNWAY_MONGO_SHARDED_URL=mongodb://127.0.0.1:27120,127.0.0.1:27123/kernway_test"
 if [ -n "${MONGO_BIN:-}" ] && [ -z "$EXE" ] && has standalone; then echo "KERNWAY_MONGO_SOCKET=/tmp/mongodb-27100.sock"; fi

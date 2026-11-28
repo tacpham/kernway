@@ -17,7 +17,7 @@ hướng dẫn cuối trang.*
 | Refused with a clear error | Asking for it fails at once with an error that names it; nothing hangs or misbehaves. |
 | Built, not verified | The code exists, but the test setup has no server or platform to prove it against. |
 
-**77 gaps** across 13 drivers.
+**80 gaps** across 13 drivers.
 
 | Driver | Features | Gaps |
 |---|---:|---:|
@@ -25,7 +25,7 @@ hướng dẫn cuối trang.*
 | [Kafka](#kafka) | 33 | 7 |
 | [MariaDB](#mariadb) | 45 | 1 |
 | [Meilisearch](#meilisearch) | 14 | 3 |
-| [MongoDB](#mongodb) | 58 | 12 |
+| [MongoDB](#mongodb) | 66 | 15 |
 | [SQL Server](#mssql) | 29 | 8 |
 | [MySQL](#mysql) | 44 | — |
 | [NATS / JetStream](#nats) | 43 | 7 |
@@ -96,18 +96,21 @@ Report: [`docs/acceptance/mongodb.md`](acceptance/mongodb.md) · catalog: `accep
 
 | Area | Feature | Status | Why / what happens instead |
 |---|---|---|---|
-| Specifications | SDAM monitoring events, CMAP pool events, command monitoring, unified-format SDAM tests | Not built | no event API yet |
-| Specifications | URI options without an implementation: proxyHost / proxyPort / proxyUsername / proxyPassword (SOCKS5) | Not built | warned about and ignored — no SOCKS5 connector yet |
+| Specifications | CMAP / SDAM events and pool options (minPoolSize, maxIdleTimeMS, maxConnecting, waitQueueTimeoutMS); the CMAP and SDAM-monitoring spec suites | Not built | moderate — the shared kernway-wire pool has no event hooks or background maintenance; needs ordered pool / topology events |
+| Specifications | Stable API (serverApi: apiVersion / apiStrict / apiDeprecationErrors); run-command and versioned-api suites | Not built | easy to moderate — attach the fields to every command with the spec's exceptions |
+| Specifications | Client-side operation timeouts (timeoutMS, 539 tests) | Not built | hard — one deadline through selection, checkout, each round trip, retries, cursors and withTransaction |
+| Specifications | Client-side field-level and Queryable Encryption (433 tests) | Not built | very hard — needs libmongocrypt (a C library, against the self-written rule) or a re-implementation, plus KMS providers; a decision for the owner |
+| Specifications | mapReduce | Not built | easy — deprecated command, not wrapped |
+| Specifications | URI options without an implementation: proxyHost / proxyPort / proxyUsername / proxyPassword (SOCKS5) | Not built | warned about and ignored — no SOCKS5 connector yet (easy: kernway-ssh already speaks SOCKS5) |
 | Specifications | URI options without an implementation: minPoolSize, maxIdleTimeMS, maxConnecting, waitQueueTimeoutMS | Not built | warned about and ignored — the pool has only maxPoolSize |
-| Specifications | URI options without an implementation: maxAdaptiveRetries, enableOverloadRetargeting (client backpressure), serverMonitoringMode, srvAllowedHostsSuffix, authMechanismProperties | Not built | warned about and ignored |
+| Specifications | URI options without an implementation: serverMonitoringMode (streaming hello: moderate), srvAllowedHostsSuffix (easy), authMechanismProperties (only for the unimplemented mechanisms) | Not built | warned about and ignored |
 | Connection & security | PLAIN (LDAP) | Built, not verified | implemented, but only MongoDB Enterprise speaks it — not verified against a server |
-| Connection & security | GSSAPI / Kerberos, MONGODB-AWS, MONGODB-OIDC | Refused with a clear error | refused with a clear error |
-| Connection & security | Encrypted client keys (tlsCertificateKeyFilePassword), OCSP and revocation checks (tlsDisableOCSPEndpointCheck, tlsDisableCertificateRevocationCheck) | Not built | the options are warned about and ignored (an encrypted key then fails to load); OCSP is not checked |
+| Connection & security | GSSAPI / Kerberos, MONGODB-AWS, MONGODB-OIDC | Refused with a clear error | refused with a clear error — AWS (SigV4 signing, credential chain) and OIDC (callbacks, token cache) are moderate; GSSAPI is hard (a self-written Kerberos); each also needs a real AWS / IdP / KDC to test against |
+| Connection & security | Encrypted client keys (tlsCertificateKeyFilePassword), OCSP and revocation checks (tlsDisableOCSPEndpointCheck, tlsDisableCertificateRevocationCheck) | Not built | the options are warned about and ignored (an encrypted key then fails to load); OCSP is not checked — moderate: PKCS#8 PBES2 decryption needs AES-CBC decryption, not written yet; OCSP is optional in the spec |
 | Connection & security | Unix-domain sockets on Windows | Not built | rt-net has no AF_UNIX on Windows; TCP there |
 | Protocol | zstd compression | Not built | not negotiated (snappy and zlib are) |
 | Protocol | Exhaust cursors / streaming hello | Not built | cursors use getMore; monitors poll hello every heartbeatFrequencyMS |
 | Topology | Load-balanced mode | Built, not verified | implemented (loadBalanced=true, serviceId check), not verified behind a load balancer |
-| Reliability | Client-side field-level / Queryable Encryption, Stable API, client-side operation timeouts (timeoutMS), command monitoring events | Not built | not implemented |
 
 <a id="mssql"></a>
 ## SQL Server

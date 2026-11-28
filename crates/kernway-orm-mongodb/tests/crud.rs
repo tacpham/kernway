@@ -172,7 +172,7 @@ fn bulk_aggregate_and_indexes() {
                     WriteModel::UpdateOne { filter: doc! { "_id" => 1 }, update: Bson::from(doc! { "$set" => doc! { "v" => 1 } }), options: Default::default() },
                     WriteModel::UpdateMany { filter: doc! {}, update: Bson::from(doc! { "$inc" => doc! { "c" => 1 } }), options: Default::default() },
                     WriteModel::ReplaceOne { filter: doc! { "_id" => 9 }, replacement: doc! { "k" => "z" }, options: UpdateOptions { upsert: true, ..Default::default() } },
-                    WriteModel::DeleteOne { filter: doc! { "_id" => 2 } },
+                    WriteModel::DeleteOne { filter: doc! { "_id" => 2 }, options: Default::default() },
                     WriteModel::InsertOne(doc! { "_id" => 3 }),
                 ],
                 true,

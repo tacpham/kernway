@@ -112,9 +112,17 @@ pub struct Connection {
     broken: bool,
     /// The pool generation it was opened in (stale after a pool clear).
     pub(crate) generation: u64,
+    /// The driver's id for it (command monitoring).
+    pub(crate) id: u64,
 }
 
-fn next_request_id() -> i32 {
+fn next_connection_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static ID: AtomicU64 = AtomicU64::new(1);
+    ID.fetch_add(1, Ordering::Relaxed)
+}
+
+pub(crate) fn next_request_id() -> i32 {
     use std::sync::atomic::{AtomicI32, Ordering};
     static ID: AtomicI32 = AtomicI32::new(1);
     ID.fetch_add(1, Ordering::Relaxed) & i32::MAX
@@ -156,6 +164,7 @@ impl Connection {
                 socket_timeout: spec.socket_timeout,
                 broken: false,
                 generation: 0,
+                id: next_connection_id(),
             };
             c.handshake(spec, authenticate).await?;
             Ok(c)
@@ -171,7 +180,8 @@ impl Connection {
     }
 
     async fn handshake(&mut self, spec: &ConnectSpec, authenticate: bool) -> Result<()> {
-        let mut hello = Document::new().with("hello", 1).with("helloOk", true).with("client", client_metadata(spec.app_name.as_deref()));
+        // backpressure "2": this client follows the client backpressure spec.
+        let mut hello = Document::new().with("hello", 1).with("helloOk", true).with("backpressure", "2").with("client", client_metadata(spec.app_name.as_deref()));
         if !spec.compressors.is_empty() {
             hello.insert("compression", Bson::Array(spec.compressors.iter().map(|c| Bson::from(c.name())).collect()));
         }
@@ -312,6 +322,19 @@ impl Connection {
         self.broken
     }
 
+    /// The server's id for this connection (`connectionId` in its hello).
+    pub fn server_connection_id(&self) -> Option<i64> {
+        self.hello.raw.get_i64("connectionId")
+    }
+
+    /// The service behind a load balancer (`serviceId` in its hello).
+    pub fn service_id(&self) -> Option<crate::bson::ObjectId> {
+        match self.hello.raw.get("serviceId") {
+            Some(crate::bson::Bson::ObjectId(o)) => Some(*o),
+            _ => None,
+        }
+    }
+
     /// Whether TLS is on.
     pub fn is_tls(&self) -> bool {
         self.io.is_tls()
@@ -329,18 +352,31 @@ impl Connection {
     }
 
     /// Send a command and return the reply document unchecked.
-    pub(crate) async fn command_raw(&mut self, db: &str, mut command: Document, seqs: &[Sequence<'_>], flags: u32) -> Result<Document> {
+    pub(crate) async fn command_raw(&mut self, db: &str, command: Document, seqs: &[Sequence<'_>], flags: u32) -> Result<Document> {
+        self.command_raw_as(db, command, seqs, flags, next_request_id()).await
+    }
+
+    /// [`command_raw`](Self::command_raw) with a request id chosen by the caller.
+    pub(crate) async fn command_raw_as(&mut self, db: &str, mut command: Document, seqs: &[Sequence<'_>], flags: u32, id: i32) -> Result<Document> {
         if self.broken {
             return Err(Error::network(format!("connection to {} is broken", self.address)));
         }
         command.insert("$db", db);
-        let id = next_request_id();
         self.next_request = id;
         let compressor = self.compressor;
         wire::encode_msg(self.io.write_buf(), id, flags, &command, seqs, compressor)?;
         let max = self.hello.max_message_size().max(48_000_000);
         if self.io.write_buf_append().len() > max {
             return Err(Error::new(crate::error::ErrorKind::Command { code: 10334, code_name: "BSONObjectTooLarge".into() }, "message larger than maxMessageSizeBytes"));
+        }
+        if flags & wire::MORE_TO_COME != 0 {
+            // An unacknowledged write: the server sends no reply (OP_MSG spec).
+            self.io.flush().await.map_err(|e| {
+                self.broken = true;
+                Error::network(format!("send to {}: {e}", self.address))
+            })?;
+            self.io.write_buf();
+            return Ok(crate::doc! { "ok" => 1 });
         }
         let timeout = self.socket_timeout;
         let r = match timeout {

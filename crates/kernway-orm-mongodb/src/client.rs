@@ -6,6 +6,7 @@
 use crate::bson::{Binary, Bson, Document, Timestamp};
 use crate::conn::{ConnectSpec, Connection};
 use crate::error::{Error, ErrorKind, Result};
+use crate::events::{self, CommandContext, CommandEvent};
 use crate::options::{Address, ClientOptions, ReadConcern, ReadMode, ReadPreference, WriteConcern};
 use crate::topology::{ApplicationError, Selection, ServerDescription, ServerType, Topology, TopologyType};
 use crate::wire::Sequence;
@@ -90,7 +91,12 @@ pub(crate) struct ClientInner {
     /// Operations in flight per server (`operationCount`: selection prefers
     /// the less busy of two servers in the latency window).
     in_flight: RefCell<HashMap<Address, u64>>,
+    /// Command monitoring listeners.
+    command_listeners: RefCell<Vec<CommandListener>>,
 }
+
+/// A command-monitoring listener.
+type CommandListener = Rc<dyn Fn(&CommandEvent)>;
 
 /// One operation counted against its server until dropped.
 pub(crate) struct InFlight {
@@ -150,6 +156,25 @@ pub(crate) struct SessionState {
     /// A snapshot session's read timestamp.
     pub snapshot_time: Option<Timestamp>,
     pub snapshot: bool,
+    /// A sharded transaction's `recoveryToken` (sent with commit / abort).
+    pub recovery_token: Option<Document>,
+    /// The current transaction has sent no command (commit / abort are then no-ops).
+    pub txn_empty: bool,
+    /// Defaults for this session's transactions (`defaultTransactionOptions`).
+    pub default_txn_options: TransactionOptions,
+}
+
+/// Options of an explicit session.
+#[derive(Debug, Clone, Default)]
+pub struct SessionOptions {
+    /// Causally consistent reads (default: on, off for a snapshot session).
+    pub causal_consistency: Option<bool>,
+    /// Snapshot reads.
+    pub snapshot: bool,
+    /// Defaults of the transactions started in it.
+    pub default_transaction_options: TransactionOptions,
+    /// A snapshot session's read time, chosen by the application.
+    pub snapshot_time: Option<Timestamp>,
 }
 
 /// An explicit session: causally consistent reads, and transactions.
@@ -178,6 +203,13 @@ pub(crate) struct Op<'a> {
     pub read_concern: bool,
     pub write_concern: bool,
     pub session: Option<&'a Session>,
+    /// Continues a cursor (getMore, killCursors): use exactly `session` —
+    /// never a new implicit one when the cursor had none.
+    pub cursor_session: bool,
+    /// The database's / collection's read concern (else the client's).
+    pub rc: Option<ReadConcern>,
+    /// The database's / collection's write concern (else the client's).
+    pub wc: Option<WriteConcern>,
 }
 
 /// A command's reply and where it ran.
@@ -223,6 +255,7 @@ impl Client {
             check_now: Cell::new(0),
             srv_checked: Cell::new(Some(Instant::now())),
             in_flight: RefCell::new(HashMap::new()),
+            command_listeners: RefCell::new(Vec::new()),
         });
         let client = Client { inner };
         if client.inner.options.load_balanced {
@@ -275,6 +308,20 @@ impl Client {
     /// Ask every monitor to check now (after an error, or while selecting).
     pub(crate) fn request_check(&self) {
         self.inner.check_now.set(self.inner.check_now.get() + 1);
+    }
+
+    /// Report every command this client sends for operations to `listener`
+    /// (command monitoring: started, then succeeded or failed). Sensitive
+    /// commands are reported with an empty command and reply.
+    pub fn on_command(&self, listener: impl Fn(&CommandEvent) + 'static) {
+        self.inner.command_listeners.borrow_mut().push(Rc::new(listener));
+    }
+
+    fn emit(&self, event: CommandEvent) {
+        let listeners: Vec<CommandListener> = self.inner.command_listeners.borrow().clone();
+        for l in listeners {
+            l(&event);
+        }
     }
 
     /// A server for `sel`, waiting up to `serverSelectionTimeoutMS`.
@@ -419,6 +466,21 @@ impl Client {
         self.new_session(false, true, false)
     }
 
+    /// A session with options: causal consistency (default on), snapshot
+    /// reads, and the default options of its transactions.
+    pub fn start_session_with(&self, o: SessionOptions) -> Result<Session> {
+        if o.snapshot && o.causal_consistency == Some(true) {
+            return Err(Error::invalid("a session cannot be both snapshot and causally consistent"));
+        }
+        if o.snapshot_time.is_some() && !o.snapshot {
+            return Err(Error::invalid("snapshotTime needs a snapshot session"));
+        }
+        let s = self.new_session(false, o.causal_consistency.unwrap_or(!o.snapshot), o.snapshot);
+        s.state.borrow_mut().default_txn_options = o.default_transaction_options;
+        s.state.borrow_mut().snapshot_time = o.snapshot_time;
+        Ok(s)
+    }
+
     /// A snapshot session (reads at one point in time; no writes).
     pub fn start_snapshot_session(&self) -> Session {
         self.new_session(false, false, true)
@@ -437,6 +499,9 @@ impl Client {
                 pinned: None,
                 implicit,
                 snapshot_time: None,
+                recovery_token: None,
+                txn_empty: false,
+                default_txn_options: TransactionOptions::default(),
                 snapshot,
             })),
         }
@@ -458,6 +523,9 @@ impl Client {
                 }
             }
         }
+        if let (Some(s), Some(Bson::Document(token))) = (session, reply.get("recoveryToken")) {
+            s.state.borrow_mut().recovery_token = Some(token.clone());
+        }
         if let (Some(s), Some(Bson::Timestamp(t))) = (session, reply.get("operationTime")) {
             let mut st = s.state.borrow_mut();
             if st.operation_time.is_none_or(|o| *t > o) {
@@ -474,22 +542,54 @@ impl Client {
 
     /// Run one operation with every rule around it.
     pub(crate) async fn execute(&self, op: Op<'_>) -> Result<Ran> {
-        let supports_sessions = {
-            let t = self.inner.topology.borrow();
-            t.supports_sessions() || t.kind == TopologyType::Unknown
+        // Select first: whether the deployment supports sessions is known
+        // only once a server is (the sessions spec); the first attempt then
+        // runs on that server.
+        let mut preselected = match (op.session, op.cursor_session) {
+            (None, false) => Some(self.select(&op.selection).await?),
+            _ => None,
         };
-        // An implicit session when the caller gave none.
+        let supports_sessions = self.inner.topology.borrow().supports_sessions();
+        // An implicit session when the caller gave none — never for a
+        // cursor's getMore / killCursors, which use the cursor's own.
         let implicit = match op.session {
-            None if supports_sessions => Some(self.new_session(true, false, false)),
+            None if supports_sessions && !op.cursor_session => Some(self.new_session(true, false, false)),
             _ => None,
         };
         let session = op.session.or(implicit.as_ref());
         let in_txn = session.is_some_and(|s| matches!(s.state.borrow().txn, TxnState::Starting | TxnState::InProgress));
         let cmd_name = op.command.first_key().unwrap_or("").to_string();
         let is_txn_end = cmd_name == "commitTransaction" || cmd_name == "abortTransaction";
+        if let Some(s) = session {
+            if !in_txn && !is_txn_end && !op.cursor_session {
+                // Outside a transaction: a finished one's state ends, and so does its pinning.
+                let mut st = s.state.borrow_mut();
+                if matches!(st.txn, TxnState::Committed | TxnState::Aborted) {
+                    st.txn = TxnState::None;
+                }
+                st.pinned = None;
+            }
+        }
+        if in_txn && !is_txn_end {
+            // A read in a transaction: the transaction's read preference (or
+            // the client's), or the operation's own, must be primary.
+            let txn_rp = session.and_then(|s| s.state.borrow().txn_options.read_preference.clone()).unwrap_or_else(|| self.inner.options.read_preference.clone());
+            // Reads, and commands that are not writes (runCommand), use the transaction's.
+            let non_primary = match &op.selection {
+                Selection::Read(rp) => rp.mode != ReadMode::Primary,
+                _ => !op.write_concern && txn_rp.mode != ReadMode::Primary,
+            };
+            if non_primary {
+                return Err(Error::transaction("read preference in a transaction must be primary"));
+            }
+        }
         let mut retry = if in_txn && !is_txn_end { Retry::No } else { op.retry };
         let o = &self.inner.options;
-        if retry == Retry::Write && (!o.retry_writes || o.write_concern.is_unacknowledged()) {
+        let op_wc = op.wc.clone().unwrap_or_else(|| o.write_concern.clone());
+        let op_rc = op.rc.clone().or_else(|| o.read_concern.clone());
+        // commitTransaction / abortTransaction are retried once even with
+        // retryWrites=false (transactions spec).
+        if retry == Retry::Write && !is_txn_end && (!o.retry_writes || op_wc.is_unacknowledged()) {
             retry = Retry::No;
         }
         if retry == Retry::Read && !o.retry_reads {
@@ -503,15 +603,36 @@ impl Client {
         }
         let mut attempt = 0;
         let mut txn_number = None;
+        // One id for every attempt of this operation (command monitoring).
+        let operation_id = crate::conn::next_request_id();
         // A retry avoids the server the first attempt failed on, if it can.
         let mut deprioritized: Vec<Address> = Vec::new();
         let mut last: Option<Address> = None;
+        // Retries this operation may still make: 1 under the read / write
+        // policies, maxAdaptiveRetries once the server reports overload.
+        let mut allowed_retries: u32 = 1;
+        // A commit retried under the retryable-writes policy asks for majority
+        // (one retried after overload does not).
+        let mut majority_commit = false;
+        // Whether a command of this kind may be retried after overload
+        // (client backpressure spec): writes need retryWrites, reads
+        // retryReads, a generic command both.
+        let overload_eligible = if op.write_concern {
+            o.retry_writes
+        } else if op.read_concern || op.cursor_session {
+            o.retry_reads
+        } else {
+            o.retry_reads && o.retry_writes
+        };
         loop {
             attempt += 1;
             if let Some(prev) = last.take() {
                 deprioritized.push(prev);
             }
-            let address = self.select_avoiding(&selection, &deprioritized).await?;
+            let address = match preselected.take() {
+                Some(a) if session.and_then(|s| s.state.borrow().pinned.clone()).is_none() => a,
+                _ => self.select_avoiding(&selection, &deprioritized).await?,
+            };
             let _in_flight = self.in_flight(&address);
             last = Some(address.clone());
             let (kind, wire) = {
@@ -556,8 +677,13 @@ impl Client {
                     }
                     cmd.insert("txnNumber", Bson::Int64(txn_number.unwrap_or(1)));
                 }
-                if !in_txn && op.read_concern {
-                    let mut rcd = o.read_concern.clone().map(|r| Document::new().with("level", r.0)).unwrap_or_default();
+                // Causal consistency: reads and writes (CRUD, create, drop,
+                // indexes — the causal consistency spec's list) carry
+                // afterClusterTime; a snapshot session puts its read concern
+                // on every command.
+                let crud_write = op.write_concern && !is_txn_end;
+                if !in_txn && (op.read_concern || crud_write || (st.snapshot && !op.cursor_session && !is_txn_end && cmd_name != "endSessions")) {
+                    let mut rcd = if op.read_concern { op_rc.clone().map(|r| Document::new().with("level", r.0)).unwrap_or_default() } else { Document::new() };
                     if st.snapshot {
                         rcd.insert("level", "snapshot");
                         if let Some(t) = st.snapshot_time {
@@ -572,17 +698,22 @@ impl Client {
                         cmd.insert("readConcern", rcd);
                     }
                 }
-            } else if op.read_concern {
-                if let Some(rc) = &o.read_concern {
+            } else if op.read_concern && !cmd.contains_key("readConcern") {
+                if let Some(rc) = &op_rc {
                     cmd.insert("readConcern", Document::new().with("level", rc.0.clone()));
                 }
             }
-            if op.write_concern && !in_txn && !cmd.contains_key("writeConcern") {
-                let wc = if is_txn_end {
+            if op.write_concern && (!in_txn || is_txn_end) && !cmd.contains_key("writeConcern") {
+                let mut wc = if is_txn_end {
                     session.and_then(|s| s.state.borrow().txn_options.write_concern.clone()).unwrap_or_else(|| o.write_concern.clone())
                 } else {
-                    o.write_concern.clone()
+                    op_wc.clone()
                 };
+                if cmd_name == "commitTransaction" && majority_commit {
+                    // A retried commit: majority, with a 10 s wtimeout unless one is set (transactions spec).
+                    wc.w = Some(Bson::String("majority".into()));
+                    wc.timeout = wc.timeout.or(Some(Duration::from_secs(10)));
+                }
                 if !wc.is_default() {
                     cmd.insert("writeConcern", wc.to_document());
                 }
@@ -605,6 +736,10 @@ impl Client {
                     cmd.insert("$clusterTime", ct);
                 }
             }
+            // rawData (internal) only reaches MongoDB 8.2+ (wire 27): the CRUD spec.
+            if wire < 27 {
+                cmd.remove("rawData");
+            }
             // Read preference for mongos, and for a direct connection.
             if let Selection::Read(rp) = &op.selection {
                 let topo = self.inner.topology.borrow().kind;
@@ -622,7 +757,58 @@ impl Client {
             // still on its way — is discarded, never handed out again.
             conn.poison();
             let generation = conn.generation;
-            let result = conn.command_seq(op.db, cmd, op.seqs).await;
+            let request_id = crate::conn::next_request_id();
+            let monitored = !self.inner.command_listeners.borrow().is_empty();
+            let context = monitored.then(|| {
+                let name = cmd.first_key().unwrap_or("").to_string();
+                CommandContext {
+                    command_name: name,
+                    database_name: op.db.to_string(),
+                    request_id,
+                    operation_id,
+                    address: address.clone(),
+                    connection_id: conn.id,
+                    server_connection_id: conn.server_connection_id(),
+                    service_id: conn.service_id(),
+                }
+            });
+            let sensitive = context.as_ref().is_some_and(|c| events::is_sensitive(&c.command_name, &cmd));
+            if let Some(c) = &context {
+                let command = if sensitive { Document::new() } else { events::as_sent(op.db, &cmd, op.seqs) };
+                self.emit(CommandEvent::Started { command, context: c.clone() });
+            }
+            let started = Instant::now();
+            // Unacknowledged (w: 0, no journal) outside a transaction: moreToCome, no reply.
+            let unacknowledged = op.write_concern
+                && !in_txn
+                && cmd.get_document("writeConcern").is_some_and(|w| w.get_i64("w") == Some(0) && w.get_bool("j") != Some(true));
+            let flags = if unacknowledged { crate::wire::MORE_TO_COME } else { 0 };
+            let raw = conn.command_raw_as(op.db, cmd, op.seqs, flags, request_id).await;
+            if let Some(context) = context {
+                let duration = started.elapsed();
+                let event = match &raw {
+                    Ok(reply) if crate::error::reply_ok(reply) => {
+                        CommandEvent::Succeeded { reply: if sensitive { Document::new() } else { reply.clone() }, duration, context }
+                    }
+                    Ok(reply) => CommandEvent::Failed { failure: Error::from_reply(reply), duration, context },
+                    Err(e) => CommandEvent::Failed { failure: e.clone(), duration, context },
+                };
+                self.emit(event);
+            }
+            let result = raw.and_then(crate::error::check_reply);
+            let was_starting = session.is_some_and(|s| s.state.borrow().txn == TxnState::Starting);
+            if let Some(s) = session {
+                let mut st = s.state.borrow_mut();
+                if in_txn {
+                    st.txn_empty = false;
+                }
+                if st.txn == TxnState::Starting {
+                    st.txn = TxnState::InProgress;
+                    if kind == ServerType::Mongos {
+                        st.pinned = Some(address.clone());
+                    }
+                }
+            }
             if !conn.is_broken() {
                 conn.mark_healthy();
             }
@@ -630,15 +816,6 @@ impl Client {
             match result {
                 Ok(reply) => {
                     self.gossip(&reply, session);
-                    if let Some(s) = session {
-                        let mut st = s.state.borrow_mut();
-                        if st.txn == TxnState::Starting {
-                            st.txn = TxnState::InProgress;
-                            if kind == ServerType::Mongos {
-                                st.pinned = Some(address.clone());
-                            }
-                        }
-                    }
                     let implicit = implicit.clone();
                     if let Some(i) = &implicit {
                         // Implicit sessions go back unless a cursor needs them.
@@ -652,6 +829,10 @@ impl Client {
                     return Ok(Ran { reply, address, implicit });
                 }
                 Err(mut e) => {
+                    // A server error still carries the cluster / operation time.
+                    if let Some(r) = e.server_response().cloned() {
+                        self.gossip(&r, session);
+                    }
                     if e.is_network() {
                         if let Some(s) = session {
                             if let Some(srv) = s.state.borrow_mut().server.as_mut() {
@@ -681,12 +862,47 @@ impl Client {
                     if retry == Retry::Write && e.is_network() && !e.has_label("RetryableWriteError") {
                         e.labels.push("RetryableWriteError".into());
                     }
-                    let retryable = match retry {
+                    let by_policy = match retry {
                         Retry::Read => e.is_retryable(),
                         Retry::Write => e.has_label("RetryableWriteError") || (e.is_network()),
                         Retry::No => false,
                     };
-                    if retryable && attempt == 1 {
+                    let overload = e.has_label("SystemOverloadedError");
+                    if overload {
+                        allowed_retries = o.max_adaptive_retries;
+                    }
+                    let retryable = by_policy || (overload && e.has_label("RetryableError") && overload_eligible);
+                    if retryable && (attempt as u32) <= allowed_retries {
+                        if overload {
+                            // backoff = jitter × min(10 s, base × 2^attempt), base 100 ms or the server's baseBackoffMS.
+                            let base = e.server_response().and_then(|r| r.get_i64("baseBackoffMS")).filter(|b| *b > 0).unwrap_or(100) as f64;
+                            let mut b = [0u8; 8];
+                            let _ = kernway_tls::fill_random(&mut b);
+                            let jitter = (u64::from_le_bytes(b) >> 11) as f64 / (1u64 << 53) as f64;
+                            let ms = jitter * (base * 2f64.powi(attempt)).min(10_000.0);
+                            rt_core::sleep(Duration::from_secs_f64(ms / 1000.0)).await;
+                            if !o.overload_retargeting {
+                                // Retry on the same server unless retargeting is enabled.
+                                last = None;
+                            }
+                        }
+                        if by_policy && !overload {
+                            majority_commit = true;
+                        }
+                        if is_txn_end && by_policy {
+                            // A retried commit / abort may go to another mongos
+                            // (carrying the recoveryToken): unpin first.
+                            if let Some(s) = session {
+                                s.state.borrow_mut().pinned = None;
+                            }
+                            selection = op.selection.clone();
+                        }
+                        if was_starting {
+                            // The retried first command of a transaction starts it again.
+                            if let Some(s) = session {
+                                s.state.borrow_mut().txn = TxnState::Starting;
+                            }
+                        }
                         continue;
                     }
                     if let Some(i) = &implicit {
@@ -702,13 +918,25 @@ impl Client {
 
     /// Run a command on `db` on the primary (or per `read`), returning the reply.
     pub async fn run_command(&self, db: &str, command: Document) -> Result<Document> {
-        let op = Op { db, command, seqs: &[], selection: Selection::Write, retry: Retry::No, read_concern: false, write_concern: false, session: None };
+        let op = Op { db, command, seqs: &[], selection: Selection::Write, retry: Retry::No, read_concern: false, write_concern: false, session: None, cursor_session: false, rc: None, wc: None };
         Ok(self.execute(op).await?.reply)
     }
 
     /// [`run_command`](Self::run_command) on a server picked by `read`.
     pub async fn run_command_with(&self, db: &str, command: Document, read: &ReadPreference) -> Result<Document> {
-        let op = Op { db, command, seqs: &[], selection: Selection::Read(read.clone()), retry: Retry::No, read_concern: false, write_concern: false, session: None };
+        let op = Op { db, command, seqs: &[], selection: Selection::Read(read.clone()), retry: Retry::No, read_concern: false, write_concern: false, session: None, cursor_session: false, rc: None, wc: None };
+        Ok(self.execute(op).await?.reply)
+    }
+
+    /// The newest cluster time the client has seen (`$clusterTime`).
+    pub fn cluster_time(&self) -> Option<Document> {
+        self.inner.cluster_time.borrow().clone()
+    }
+
+    /// Run `command` on one particular server (e.g. a fail point on the
+    /// mongos a transaction is pinned to).
+    pub async fn run_command_at(&self, address: &Address, db: &str, command: Document) -> Result<Document> {
+        let op = Op { db, command, seqs: &[], selection: Selection::Address(address.clone()), retry: Retry::No, read_concern: false, write_concern: false, session: None, cursor_session: false, rc: None, wc: None };
         Ok(self.execute(op).await?.reply)
     }
 
@@ -719,8 +947,36 @@ impl Client {
 
     /// Database names.
     pub async fn list_database_names(&self) -> Result<Vec<String>> {
-        let r = self.run_command("admin", Document::new().with("listDatabases", 1).with("nameOnly", true)).await?;
-        Ok(r.get_array("databases").map(|a| a.iter().filter_map(|d| d.as_document()?.get_str("name").map(String::from)).collect()).unwrap_or_default())
+        let dbs = self.list_databases_raw(Document::new().with("listDatabases", 1).with("nameOnly", true), None).await?;
+        Ok(dbs.iter().filter_map(|d| d.get_str("name").map(String::from)).collect())
+    }
+
+    /// The databases (`listDatabases`): name, size, emptiness — a retryable read.
+    pub async fn list_databases(&self, filter: Document) -> Result<Vec<Document>> {
+        self.list_databases_raw(Document::new().with("listDatabases", 1).with("filter", filter), None).await
+    }
+
+    /// [`Client::list_databases`] in `session`.
+    pub async fn list_databases_in(&self, filter: Document, session: &Session) -> Result<Vec<Document>> {
+        self.list_databases_raw(Document::new().with("listDatabases", 1).with("filter", filter), Some(session)).await
+    }
+
+    async fn list_databases_raw(&self, command: Document, session: Option<&Session>) -> Result<Vec<Document>> {
+        let op = Op {
+            db: "admin",
+            command,
+            seqs: &[],
+            selection: Selection::Read(ReadPreference::primary()),
+            retry: Retry::Read,
+            read_concern: false,
+            write_concern: false,
+            session,
+            cursor_session: false,
+            rc: None,
+            wc: None,
+        };
+        let r = self.execute(op).await?.reply;
+        Ok(r.get_array("databases").map(|a| a.iter().filter_map(|d| d.as_document().cloned()).collect()).unwrap_or_default())
     }
 
     /// End the pooled server sessions on the server (best effort).
@@ -820,6 +1076,63 @@ impl Session {
         self.state.borrow().server.as_ref().map(|s| s.id.clone())
     }
 
+    /// A snapshot session's read time, once its first read chose one.
+    pub fn snapshot_time(&self) -> Option<Timestamp> {
+        self.state.borrow().snapshot_time
+    }
+
+    /// The cluster time this session has seen (`$clusterTime`).
+    pub fn cluster_time(&self) -> Option<Document> {
+        self.state.borrow().cluster_time.clone()
+    }
+
+    /// Advance the session's cluster time to `ct` (a `$clusterTime`
+    /// document) if it is newer — the Driver Sessions spec's
+    /// `advanceClusterTime`, e.g. to carry another client's writes.
+    pub fn advance_cluster_time(&self, ct: &Document) {
+        let mut st = self.state.borrow_mut();
+        let newer = match (st.cluster_time.as_ref().and_then(|d| d.get("clusterTime")), ct.get("clusterTime")) {
+            (Some(Bson::Timestamp(a)), Some(Bson::Timestamp(b))) => b > a,
+            (_, Some(Bson::Timestamp(_))) => true,
+            _ => false,
+        };
+        if newer {
+            st.cluster_time = Some(ct.clone());
+        }
+    }
+
+    /// Advance the session's operation time (`advanceOperationTime`):
+    /// causally consistent reads then wait for it.
+    pub fn advance_operation_time(&self, t: Timestamp) {
+        let mut st = self.state.borrow_mut();
+        if st.operation_time.is_none_or(|o| t > o) {
+            st.operation_time = Some(t);
+        }
+    }
+
+    /// The transaction state: `none`, `starting`, `in_progress`,
+    /// `committed` or `aborted` (the transactions spec's names).
+    pub fn transaction_state(&self) -> &'static str {
+        match self.state.borrow().txn {
+            TxnState::None => "none",
+            TxnState::Starting => "starting",
+            TxnState::InProgress => "in_progress",
+            TxnState::Committed => "committed",
+            TxnState::Aborted => "aborted",
+        }
+    }
+
+    /// The mongos a sharded transaction is pinned to.
+    pub fn pinned_address(&self) -> Option<Address> {
+        self.state.borrow().pinned.clone()
+    }
+
+    /// Whether the server session saw a network error (it is then discarded
+    /// instead of reused).
+    pub fn is_dirty(&self) -> bool {
+        self.state.borrow().server.as_ref().is_some_and(|s| s.dirty)
+    }
+
     /// The latest operation time seen (causal consistency).
     pub fn operation_time(&self) -> Option<Timestamp> {
         self.state.borrow().operation_time
@@ -839,20 +1152,32 @@ impl Session {
             return Err(Error::transaction("transactions need a replica set or a sharded cluster, not a standalone server"));
         }
         let mut st = self.state.borrow_mut();
+        // The messages are the transactions spec's.
         if st.snapshot {
-            return Err(Error::transaction("a snapshot session does not run transactions"));
+            return Err(Error::transaction("Transactions are not supported in snapshot sessions"));
         }
         if matches!(st.txn, TxnState::Starting | TxnState::InProgress) {
-            return Err(Error::transaction("a transaction is already in progress"));
+            return Err(Error::transaction("transaction already in progress"));
         }
-        if options.read_preference.as_ref().is_some_and(|r| r.mode != ReadMode::Primary) {
-            return Err(Error::transaction("transactions read from the primary"));
+        // Unset options come from the session's defaults, then the client's.
+        let d = st.default_txn_options.clone();
+        let options = TransactionOptions {
+            read_concern: options.read_concern.or(d.read_concern),
+            write_concern: options.write_concern.or(d.write_concern),
+            read_preference: options.read_preference.or(d.read_preference),
+            max_commit_time: options.max_commit_time.or(d.max_commit_time),
+        };
+        let wc = options.write_concern.clone().unwrap_or_else(|| self.client.inner.options.write_concern.clone());
+        if wc.is_unacknowledged() {
+            return Err(Error::transaction("transactions do not support unacknowledged write concern"));
         }
         let srv = st.server.get_or_insert_with(|| self.client.checkout_session());
         srv.txn_number += 1;
         st.txn = TxnState::Starting;
         st.txn_options = options;
         st.pinned = None;
+        st.recovery_token = None;
+        st.txn_empty = true;
         Ok(())
     }
 
@@ -860,14 +1185,15 @@ impl Session {
         let state = self.state.borrow().txn;
         match (state, commit) {
             (TxnState::None, _) => return Err(Error::transaction("no transaction started")),
+            (TxnState::Committed, false) => return Err(Error::transaction("Cannot call abortTransaction after calling commitTransaction")),
             (TxnState::Starting, _) => {
                 // Nothing reached the server.
                 self.state.borrow_mut().txn = if commit { TxnState::Committed } else { TxnState::Aborted };
                 return Ok(());
             }
-            (TxnState::Aborted, true) => return Err(Error::transaction("cannot commit an aborted transaction")),
-            (TxnState::Aborted, false) => return Err(Error::transaction("the transaction was already aborted")),
-            (TxnState::Committed, false) => return Err(Error::transaction("cannot abort a committed transaction")),
+            (TxnState::Committed, true) if self.state.borrow().txn_empty => return Ok(()),
+            (TxnState::Aborted, true) => return Err(Error::transaction("Cannot call commitTransaction after calling abortTransaction")),
+            (TxnState::Aborted, false) => return Err(Error::transaction("cannot call abortTransaction twice")),
             _ => {}
         }
         let name = if commit { "commitTransaction" } else { "abortTransaction" };
@@ -884,12 +1210,15 @@ impl Session {
                 cmd.insert("writeConcern", wc.to_document());
             }
         }
-        let op = Op { db: "admin", command: cmd, seqs: &[], selection: Selection::Write, retry: Retry::Write, read_concern: false, write_concern: true, session: Some(self) };
+        if let Some(t) = self.state.borrow().recovery_token.clone() {
+            cmd.insert("recoveryToken", t);
+        }
+        let op = Op { db: "admin", command: cmd, seqs: &[], selection: Selection::Write, retry: Retry::Write, read_concern: false, write_concern: true, session: Some(self), cursor_session: false, rc: None, wc: None };
         let r = self.client.execute(op).await;
         {
             let mut st = self.state.borrow_mut();
             st.txn = if commit { TxnState::Committed } else { TxnState::Aborted };
-            if !commit || r.is_ok() {
+            if !commit {
                 st.pinned = None;
             }
         }
@@ -985,6 +1314,8 @@ pub struct Cursor<T> {
     pub(crate) max_await: Option<Duration>,
     pub(crate) session: Option<Session>,
     pub(crate) post_batch_token: Option<Bson>,
+    /// The `comment` of the command that opened it, repeated on getMore.
+    pub(crate) comment: Option<Bson>,
     pub(crate) _t: std::marker::PhantomData<T>,
 }
 
@@ -1006,6 +1337,7 @@ impl<T: serde::de::DeserializeOwned> Cursor<T> {
             max_await: None,
             session: session.cloned().or(ran.implicit),
             post_batch_token: c.get("postBatchResumeToken").cloned(),
+            comment: None,
             _t: std::marker::PhantomData,
         })
     }
@@ -1028,6 +1360,9 @@ impl<T: serde::de::DeserializeOwned> Cursor<T> {
         if let Some(m) = self.max_await {
             cmd.insert("maxTimeMS", m.as_millis() as i64);
         }
+        if let Some(c) = &self.comment {
+            cmd.insert("comment", c.clone());
+        }
         let op = Op {
             db: &self.db,
             command: cmd,
@@ -1037,6 +1372,9 @@ impl<T: serde::de::DeserializeOwned> Cursor<T> {
             read_concern: false,
             write_concern: false,
             session: self.session.as_ref(),
+            cursor_session: true,
+            rc: None,
+            wc: None,
         };
         let ran = match self.client.execute(op).await {
             Ok(r) => r,
@@ -1122,6 +1460,9 @@ impl<T: serde::de::DeserializeOwned> Cursor<T> {
                 read_concern: false,
                 write_concern: false,
                 session: self.session.as_ref(),
+                cursor_session: true,
+                rc: None,
+                wc: None,
             };
             self.client.execute(op).await?;
         }
@@ -1140,7 +1481,7 @@ impl<T> Drop for Cursor<T> {
             (self.client.clone(), self.address.clone(), self.db.clone(), self.collection.clone(), self.id, self.session.clone());
         rt_core::spawn(async move {
             let cmd = Document::new().with("killCursors", coll).with("cursors", vec![Bson::Int64(id)]);
-            let op = Op { db: &db, command: cmd, seqs: &[], selection: Selection::Address(address), retry: Retry::No, read_concern: false, write_concern: false, session: session.as_ref() };
+            let op = Op { db: &db, command: cmd, seqs: &[], selection: Selection::Address(address), retry: Retry::No, read_concern: false, write_concern: false, session: session.as_ref(), cursor_session: true, rc: None, wc: None };
             let _ = client.execute(op).await;
             if let Some(s) = session {
                 if s.state.borrow().implicit {

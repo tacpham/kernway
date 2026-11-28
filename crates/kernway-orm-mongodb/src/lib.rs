@@ -24,10 +24,12 @@
 
 pub mod bson;
 mod client;
+mod client_bulk;
 mod collection;
 pub mod conn;
 mod dns;
 pub mod error;
+pub mod events;
 mod gridfs;
 pub mod options;
 mod ordered_json;
@@ -36,12 +38,15 @@ pub mod topology;
 mod wire;
 
 pub use bson::{from_bson, from_document, to_document, Binary, Bson, DateTime, Decimal128, Document, ObjectId, Regex, Timestamp};
-pub use client::{Client, Cursor, Session, TransactionOptions};
+pub use client::{Client, Cursor, Session, SessionOptions, TransactionOptions};
+pub use client_bulk::{ClientBulkWriteFailure, ClientBulkWriteOptions, ClientBulkWriteResult, ClientUpdateResult, ClientWriteModel, VerboseResults};
 pub use collection::{
-    BulkWriteResult, ChangeStream, ChangeStreamOptions, Collection, Database, FindOneAndModifyOptions, FindOptions, IndexModel, InsertManyResult,
-    UpdateOptions, UpdateResult, WriteModel,
+    AggregateOptions, BulkWriteOptions, BulkWriteResult, ChangeStream, ChangeStreamOptions, Collection, CountOptions, Database, DeleteOptions,
+    DistinctOptions, EstimatedCountOptions, FindOneAndModifyOptions, FindOptions, IndexModel, InsertManyResult, InsertOptions, SearchIndexModel, UpdateOptions,
+    UpdateResult, WriteModel,
 };
 pub use error::{Error, ErrorKind, Result};
+pub use events::{CommandContext, CommandEvent};
 pub use gridfs::{GridFsBucket, DEFAULT_CHUNK_SIZE};
 pub use orm::{MongoDriver, MongoTx};
 pub use options::{

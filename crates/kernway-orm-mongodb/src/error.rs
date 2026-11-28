@@ -37,6 +37,13 @@ pub enum ErrorKind {
     Bson,
     /// A transaction / session misuse.
     Transaction,
+    /// An argument the driver refuses before sending anything (an update
+    /// without operators, a replacement with them, …).
+    InvalidArgument,    /// Raised by application code (e.g. to abort a `with_transaction` callback).
+    Application,
+    /// A client bulk write failed: its write errors, write-concern errors,
+    /// stopping error and partial result.
+    ClientBulkWrite(Box<crate::client_bulk::ClientBulkWriteFailure>),
 }
 
 /// An error with its labels.
@@ -51,9 +58,20 @@ pub struct Error {
     pub labels: Vec<String>,
     /// A network error that was a timeout (SDAM never acts on those).
     pub(crate) timeout: bool,
-    /// The failed reply's `topologyVersion` (SDAM ignores stale errors);
-    /// boxed to keep `Error` small.
-    pub(crate) topology_version: Option<Box<crate::topology::TopologyVersion>>,
+    /// The server's reply, its `topologyVersion`, a bulk write's partial
+    /// result — boxed to keep `Error` small.
+    pub(crate) details: Option<Box<ErrorDetails>>,
+}
+
+/// What a server error carries beyond its kind and message.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct ErrorDetails {
+    /// The failed reply's `topologyVersion` (SDAM ignores stale errors).
+    pub topology_version: Option<crate::topology::TopologyVersion>,
+    /// The server's reply.
+    pub reply: Option<Document>,
+    /// What a failed bulk write did before / despite the failure.
+    pub partial: Option<crate::collection::BulkWriteResult>,
 }
 
 /// `Result` with this crate's [`Error`].
@@ -61,7 +79,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
     pub(crate) fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
-        Error { kind, message: message.into(), labels: Vec::new(), timeout: false, topology_version: None }
+        Error { kind, message: message.into(), labels: Vec::new(), timeout: false, details: None }
     }
     pub(crate) fn config(m: impl Into<String>) -> Self {
         Self::new(ErrorKind::Config, m)
@@ -78,6 +96,9 @@ impl Error {
     pub(crate) fn transaction(m: impl Into<String>) -> Self {
         Self::new(ErrorKind::Transaction, m)
     }
+    pub(crate) fn invalid(m: impl Into<String>) -> Self {
+        Self::new(ErrorKind::InvalidArgument, m)
+    }
 
     /// From a command reply with `ok: 0` (or with write errors).
     pub(crate) fn from_reply(reply: &Document) -> Self {
@@ -91,8 +112,41 @@ impl Error {
             reply.get_str("errmsg").unwrap_or("command failed").to_string(),
         );
         e.labels = labels;
-        e.topology_version = crate::topology::TopologyVersion::from_reply(reply).map(Box::new);
+        e.details = Some(Box::new(ErrorDetails { topology_version: crate::topology::TopologyVersion::from_reply(reply), reply: Some(reply.clone()), partial: None }));
         e
+    }
+
+    /// An error of the application's own, e.g. returned from a
+    /// `with_transaction` callback to abort the transaction.
+    pub fn application(message: impl Into<String>) -> Self {
+        Self::new(ErrorKind::Application, message)
+    }
+
+    /// The server error's code name (`DuplicateKey`, `UnknownReplWriteConcern`, …):
+    /// the command's, else its write-concern error's, else the first write error's.
+    pub fn code_name(&self) -> Option<&str> {
+        if let ErrorKind::Command { code_name, .. } = &self.kind {
+            return Some(code_name.as_str()).filter(|n| !n.is_empty());
+        }
+        let r = self.server_response()?;
+        r.get_document("writeConcernError")
+            .and_then(|w| w.get_str("codeName"))
+            .or_else(|| r.get_array("writeErrors").and_then(|a| a.first()).and_then(Bson::as_document).and_then(|w| w.get_str("codeName")))
+    }
+
+    /// The server's reply to the failed command, when the error came from one.
+    pub fn server_response(&self) -> Option<&Document> {
+        self.details.as_ref()?.reply.as_ref()
+    }
+
+    /// What a failed bulk write (or `insert_many`) did: inserted, matched,
+    /// modified, deleted, upserted — the parts that succeeded.
+    pub fn bulk_write_result(&self) -> Option<&crate::collection::BulkWriteResult> {
+        self.details.as_ref()?.partial.as_ref()
+    }
+
+    pub(crate) fn set_partial(&mut self, partial: crate::collection::BulkWriteResult) {
+        self.details.get_or_insert_with(Default::default).partial = Some(partial);
     }
 
     /// A network timeout (`connectTimeoutMS`, `socketTimeoutMS`).
@@ -111,7 +165,7 @@ impl Error {
         let command = |code: Option<i32>, message: &str| K::Command {
             code,
             message: message.to_string(),
-            topology_version: self.topology_version.as_deref().copied(),
+            topology_version: self.details.as_ref().and_then(|d| d.topology_version),
             labels: self.labels.clone(),
         };
         Some(match &self.kind {
@@ -224,14 +278,18 @@ impl From<Error> for OrmError {
     }
 }
 
-/// Check a command reply: `ok: 1` without write errors, else the error.
-pub(crate) fn check_reply(reply: Document) -> Result<Document> {
-    let ok = match reply.get("ok") {
+/// Whether a reply says `ok: 1`.
+pub(crate) fn reply_ok(reply: &Document) -> bool {
+    match reply.get("ok") {
         Some(Bson::Double(f)) => *f == 1.0,
         Some(b) => b.as_i64() == Some(1) || b.as_bool() == Some(true),
         None => false,
-    };
-    if !ok {
+    }
+}
+
+/// Check a command reply: `ok: 1` without write errors, else the error.
+pub(crate) fn check_reply(reply: Document) -> Result<Document> {
+    if !reply_ok(&reply) {
         return Err(Error::from_reply(&reply));
     }
     let write_errors: Vec<(usize, i32, String)> = reply
@@ -257,7 +315,7 @@ pub(crate) fn check_reply(reply: Document) -> Result<Document> {
         let message = write_errors.first().map(|w| w.2.clone()).or(wce.as_ref().map(|w| w.1.clone())).unwrap_or_default();
         let mut e = Error::new(ErrorKind::Write { write_errors, write_concern: wce }, message);
         e.labels = labels;
-        e.topology_version = crate::topology::TopologyVersion::from_reply(&reply).map(Box::new);
+        e.details = Some(Box::new(ErrorDetails { topology_version: crate::topology::TopologyVersion::from_reply(&reply), reply: Some(reply.clone()), partial: None }));
         return Err(e);
     }
     Ok(reply)
