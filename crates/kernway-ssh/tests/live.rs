@@ -348,7 +348,7 @@ fn sftp_directories_links_and_attributes() {
         assert!(stats.available_bytes() > 0 && stats.name_max >= 255, "{stats:?}");
 
         // Clean up through the same connection's shell.
-        let out = s.ssh().exec(&format!("rm -r '{root}' && echo gone")).await.unwrap();
+        let out = s.ssh().unwrap().exec(&format!("rm -r '{root}' && echo gone")).await.unwrap();
         assert_eq!(out.stdout_text(), "gone\n");
         assert!(!s.exists(&root).await.unwrap());
     });

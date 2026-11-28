@@ -42,8 +42,11 @@ Authentication | FIDO (sk-) keys, user certificates, GSSAPI / Kerberos, agent fo
 Channels | exec: stdout, stderr, exit status, exit signal; stdin; output and input far larger than the channel window (flow control both ways); many commands on one connection | commands_return_output_status_and_signals
 Channels | Interactive console: a login shell on a pseudo-terminal (TERM, size), full duplex — keystrokes in while output streams out; window resize; Ctrl-C; UTF-8; the exit status at the end | a_console_is_a_real_terminal_that_resizes_and_takes_ctrl_c
 Channels | A command as a console: output as it is written, stdin streamed in (3 MB byte-exact), stdout / stderr apart without a terminal, signals (TERM) | a_command_console_streams_output_takes_input_and_signals
-Channels | Several consoles and SFTP over one connection (one login) | GAP: a console takes over its connection — open one connection per console / SFTP session
-Channels | Port forwarding (local, remote, dynamic), X11 forwarding | GAP: not implemented (forwarding requests from the server are refused)
+Channels | One login shared by many channels at once (SshSession): several consoles, SFTP sessions and commands side by side, from separate tasks; one closed leaves the others; disconnect ends them all | consoles_sftp_and_commands_share_one_login
+Forwarding | Local forward (ssh -L): connections carried to a host:port the server reaches — SSH inside SSH, two at once, byte-exact; an unreachable destination closes the connection | a_local_forward_carries_an_ssh_connection
+Forwarding | Dynamic forward (ssh -D): a SOCKS5 proxy (CONNECT, names resolved on the server side, IPv4 / IPv6 / domain), an unreachable destination reported | a_dynamic_forward_is_a_socks5_proxy
+Forwarding | Remote forward (ssh -R): the server listens (its chosen port reported) and connections come back here; half-closes passed on both ways; a port it cannot listen on refused with a reason | a_remote_forward_brings_server_connections_here
+Forwarding | SOCKS4 / SOCKS5 with authentication, X11 forwarding, agent forwarding | GAP: not implemented (the server's X11 / agent channel opens are refused)
 
 SCP | Upload and download (scp -t / -f): bytes exact from 0 to 1.5 MB, mode and modification / access times kept, names with spaces and quotes, into an existing directory | scp_copies_files_with_their_mode_and_times
 SCP | Directory trees both ways (-r): nested and empty directories, UTF-8 names, modes and times | scp_copies_directory_trees_both_ways
@@ -57,7 +60,8 @@ SFTP | Attributes: permissions, access / modification times, truncation; file sy
 SFTP | Open handles: random-access reads and writes, holes, read past the end, fstat, fsync, create_new on an existing file refused | sftp_handles_give_random_access
 SFTP | Typed errors (not found, permission denied, failure) that leave the session usable; SFTP and exec on one connection | sftp_errors_are_typed, sftp_directories_links_and_attributes
 SFTP | 4 MB over SFTP across server-started rekeys | rekeying_started_by_either_side
-SFTP | SFTP versions 4–6, the copy-data / limits / users-groups extensions, transfers streamed to local files | GAP: not implemented (whole-file transfers are buffered; open handles stream in pieces)
+SFTP | A remote file manager: streamed upload / download of local files (20 MB, memory bounded, progress reported, byte-exact), directory trees both ways, walk, recursive delete — with a second SFTP session browsing during the transfer | sftp_as_a_remote_file_manager
+SFTP | SFTP versions 4–6; the copy-data / limits / users-groups extensions; resuming a broken transfer | GAP: not implemented
 
 Reliability | Connection failures fail cleanly: nothing listening, a server that never speaks, one that hangs up mid-handshake; the connect timeout covers TCP, key exchange and login | connections_that_go_wrong_fail_cleanly, a_server_hanging_up_mid_handshake_is_an_error_not_a_hang, a_silent_server_hits_the_connect_timeout
 Reliability | Fully async on kernway's reactor: no blocking call on a shard (source scan); known_hosts and keys read on the blocking pool | no_blocking_call_runs_on_the_reactor

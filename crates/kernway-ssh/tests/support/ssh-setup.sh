@@ -55,6 +55,8 @@ if [ -n "${SSH_DOCKER:-}" ]; then
   # The tests fail logins on purpose: no penalty box for that (OpenSSH 9.8+), then
   # restart sshd with it.
   docker exec kernway-sshd sh -c 'grep -q PerSourcePenalties /config/sshd/sshd_config || echo "PerSourcePenalties no" >> /config/sshd/sshd_config'
+  # Port forwarding (the image turns it off) for the -L / -D / -R tests.
+  docker exec kernway-sshd sh -c 'sed -i "s/^AllowTcpForwarding no/AllowTcpForwarding yes/" /config/sshd/sshd_config'
   docker restart kernway-sshd >/dev/null
   for _ in $(seq 1 60); do ssh-keyscan -p 2222 127.0.0.1 >/dev/null 2>&1 && break; sleep 1; done
   # The rekeying twin, in the same container.
@@ -78,6 +80,7 @@ KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 StrictModes no
 UsePAM no
+AllowTcpForwarding yes
 PidFile none
 Subsystem sftp ${SFTP_SERVER:-internal-sftp}
 EOF

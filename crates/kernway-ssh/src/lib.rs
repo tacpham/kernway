@@ -16,7 +16,9 @@
 //! - connection (RFC 4254): session channels with flow control, `exec`, and
 //!   interactive [`Console`]s on a pseudo-terminal (resize, signals, full duplex);
 //! - SFTP version 3 (the protocol OpenSSH speaks), with pipelined reads and writes;
-//! - SCP (`scp -t` / `scp -f`): files and directory trees with modes and times.
+//! - SCP (`scp -t` / `scp -f`): files and directory trees with modes and times;
+//! - [`SshSession`]: one login shared by any number of consoles, SFTP sessions,
+//!   commands and port forwards (local, dynamic SOCKS5, remote) at once.
 //!
 //! ```rust,ignore
 //! let key = PrivateKey::from_pem(&key_file_bytes)?;
@@ -34,10 +36,12 @@ mod agent;
 mod cipher;
 mod client;
 mod console;
+mod forward;
 mod hostkey;
 mod kdf;
 mod keys;
 mod scp;
+mod session;
 mod sftp;
 mod transport;
 mod wire;
@@ -48,6 +52,7 @@ pub use client::{Auth, ExecOutput, SshClient, SshConfig};
 pub use console::{Console, ConsoleEvent, PtyConfig};
 pub use keys::PrivateKey;
 pub use scp::ScpFile;
+pub use session::{Channel, ChannelEvent, ChannelWriter, Forward, RemoteForward, SshSession};
 pub use sftp::{DirEntry, File, FsStats, Metadata, OpenOptions, Sftp};
 pub use transport::Negotiated;
 use std::fmt;

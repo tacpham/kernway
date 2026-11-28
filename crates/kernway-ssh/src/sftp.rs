@@ -239,10 +239,40 @@ pub struct File {
     handle: Vec<u8>,
 }
 
+/// What an SFTP session runs over: a connection of its own, or a channel on a
+/// shared [`SshSession`](crate::SshSession).
+enum Link {
+    Own { ssh: Box<SshClient>, chan: u32 },
+    Shared(crate::session::Channel),
+}
+
+impl Link {
+    async fn write(&mut self, data: &[u8]) -> Result<(), SshError> {
+        match self {
+            Link::Own { ssh, chan } => ssh.write(*chan, data).await,
+            Link::Shared(c) => c.writer_ref().write_waiting(data).await,
+        }
+    }
+
+    /// The next bytes; empty at the end.
+    async fn read(&mut self) -> Result<Vec<u8>, SshError> {
+        match self {
+            Link::Own { ssh, chan } => ssh.read(*chan, usize::MAX).await,
+            Link::Shared(c) => loop {
+                match c.next().await {
+                    Some(crate::session::ChannelEvent::Data(d)) => return Ok(d),
+                    Some(crate::session::ChannelEvent::Closed(Some(why))) => return Err(SshError::Channel(why)),
+                    Some(crate::session::ChannelEvent::Eof | crate::session::ChannelEvent::Closed(None)) | None => return Ok(Vec::new()),
+                    Some(_) => {}
+                }
+            },
+        }
+    }
+}
+
 /// An SFTP session over an SSH connection.
 pub struct Sftp {
-    ssh: SshClient,
-    chan: u32,
+    link: Link,
     next_id: u32,
     /// Channel bytes not yet a whole SFTP packet.
     buf: Vec<u8>,
@@ -283,7 +313,17 @@ impl SshClient {
             return Err(SshError::Channel("the server has no sftp subsystem".into()));
         }
         let openssh = self.server_version().contains("OpenSSH");
-        let mut s = Sftp { ssh: self, chan, next_id: 1, buf: Vec::new(), stash: HashMap::new(), version: 0, extensions: Vec::new(), openssh };
+        Sftp::start(Link::Own { ssh: Box::new(self), chan }, openssh).await
+    }
+}
+
+impl Sftp {
+    pub(crate) async fn over_channel(channel: crate::session::Channel, openssh: bool) -> Result<Sftp, SshError> {
+        Sftp::start(Link::Shared(channel), openssh).await
+    }
+
+    async fn start(link: Link, openssh: bool) -> Result<Sftp, SshError> {
+        let mut s = Sftp { link, next_id: 1, buf: Vec::new(), stash: HashMap::new(), version: 0, extensions: Vec::new(), openssh };
         let mut w = Writer::new();
         w.u8(FXP_INIT).u32(3);
         s.send_packet(w.into_inner()).await?;
@@ -313,15 +353,28 @@ impl Sftp {
         self.extensions.iter().any(|(n, _)| n == name)
     }
 
-    /// The SSH connection underneath (to run commands alongside).
-    pub fn ssh(&mut self) -> &mut SshClient {
-        &mut self.ssh
+    /// The SSH connection underneath, when this SFTP session owns it (one opened from
+    /// an [`SshClient`]) — to run commands alongside. On a shared session, run them
+    /// from the [`SshSession`](crate::SshSession) instead.
+    pub fn ssh(&mut self) -> Option<&mut SshClient> {
+        match &mut self.link {
+            Link::Own { ssh, .. } => Some(&mut **ssh),
+            Link::Shared(_) => None,
+        }
     }
 
-    /// End SFTP and get the connection back.
-    pub async fn into_ssh(mut self) -> Result<SshClient, SshError> {
-        self.ssh.close(self.chan).await?;
-        Ok(self.ssh)
+    /// End SFTP and get the connection back (when it owns one).
+    pub async fn into_ssh(self) -> Result<SshClient, SshError> {
+        match self.link {
+            Link::Own { mut ssh, chan } => {
+                ssh.close(chan).await?;
+                Ok(*ssh)
+            }
+            Link::Shared(c) => {
+                let _ = c.writer_ref().close();
+                Err(SshError::Channel("this SFTP session runs on a shared SshSession".into()))
+            }
+        }
     }
 
     // ── packets ──────────────────────────────────────────────────────────
@@ -330,7 +383,7 @@ impl Sftp {
         let mut framed = Vec::with_capacity(4 + body.len());
         framed.extend_from_slice(&u32::try_from(body.len()).map_err(|_| SshError::Protocol("an SFTP packet over 4 GiB".into()))?.to_be_bytes());
         framed.extend_from_slice(&body);
-        self.ssh.write(self.chan, &framed).await
+        self.link.write(&framed).await
     }
 
     async fn read_packet(&mut self) -> Result<(u8, Vec<u8>), SshError> {
@@ -345,7 +398,7 @@ impl Sftp {
                     return Ok((p[4], p[5..].to_vec()));
                 }
             }
-            let more = self.ssh.read(self.chan, usize::MAX).await?;
+            let more = self.link.read().await?;
             if more.is_empty() {
                 return Err(SshError::Channel("the server ended the SFTP session".into()));
             }
@@ -885,4 +938,252 @@ impl Sftp {
         result?;
         closed
     }
+
+    // ── streamed transfers and trees (what a file manager needs) ─────────
+
+    /// Download `remote` into the local file `local` (created or replaced), streamed:
+    /// many reads in flight, written to disk in order on the blocking pool, memory
+    /// bounded whatever the size. `progress(done, total)` is called as bytes land.
+    /// Returns the bytes copied. Cancel by dropping the future.
+    pub async fn download_to(&mut self, remote: &str, local: &std::path::Path, mut progress: impl FnMut(u64, Option<u64>)) -> Result<u64, SshError> {
+        let file = self.open(remote, OpenOptions { read: true, ..OpenOptions::default() }).await?;
+        let total = self.file_metadata(&file).await.ok().and_then(|m| m.size);
+        let result = self.download_open(&file, local, total, &mut progress).await;
+        let closed = self.close(file).await;
+        let n = result?;
+        closed?;
+        Ok(n)
+    }
+
+    async fn download_open(&mut self, file: &File, local: &std::path::Path, total: Option<u64>, progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<u64, SshError> {
+        let path = local.to_path_buf();
+        let mut out = pool(rt_core::spawn_blocking(move || std::fs::File::create(path)).await)?;
+        let h = file.handle.clone();
+        let mut next = 0u64; // next offset to request
+        let mut written = 0u64; // bytes on disk
+        let mut eof = false;
+        let mut inflight: HashMap<u32, (u64, u32)> = HashMap::new();
+        let mut parts: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+        let mut batch: Vec<u8> = Vec::new();
+        loop {
+            while inflight.len() < IN_FLIGHT && !eof {
+                let at = next;
+                let id = self
+                    .send(FXP_READ, |w| {
+                        w.string(&h).u64(at).u32(CHUNK);
+                    })
+                    .await?;
+                inflight.insert(id, (at, CHUNK));
+                next += u64::from(CHUNK);
+            }
+            if inflight.is_empty() {
+                break;
+            }
+            let (id, t, b) = self.reply_any().await?;
+            let Some((at, len)) = inflight.remove(&id) else {
+                self.stash.insert(id, (t, b));
+                continue;
+            };
+            match t {
+                FXP_DATA => {
+                    let d = Reader::new(&b).string()?.to_vec();
+                    let got = d.len() as u32;
+                    if got == 0 {
+                        eof = true;
+                    } else {
+                        if got < len {
+                            let (rest_at, rest_len) = (at + u64::from(got), len - got);
+                            let id = self
+                                .send(FXP_READ, |w| {
+                                    w.string(&h).u64(rest_at).u32(rest_len);
+                                })
+                                .await?;
+                            inflight.insert(id, (rest_at, rest_len));
+                        }
+                        parts.insert(at, d);
+                    }
+                }
+                FXP_STATUS if Reader::new(&b).u32()? == 1 => eof = true,
+                FXP_STATUS => return Err(status_error(&b)),
+                t => return Err(unexpected(t)),
+            }
+            // Move what is now contiguous to the batch; write a batch per MiB.
+            let pending = written + batch.len() as u64;
+            let mut at = pending;
+            while let Some(d) = parts.remove(&at) {
+                at += d.len() as u64;
+                batch.extend(d);
+            }
+            if batch.len() >= 1 << 20 || (inflight.is_empty() && !batch.is_empty()) {
+                let data = std::mem::take(&mut batch);
+                let n = data.len() as u64;
+                out = pool(rt_core::spawn_blocking(move || {
+                    use std::io::Write;
+                    let mut f = out;
+                    f.write_all(&data).map(|()| f)
+                })
+                .await)?;
+                written += n;
+                progress(written, total);
+            }
+        }
+        if !parts.is_empty() {
+            return Err(SshError::Protocol("a gap in the file (the server's reads did not line up)".into()));
+        }
+        pool(rt_core::spawn_blocking(move || out.sync_all()).await)?;
+        Ok(written)
+    }
+
+    /// Upload the local file `local` to `remote` (created or replaced), streamed:
+    /// read from disk a MiB at a time on the blocking pool, many writes in flight.
+    /// `progress(done, total)` is called as the server confirms. Returns the bytes copied.
+    pub async fn upload_from(&mut self, local: &std::path::Path, remote: &str, mut progress: impl FnMut(u64, Option<u64>)) -> Result<u64, SshError> {
+        let path = local.to_path_buf();
+        let (src, total) = pool(rt_core::spawn_blocking(move || {
+            let f = std::fs::File::open(path)?;
+            let len = f.metadata()?.len();
+            Ok((f, len))
+        })
+        .await)?;
+        let file = self.open(remote, OpenOptions { write: true, create: true, truncate: true, ..OpenOptions::default() }).await?;
+        let result = async {
+            let mut src = src;
+            let mut done = 0u64;
+            loop {
+                let (s2, block) = pool(rt_core::spawn_blocking(move || {
+                    use std::io::Read;
+                    let mut s = src;
+                    let mut buf = Vec::with_capacity(1 << 20);
+                    (&mut s).take(1 << 20).read_to_end(&mut buf).map(|_| (s, buf))
+                })
+                .await)?;
+                src = s2;
+                if block.is_empty() {
+                    break;
+                }
+                self.write_at(&file, done, &block).await?;
+                done += block.len() as u64;
+                progress(done, Some(total));
+            }
+            Ok::<u64, SshError>(done)
+        }
+        .await;
+        let closed = self.close(file).await;
+        let n = result?;
+        closed?;
+        Ok(n)
+    }
+
+    /// Remove `path` and everything under it (symbolic links are removed, not followed).
+    pub async fn remove_dir_all(&mut self, path: &str) -> Result<(), SshError> {
+        let meta = self.symlink_metadata(path).await?;
+        if !meta.is_dir() {
+            return self.remove_file(path).await;
+        }
+        let mut stack = vec![(path.to_owned(), false)];
+        while let Some((dir, listed)) = stack.pop() {
+            if listed {
+                self.remove_dir(&dir).await?;
+                continue;
+            }
+            stack.push((dir.clone(), true));
+            for e in self.read_dir(&dir).await? {
+                let child = format!("{}/{}", dir.trim_end_matches('/'), e.name);
+                if e.metadata.is_dir() {
+                    stack.push((child, false));
+                } else {
+                    self.remove_file(&child).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Every entry under `path`, depth first, as (path relative to `path`, metadata);
+    /// symbolic links are listed, not followed.
+    pub async fn walk(&mut self, path: &str) -> Result<Vec<(String, Metadata)>, SshError> {
+        let mut out = Vec::new();
+        let mut stack = vec![String::new()];
+        while let Some(rel) = stack.pop() {
+            let dir = if rel.is_empty() { path.to_owned() } else { format!("{}/{rel}", path.trim_end_matches('/')) };
+            let mut entries = self.read_dir(&dir).await?;
+            entries.sort_by(|a, b| b.name.cmp(&a.name));
+            for e in entries {
+                let r = if rel.is_empty() { e.name.clone() } else { format!("{rel}/{}", e.name) };
+                if e.metadata.is_dir() {
+                    stack.push(r.clone());
+                }
+                out.push((r, e.metadata));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
+    /// Upload the local directory `local` as `remote`, recursively (directories created,
+    /// files streamed). Returns the files copied.
+    pub async fn upload_dir(&mut self, local: &std::path::Path, remote: &str) -> Result<u64, SshError> {
+        let root = local.to_path_buf();
+        let tree = pool(rt_core::spawn_blocking(move || list_local_blocking(&root)).await)?;
+        self.create_dir_all(remote).await?;
+        let mut files = 0;
+        for (rel, is_dir) in tree {
+            let target = format!("{}/{rel}", remote.trim_end_matches('/'));
+            if is_dir {
+                self.create_dir_all(&target).await?;
+            } else {
+                self.upload_from(&local.join(&rel), &target, |_, _| {}).await?;
+                files += 1;
+            }
+        }
+        Ok(files)
+    }
+
+    /// Download the remote directory `remote` into `local`, recursively. Returns the
+    /// files copied. Names that would leave `local` (`..`, absolute) are refused.
+    pub async fn download_dir(&mut self, remote: &str, local: &std::path::Path) -> Result<u64, SshError> {
+        let tree = self.walk(remote).await?;
+        let root = local.to_path_buf();
+        pool(rt_core::spawn_blocking(move || std::fs::create_dir_all(root)).await)?;
+        let mut files = 0;
+        for (rel, meta) in tree {
+            if rel.split('/').any(|p| p.is_empty() || p == "." || p == "..") {
+                return Err(SshError::Protocol(format!("a refused name {rel:?} from the server")));
+            }
+            let target = local.join(&rel);
+            if meta.is_dir() {
+                pool(rt_core::spawn_blocking(move || std::fs::create_dir_all(target)).await)?;
+            } else if meta.is_file() {
+                self.download_to(&format!("{}/{rel}", remote.trim_end_matches('/')), &target, |_, _| {}).await?;
+                files += 1;
+            }
+        }
+        Ok(files)
+    }
+
+}
+
+/// The outcome of file work done on the blocking pool.
+fn pool<T>(r: Option<std::io::Result<T>>) -> Result<T, SshError> {
+    r.ok_or_else(|| SshError::Channel("the blocking pool is gone".into()))?.map_err(SshError::Io)
+}
+
+/// A local tree, parents first: (path relative to `root` with `/`, is a directory).
+fn list_local_blocking(root: &std::path::Path) -> std::io::Result<Vec<(String, bool)>> {
+    let mut out = Vec::new();
+    let mut stack = vec![std::path::PathBuf::new()];
+    while let Some(rel) = stack.pop() {
+        let mut entries: Vec<_> = std::fs::read_dir(root.join(&rel))?.collect::<Result<_, _>>()?;
+        entries.sort_by_key(|e| std::cmp::Reverse(e.file_name()));
+        for e in entries {
+            let r = rel.join(e.file_name());
+            let is_dir = e.file_type()?.is_dir();
+            out.push((r.to_string_lossy().replace('\\', "/"), is_dir));
+            if is_dir {
+                stack.push(r);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
 }

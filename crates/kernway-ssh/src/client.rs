@@ -19,6 +19,7 @@ const MSG_USERAUTH_BANNER: u8 = 53;
 const MSG_USERAUTH_60: u8 = 60;
 const MSG_USERAUTH_INFO_RESPONSE: u8 = 61;
 const MSG_GLOBAL_REQUEST: u8 = 80;
+const MSG_REQUEST_SUCCESS: u8 = 81;
 const MSG_REQUEST_FAILURE: u8 = 82;
 const MSG_CHANNEL_OPEN: u8 = 90;
 const MSG_CHANNEL_OPEN_CONFIRMATION: u8 = 91;
@@ -208,6 +209,13 @@ pub struct SshClient {
     channels: HashMap<u32, Channel>,
     next_id: u32,
     banner: Option<String>,
+    /// Accept `forwarded-tcpip` channels the server opens (a remote forward is up).
+    pub(crate) accept_forwarded: bool,
+    /// Accepted forwarded channels not yet handed on: (local id, bound address, bound
+    /// port, originator address, originator port).
+    pub(crate) incoming: VecDeque<(u32, String, u32, String, u32)>,
+    /// Replies to our global requests (success, payload).
+    global_replies: VecDeque<(bool, Vec<u8>)>,
 }
 
 impl std::fmt::Debug for SshClient {
@@ -239,7 +247,15 @@ impl SshClient {
         let sock = kernway_wire::offload::connect_tcp(&config.host, config.port).await?;
         sock.set_nodelay(true).ok();
         let t = Transport::start(sock, &config.host, config.port, config.host_key.clone(), known_hosts, config.rekey_bytes, config.offer.clone()).await?;
-        let mut c = SshClient { t, channels: HashMap::new(), next_id: 0, banner: None };
+        let mut c = SshClient {
+            t,
+            channels: HashMap::new(),
+            next_id: 0,
+            banner: None,
+            accept_forwarded: false,
+            incoming: VecDeque::new(),
+            global_replies: VecDeque::new(),
+        };
         c.authenticate(&config.user, &config.auth).await?;
         Ok(c)
     }
@@ -436,12 +452,32 @@ impl SshClient {
                 }
             }
             MSG_CHANNEL_OPEN => {
-                // The server opening a channel to us (forwarding): refused.
-                r.string()?;
+                // The server opening a channel to us: a connection to a remote forward
+                // we asked for is accepted; anything else (X11, agent) refused.
+                let kind = r.string()?.to_vec();
                 let theirs = r.u32()?;
-                let mut w = Writer::msg(MSG_CHANNEL_OPEN_FAILURE);
-                w.u32(theirs).u32(1).string("not accepted by this client").string("");
-                self.t.send(&w.into_inner()).await?;
+                let window = r.u32()?;
+                let max = r.u32()?;
+                if kind == b"forwarded-tcpip" && self.accept_forwarded {
+                    let (bound, bport, orig, oport) = (r.utf8()?, r.u32()?, r.utf8()?, r.u32()?);
+                    let id = self.next_id;
+                    self.next_id += 1;
+                    self.channels.insert(
+                        id,
+                        Channel { remote: theirs, open: Some(Ok(())), remote_window: window, remote_max: max, local_window: WINDOW, ..Channel::default() },
+                    );
+                    let mut w = Writer::msg(MSG_CHANNEL_OPEN_CONFIRMATION);
+                    w.u32(theirs).u32(id).u32(WINDOW).u32(MAX_PACKET);
+                    self.t.send(&w.into_inner()).await?;
+                    self.incoming.push_back((id, bound, bport, orig, oport));
+                } else {
+                    let mut w = Writer::msg(MSG_CHANNEL_OPEN_FAILURE);
+                    w.u32(theirs).u32(1).string("not accepted by this client").string("");
+                    self.t.send(&w.into_inner()).await?;
+                }
+            }
+            MSG_REQUEST_SUCCESS | MSG_REQUEST_FAILURE => {
+                self.global_replies.push_back((p[0] == MSG_REQUEST_SUCCESS, p[1..].to_vec()));
             }
             MSG_CHANNEL_OPEN_CONFIRMATION => {
                 let c = self.chan(r.u32()?)?;
@@ -547,11 +583,57 @@ impl SshClient {
 
     /// Open a `session` channel.
     pub(crate) async fn open_session(&mut self) -> Result<u32, SshError> {
+        self.open_channel("session", |_| {}).await
+    }
+
+    /// A `direct-tcpip` channel: the server connects to `host:port` for us (RFC 4254 §7.2).
+    pub(crate) async fn open_direct_tcpip(&mut self, host: &str, port: u16, orig: &str, orig_port: u16) -> Result<u32, SshError> {
+        self.open_channel("direct-tcpip", |w| {
+            w.string(host).u32(u32::from(port)).string(orig).u32(u32::from(orig_port));
+        })
+        .await
+    }
+
+    /// A global request wanting a reply (`tcpip-forward` …): `Ok(Some(payload))` when
+    /// granted, `Ok(None)` when refused.
+    pub(crate) async fn global_request(&mut self, name: &str, fields: impl FnOnce(&mut Writer)) -> Result<Option<Vec<u8>>, SshError> {
+        let mut w = Writer::msg(MSG_GLOBAL_REQUEST);
+        w.string(name).bool(true);
+        fields(&mut w);
+        self.t.send(&w.into_inner()).await?;
+        loop {
+            if let Some((ok, payload)) = self.global_replies.pop_front() {
+                return Ok(ok.then_some(payload));
+            }
+            self.pump().await?;
+        }
+    }
+
+    /// Send our CLOSE without waiting for the server's.
+    pub(crate) async fn send_close(&mut self, id: u32) -> Result<(), SshError> {
+        let Some(c) = self.channels.get_mut(&id) else { return Ok(()) };
+        if c.close_sent {
+            return Ok(());
+        }
+        c.close_sent = true;
+        let remote = c.remote;
+        let mut w = Writer::msg(MSG_CHANNEL_CLOSE);
+        w.u32(remote);
+        self.t.send(&w.into_inner()).await
+    }
+
+    /// Drop a closed channel's state.
+    pub(crate) fn forget(&mut self, id: u32) {
+        self.channels.remove(&id);
+    }
+
+    async fn open_channel(&mut self, kind: &str, extra: impl FnOnce(&mut Writer)) -> Result<u32, SshError> {
         let id = self.next_id;
         self.next_id += 1;
         self.channels.insert(id, Channel { local_window: WINDOW, ..Channel::default() });
         let mut w = Writer::msg(MSG_CHANNEL_OPEN);
-        w.string("session").u32(id).u32(WINDOW).u32(MAX_PACKET);
+        w.string(kind).u32(id).u32(WINDOW).u32(MAX_PACKET);
+        extra(&mut w);
         self.t.send(&w.into_inner()).await?;
         loop {
             if let Some(result) = self.chan(id)?.open.clone() {
@@ -559,7 +641,7 @@ impl SshClient {
                     Ok(()) => Ok(id),
                     Err(why) => {
                         self.channels.remove(&id);
-                        Err(SshError::Channel(format!("the server refused a session channel: {why}")))
+                        Err(SshError::Channel(format!("the server refused a {kind} channel: {why}")))
                     }
                 };
             }
@@ -590,8 +672,8 @@ impl SshClient {
     pub(crate) async fn write(&mut self, id: u32, mut data: &[u8]) -> Result<(), SshError> {
         while !data.is_empty() {
             let c = self.chan(id)?;
-            if c.closed {
-                return Err(SshError::Channel("the channel was closed by the server".into()));
+            if c.closed || c.close_sent {
+                return Err(SshError::Channel("the channel is closed".into()));
             }
             let room = c.remote_window.min(c.remote_max) as usize;
             if room == 0 {
@@ -648,7 +730,7 @@ impl SshClient {
     /// Say no more data will come from us.
     pub(crate) async fn send_eof(&mut self, id: u32) -> Result<(), SshError> {
         let c = self.chan(id)?;
-        if c.closed {
+        if c.closed || c.close_sent {
             return Ok(());
         }
         let remote = c.remote;
@@ -726,6 +808,10 @@ impl SshClient {
 
     /// Say goodbye (SSH_MSG_DISCONNECT, "by application") and drop the connection.
     pub async fn disconnect(mut self) -> Result<(), SshError> {
+        self.send_disconnect().await
+    }
+
+    pub(crate) async fn send_disconnect(&mut self) -> Result<(), SshError> {
         let mut w = Writer::msg(transport::MSG_DISCONNECT);
         w.u32(11).string("bye").string("");
         self.t.send(&w.into_inner()).await

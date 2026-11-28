@@ -17,7 +17,7 @@ hướng dẫn cuối trang.*
 | Refused with a clear error | Asking for it fails at once with an error that names it; nothing hangs or misbehaves. |
 | Built, not verified | The code exists, but the test setup has no server or platform to prove it against. |
 
-**74 gaps** across 13 drivers.
+**73 gaps** across 13 drivers.
 
 | Driver | Features | Gaps |
 |---|---:|---:|
@@ -36,7 +36,7 @@ hướng dẫn cuối trang.*
 | [S3-compatible object storage](#s3) | 20 | 5 |
 | [Web security](#security) | 32 | 3 |
 | [SQLite](#sqlite) | 47 | — |
-| [SSH and SFTP client](#ssh) | 47 | 11 |
+| [SSH and SFTP client](#ssh) | 51 | 10 |
 | [Valkey](#valkey) | 37 | 1 |
 
 <a id="http-client"></a>
@@ -203,9 +203,8 @@ Report: [`docs/acceptance/ssh.md`](acceptance/ssh.md) · catalog: `acceptance/ss
 | Authentication | The Windows OpenSSH agent (named pipe \\.\pipe\openssh-ssh-agent) | Built, not verified | built (the pipe client compiles and runs on the Windows CI), not verified against a running agent |
 | Authentication | Encrypted PKCS#8 and legacy encrypted PEM keys | Refused with a clear error | refused with a clear error — convert with ssh-keygen -p (OpenSSH format) |
 | Authentication | FIDO (sk-) keys, user certificates, GSSAPI / Kerberos, agent forwarding | Not built | not implemented |
-| Channels | Several consoles and SFTP over one connection (one login) | Not built | a console takes over its connection — open one connection per console / SFTP session |
-| Channels | Port forwarding (local, remote, dynamic), X11 forwarding | Not built | not implemented (forwarding requests from the server are refused) |
-| SFTP | SFTP versions 4–6, the copy-data / limits / users-groups extensions, transfers streamed to local files | Not built | not implemented (whole-file transfers are buffered; open handles stream in pieces) |
+| Forwarding | SOCKS4 / SOCKS5 with authentication, X11 forwarding, agent forwarding | Not built | not implemented (the server's X11 / agent channel opens are refused) |
+| SFTP | SFTP versions 4–6; the copy-data / limits / users-groups extensions; resuming a broken transfer | Not built | not implemented |
 | Reliability | Windows against a live SSH server | Not built | the Windows CI runner has no POSIX SSH server; the client's live suite there is not run |
 
 <a id="valkey"></a>
