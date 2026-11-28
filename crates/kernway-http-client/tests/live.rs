@@ -319,12 +319,19 @@ fn mutual_tls_presents_the_client_certificate() {
         let r = c.get(&format!("{}/", l.mtls_url)).await.unwrap();
         assert_eq!((r.status, r.text().as_str()), (200, "client CN=kw-client"));
 
+        // TLS 1.3 refuses a client certificate after the handshake, with an alert
+        // and a close. On Windows the close can arrive as a reset that discards the
+        // alert, so there the refusal may show as the connection being reset.
+        let refused = |e: &HttpError| {
+            matches!(e, HttpError::Tls(_))
+                || cfg!(windows) && matches!(e, HttpError::Io(io) if io.kind() == std::io::ErrorKind::ConnectionReset)
+        };
         let without = HttpClient::new().trust_ca_pem(&ca).unwrap();
         let e = without.get(&format!("{}/", l.mtls_url)).await.unwrap_err();
-        assert!(matches!(e, HttpError::Tls(_)), "no certificate: {e}");
+        assert!(refused(&e), "no certificate: {e}");
         let intruder = HttpClient::new().client_identity_pem(Some(&ca), &l.pem("intruder.crt"), &l.pem("intruder.key")).unwrap();
         let e = intruder.get(&format!("{}/", l.mtls_url)).await.unwrap_err();
-        assert!(matches!(e, HttpError::Tls(_)), "a certificate from another CA: {e}");
+        assert!(refused(&e), "a certificate from another CA: {e}");
         assert!(HttpClient::new().client_identity_pem(None, &l.pem("client.crt"), &l.pem("intruder.key")).is_err(), "a key that is not the certificate's");
     });
 }
