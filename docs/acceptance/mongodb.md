@@ -5,20 +5,20 @@
 
 | | |
 |---|---|
-| generated | 2026-11-27 22:49 UTC |
+| generated | 2026-11-28 11:07 UTC |
 | server | MongoDB 8.0.38 |
 | image | mongo:8.0 |
 | container | kernway-mongo |
-| driver commit | fd0aa33 on docs/acceptance-after-gaps |
+| driver commit | 672fbe7 on docs/mongo-report |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
-| command | `cargo test -p kernway-orm-mongodb  --lib --tests -- --test-threads=1 --nocapture  --skip unix_domain_socket; unix_domain_socket inside kernway-mongo; CI run 46078100294 (Linux / macOS / Windows)` |
+| command | `cargo test -p kernway-orm-mongodb  --lib --tests -- --test-threads=1 --nocapture  --skip unix_domain_socket; unix_domain_socket inside kernway-mongo; CI run 46135790801 (Linux / macOS / Windows)` |
 
-## Verdict: implemented features **PASSED** · completeness **38/46** — NOT complete
+## Verdict: implemented features **PASSED** · completeness **51/66** — NOT complete
 
 - *Implemented features* passes only if every test ran and passed (no skips) in this run.
 - *Completeness* counts 🚧 gaps (listed below) against the full feature catalog.
-- Features verified: **38 / 46** (8 not implemented yet, 0 failing; 0 not applicable to MongoDB).
-- Tests run: 71 — 71 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
+- Features verified: **51 / 66** (15 not implemented yet, 0 failing; 1 not applicable to MongoDB).
+- Tests run: 165 — 165 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
 - A feature is ✅ only when every test listed as its evidence ran and passed in this run.
 
 ## BSON
@@ -31,11 +31,38 @@
 | Extended JSON (canonical and relaxed) and serde: typed structs with ObjectId / DateTime / Decimal128 fields | ✅ PASS | `bson::tests::corpus_round_trips`<br>`bson::tests::serde_bridge`<br>`every_bson_type_round_trips` |
 | Field order kept (documents are ordered): Extended JSON text parsed and written in order, structs serialized in declaration order, Document fields read back in stored order, ORM entities stored _id-first then by declaration (nested objects too) — independent of serde_json's preserve_order | ✅ PASS | `bson::tests::key_order_is_kept_through_json_and_serde`<br>`documents_keep_field_order` |
 
+## Specifications
+
+| Feature | Status | Evidence / note |
+|---|---|---|
+| Official BSON corpus (mongodb/specifications bson-corpus, all 31 files, 3 925 assertions): canonical / degenerate BSON and canonical / degenerate / relaxed Extended JSON both ways, every decodeErrors and parseErrors case (strict type wrappers: exactly their keys, typed values, no NUL in keys or regexes) | ✅ PASS | `bson_corpus_array`<br>`bson_corpus_binary`<br>`bson_corpus_boolean`<br>`bson_corpus_code`<br>`bson_corpus_code_w_scope`<br>`bson_corpus_datetime`<br>`bson_corpus_dbpointer`<br>`bson_corpus_dbref`<br>`bson_corpus_decimal128_1`<br>`bson_corpus_decimal128_2`<br>`bson_corpus_decimal128_3`<br>`bson_corpus_decimal128_4`<br>`bson_corpus_decimal128_5`<br>`bson_corpus_decimal128_6`<br>`bson_corpus_decimal128_7`<br>`bson_corpus_document`<br>`bson_corpus_double`<br>`bson_corpus_int32`<br>`bson_corpus_int64`<br>`bson_corpus_maxkey`<br>`bson_corpus_minkey`<br>`bson_corpus_multi_type`<br>`bson_corpus_multi_type_deprecated`<br>`bson_corpus_null`<br>`bson_corpus_oid`<br>`bson_corpus_regex`<br>`bson_corpus_string`<br>`bson_corpus_symbol`<br>`bson_corpus_timestamp`<br>`bson_corpus_top`<br>`bson_corpus_undefined`<br>`bson_corpus_every_file_is_run` |
+| BSON corpus prose tests: NUL bytes refused when encoding keys and regexes; duplicate keys (builder replaces, decoding keeps both in order, lookup returns the first, Extended JSON keeps the last — as Document documents) | ✅ PASS | `prose_1_nul_bytes_are_refused_when_encoding`<br>`prose_2_1_encoding_duplicate_keys`<br>`prose_2_2_decoding_duplicate_keys`<br>`prose_2_3_round_trip_duplicate_keys`<br>`prose_2_4_extended_json_duplicate_keys` |
+| Official Connection String and URI Options tests (all files): validity, warnings (unknown / unimplemented / invalid / empty / repeated / deprecated options ignored with a warning), hosts, credentials, every parsed option; cases using an option or mechanism the driver declares unimplemented are counted N/A and listed | ✅ PASS | `cs_invalid_uris`<br>`cs_valid_auth`<br>`cs_valid_db_with_dotted_name`<br>`cs_valid_host_identifiers`<br>`cs_valid_options`<br>`cs_valid_unix_socket_absolute`<br>`cs_valid_unix_socket_relative`<br>`cs_valid_warnings`<br>`uo_auth`<br>`uo_client_backpressure`<br>`uo_compression`<br>`uo_concern`<br>`uo_connection`<br>`uo_connection_pool`<br>`uo_proxy`<br>`uo_read_preference`<br>`uo_sdam`<br>`uo_single_threaded`<br>`uo_srv`<br>`uo_tls` |
+| Official credential-disclosure corpus (102 URIs) and prose tests: no error, warning or Debug output repeats the user, password, unknown keys or values | ✅ PASS | `cs_credential_disclosure`<br>`cs_prose_redacted_representation`<br>`options::tests::unknown_or_invalid_options_warn_and_are_ignored` |
+| Official auth connection-string tests (source / mechanism defaults, X.509 / PLAIN rules, empty authSource refused, NUL in PLAIN credentials refused) | ✅ PASS | `auth_connection_string` |
+| Official Server Discovery and Monitoring tests: single (19), rs (77), sharded (9), load-balanced (1) — topology and server types, set names, stale primaries by electionId / setVersion (the 6.0+ and older rules, with the spec's error texts), topologyVersion ordering, wire-version compatibility, logical session timeout | ✅ PASS | `sdam_single`<br>`sdam_rs`<br>`sdam_sharded`<br>`sdam_load_balanced` |
+| Official SDAM error-handling tests (72): pool generations (stale errors ignored), topologyVersion (stale state-change errors ignored), not-writable-primary / node-is-recovering by code then message, pools cleared on network errors and shutdown codes only, timeouts never acted on, write errors not looked at; the client uses the same code for every failed operation and monitor check | ✅ PASS | `sdam_errors` |
+| Official Server Selection tests (88) and Max Staleness tests (32): suitable servers and the latency window per topology, read preference mode, tag sets, staleness with and without a primary, the maxStalenessSeconds floor, deprioritized servers (a retry avoids the server its first attempt failed on); RTT averaging (7); operationCount-based choice within the window (8) | ✅ PASS | `server_selection_logic`<br>`max_staleness`<br>`server_selection_rtt`<br>`server_selection_in_window` |
+| Official unified CRUD tests (175 files) on a standalone, a replica set and a sharded cluster: every CRUD option (comment, let, hint, collation, bypassDocumentValidation, sort, rawData…), update / replacement validation, unordered bulk errors with partial results, unacknowledged writes with moreToCome, $out / $merge on secondaries, MongoClient.bulkWrite (8.0) with verbose results, batching and its exception | ✅ PASS | `unified_crud` |
+| Official unified transactions tests (44 files) and convenient API (withTransaction, 10 files): write concerns of commit / abort, majority on retried commits, retries with retryWrites off, mongos pinning and recoveryToken, the spec's error texts, read preference in transactions, error labels | ✅ PASS | `unified_transactions`<br>`unified_transactions_convenient_api` |
+| Official retryable reads (45 files) and retryable writes (35 files) tests, client backpressure retries (SystemOverloadedError / RetryableError, backoff, maxAdaptiveRetries) | ✅ PASS | `unified_retryable_reads`<br>`unified_retryable_writes` |
+| Official sessions and causal consistency tests: implicit sessions chosen after server selection, cursors keep their session, afterClusterTime on reads and writes, snapshot sessions (snapshotTime), advanceClusterTime | ✅ PASS | `unified_sessions`<br>`unified_causal_consistency` |
+| Official change streams (resume rules: CursorNotFound, ResumableChangeStreamError on 4.4+, showExpandedEvents, comment on getMore), GridFS ($eq on file ids, any id type, by-name rename / delete), command monitoring, index and search-index management, collection management, read / write concern tests | ✅ PASS | `unified_change_streams`<br>`unified_gridfs`<br>`unified_command_monitoring`<br>`unified_index_management`<br>`unified_collection_management`<br>`unified_read_write_concern`<br>`unified_format_valid_pass` |
+| CMAP / SDAM events and pool options (minPoolSize, maxIdleTimeMS, maxConnecting, waitQueueTimeoutMS); the CMAP and SDAM-monitoring spec suites | 🚧 GAP | moderate — the shared kernway-wire pool has no event hooks or background maintenance; needs ordered pool / topology events |
+| Stable API (serverApi: apiVersion / apiStrict / apiDeprecationErrors); run-command and versioned-api suites | 🚧 GAP | easy to moderate — attach the fields to every command with the spec's exceptions |
+| Client-side operation timeouts (timeoutMS, 539 tests) | 🚧 GAP | hard — one deadline through selection, checkout, each round trip, retries, cursors and withTransaction |
+| Client-side field-level and Queryable Encryption (433 tests) | 🚧 GAP | very hard — needs libmongocrypt (a C library, against the self-written rule) or a re-implementation, plus KMS providers; a decision for the owner |
+| mapReduce | 🚧 GAP | easy — deprecated command, not wrapped |
+| URI options without an implementation: proxyHost / proxyPort / proxyUsername / proxyPassword (SOCKS5) | 🚧 GAP | warned about and ignored — no SOCKS5 connector yet (easy: kernway-ssh already speaks SOCKS5) |
+| URI options without an implementation: minPoolSize, maxIdleTimeMS, maxConnecting, waitQueueTimeoutMS | 🚧 GAP | warned about and ignored — the pool has only maxPoolSize |
+| URI options without an implementation: serverMonitoringMode (streaming hello: moderate), srvAllowedHostsSuffix (easy), authMechanismProperties (only for the unimplemented mechanisms) | 🚧 GAP | warned about and ignored |
+| URI options that do not apply: serverSelectionTryOnce | ➖ N/A | only for single-threaded drivers; this one is asynchronous |
+
 ## Connection & security
 
 | Feature | Status | Evidence / note |
 |---|---|---|
-| Connection strings: hosts, IPv6, Unix-socket paths, credentials (percent-decoded), every option with validation; bad ones explained | ✅ PASS | `options::tests::connection_strings`<br>`options::tests::bad_connection_strings_say_why` |
+| Connection strings: hosts, IPv6, Unix-socket paths, credentials (percent-decoded), every option with validation; bad ones explained without repeating URI text | ✅ PASS | `options::tests::connection_strings`<br>`options::tests::bad_connection_strings_say_why`<br>`options::tests::unknown_or_invalid_options_warn_and_are_ignored` |
 | SCRAM-SHA-256 (speculative, in hello) and SCRAM-SHA-1, negotiated by saslSupportedMechs; wrong passwords and mechanisms refused | ✅ PASS | `scram_mechanisms_and_wrong_passwords` |
 | TLS: full certificate check, wrong name refused, tlsAllowInvalidHostnames, tlsInsecure, missing CA file, plaintext against a TLS server fails fast | ✅ PASS | `tls_certificates_and_x509` |
 | X.509 client-certificate authentication (speculative) | ✅ PASS | `tls_certificates_and_x509` |
@@ -43,9 +70,9 @@
 | mongodb+srv://: SRV seed list and TXT options from a self-written DNS client (over TCP), srvMaxHosts, targets outside the domain refused | ✅ PASS | `srv_connection_strings`<br>`dns::tests::parses_srv_and_txt` |
 | Connect and server-selection timeouts bounded, errors naming each server and why | ✅ PASS | `timeouts_and_selection_errors_are_bounded` |
 | PLAIN (LDAP) | 🚧 GAP | implemented, but only MongoDB Enterprise speaks it — not verified against a server |
-| GSSAPI / Kerberos, MONGODB-AWS, MONGODB-OIDC | 🚧 GAP | refused with a clear error |
+| GSSAPI / Kerberos, MONGODB-AWS, MONGODB-OIDC | 🚧 GAP | refused with a clear error — AWS (SigV4 signing, credential chain) and OIDC (callbacks, token cache) are moderate; GSSAPI is hard (a self-written Kerberos); each also needs a real AWS / IdP / KDC to test against |
 | SASLprep of non-ASCII SCRAM-SHA-256 passwords (RFC 4013; a password with no SASLprep form is refused before anything is sent) | ✅ PASS | `scram_sha256_passwords_are_saslprepped` |
-| Encrypted client keys (tlsCertificateKeyFilePassword), OCSP | 🚧 GAP | refused with a clear error / not checked |
+| Encrypted client keys (tlsCertificateKeyFilePassword), OCSP and revocation checks (tlsDisableOCSPEndpointCheck, tlsDisableCertificateRevocationCheck) | 🚧 GAP | the options are warned about and ignored (an encrypted key then fails to load); OCSP is not checked — moderate: PKCS#8 PBES2 decryption needs AES-CBC decryption, not written yet; OCSP is optional in the spec |
 | Unix-domain sockets on Windows | 🚧 GAP | rt-net has no AF_UNIX on Windows; TCP there |
 
 ## Protocol
@@ -105,7 +132,6 @@
 |---|---|---|
 | Fully async on kernway's reactor: DNS, files and the Windows resolver lookup on the blocking pool; no blocking call on a shard (source scan) | ✅ PASS | `no_blocking_call_runs_on_the_reactor`<br>`host_names_resolve_off_the_reactor` |
 | Linux, macOS and Windows (CI on each, against real servers) | ✅ PASS | `ci::mongodb_ubuntu_latest`<br>`ci::mongodb_macos_latest`<br>`ci::mongodb_windows_latest` |
-| Client-side field-level / Queryable Encryption, Stable API, client-side operation timeouts (timeoutMS), command monitoring events | 🚧 GAP | not implemented |
 
 ## All tests in this run
 
@@ -121,6 +147,7 @@
 | `error::tests::replies_and_labels` | PASS | yes |
 | `options::tests::bad_connection_strings_say_why` | PASS | yes |
 | `options::tests::connection_strings` | PASS | yes |
+| `options::tests::unknown_or_invalid_options_warn_and_are_ignored` | PASS | yes |
 | `orm::tests::like_patterns` | PASS | yes |
 | `topology::tests::max_staleness_skips_lagging_secondaries` | PASS | yes |
 | `topology::tests::replica_set_discovery_and_failover` | PASS | yes |
@@ -150,36 +177,129 @@
 | `crud_values_batches_and_queries` | PASS | yes |
 | `documents_keep_field_order` | PASS | yes |
 | `transactions_and_no_lost_update` | PASS | yes |
+| `bson_corpus_array` | PASS | yes |
+| `bson_corpus_binary` | PASS | yes |
+| `bson_corpus_boolean` | PASS | yes |
+| `bson_corpus_code` | PASS | yes |
+| `bson_corpus_code_w_scope` | PASS | yes |
+| `bson_corpus_datetime` | PASS | yes |
+| `bson_corpus_dbpointer` | PASS | yes |
+| `bson_corpus_dbref` | PASS | yes |
+| `bson_corpus_decimal128_1` | PASS | yes |
+| `bson_corpus_decimal128_2` | PASS | yes |
+| `bson_corpus_decimal128_3` | PASS | yes |
+| `bson_corpus_decimal128_4` | PASS | yes |
+| `bson_corpus_decimal128_5` | PASS | yes |
+| `bson_corpus_decimal128_6` | PASS | yes |
+| `bson_corpus_decimal128_7` | PASS | yes |
+| `bson_corpus_document` | PASS | yes |
+| `bson_corpus_double` | PASS | yes |
+| `bson_corpus_every_file_is_run` | PASS | yes |
+| `bson_corpus_int32` | PASS | yes |
+| `bson_corpus_int64` | PASS | yes |
+| `bson_corpus_maxkey` | PASS | yes |
+| `bson_corpus_minkey` | PASS | yes |
+| `bson_corpus_multi_type` | PASS | yes |
+| `bson_corpus_multi_type_deprecated` | PASS | yes |
+| `bson_corpus_null` | PASS | yes |
+| `bson_corpus_oid` | PASS | yes |
+| `bson_corpus_regex` | PASS | yes |
+| `bson_corpus_string` | PASS | yes |
+| `bson_corpus_symbol` | PASS | yes |
+| `bson_corpus_timestamp` | PASS | yes |
+| `bson_corpus_top` | PASS | yes |
+| `bson_corpus_undefined` | PASS | yes |
+| `prose_1_nul_bytes_are_refused_when_encoding` | PASS | yes |
+| `prose_2_1_encoding_duplicate_keys` | PASS | yes |
+| `prose_2_2_decoding_duplicate_keys` | PASS | yes |
+| `prose_2_3_round_trip_duplicate_keys` | PASS | yes |
+| `prose_2_4_extended_json_duplicate_keys` | PASS | yes |
+| `sdam_errors` | PASS | yes |
+| `sdam_load_balanced` | PASS | yes |
+| `sdam_rs` | PASS | yes |
+| `sdam_sharded` | PASS | yes |
+| `sdam_single` | PASS | yes |
+| `max_staleness` | PASS | yes |
+| `server_selection_in_window` | PASS | yes |
+| `server_selection_logic` | PASS | yes |
+| `server_selection_rtt` | PASS | yes |
+| `unified_causal_consistency` | PASS | yes |
+| `unified_change_streams` | PASS | yes |
+| `unified_collection_management` | PASS | yes |
+| `unified_command_monitoring` | PASS | yes |
+| `unified_crud` | PASS | yes |
+| `unified_format_valid_pass` | PASS | yes |
+| `unified_gridfs` | PASS | yes |
+| `unified_index_management` | PASS | yes |
+| `unified_read_write_concern` | PASS | yes |
+| `unified_retryable_reads` | PASS | yes |
+| `unified_retryable_writes` | PASS | yes |
+| `unified_run_command` | PASS | no |
+| `unified_sessions` | PASS | yes |
+| `unified_transactions` | PASS | yes |
+| `unified_transactions_convenient_api` | PASS | yes |
+| `auth_connection_string` | PASS | yes |
+| `cs_credential_disclosure` | PASS | yes |
+| `cs_invalid_uris` | PASS | yes |
+| `cs_prose_redacted_representation` | PASS | yes |
+| `cs_valid_auth` | PASS | yes |
+| `cs_valid_db_with_dotted_name` | PASS | yes |
+| `cs_valid_host_identifiers` | PASS | yes |
+| `cs_valid_options` | PASS | yes |
+| `cs_valid_unix_socket_absolute` | PASS | yes |
+| `cs_valid_unix_socket_relative` | PASS | yes |
+| `cs_valid_warnings` | PASS | yes |
+| `uo_auth` | PASS | yes |
+| `uo_client_backpressure` | PASS | yes |
+| `uo_compression` | PASS | yes |
+| `uo_concern` | PASS | yes |
+| `uo_connection` | PASS | yes |
+| `uo_connection_pool` | PASS | yes |
+| `uo_proxy` | PASS | yes |
+| `uo_read_preference` | PASS | yes |
+| `uo_sdam` | PASS | yes |
+| `uo_single_threaded` | PASS | yes |
+| `uo_srv` | PASS | yes |
+| `uo_tls` | PASS | yes |
 | `unix_domain_socket` | PASS | yes |
-| `ci::postgres_windows_latest` | PASS | no |
-| `ci::meilisearch_windows_latest` | PASS | no |
-| `ci::drivers_macos_latest` | PASS | no |
-| `ci::kafka_windows_latest` | PASS | no |
-| `ci::kafka_macos_latest` | PASS | no |
-| `ci::meilisearch_ubuntu_latest` | PASS | no |
-| `ci::kafka_ubuntu_latest` | PASS | no |
-| `ci::postgres_ubuntu_latest` | PASS | no |
-| `ci::drivers_ubuntu_latest` | PASS | no |
-| `ci::mongodb_windows_latest` | PASS | yes |
-| `ci::meilisearch_macos_latest` | PASS | no |
-| `ci::postgres_macos_latest` | PASS | no |
-| `ci::drivers_windows_latest` | PASS | no |
-| `ci::mssql_live_ubuntu_latest` | PASS | no |
-| `ci::nats_windows_latest` | PASS | no |
-| `ci::nats_ubuntu_latest` | PASS | no |
-| `ci::mariadb_ubuntu_latest` | PASS | no |
-| `ci::nats_macos_latest` | PASS | no |
-| `ci::s3_macos_latest` | PASS | no |
-| `ci::s3_ubuntu_latest` | PASS | no |
-| `ci::oracle_live_ubuntu_latest` | PASS | no |
 | `ci::valkey_ubuntu_latest` | PASS | no |
 | `ci::rabbitmq_ubuntu_latest` | PASS | no |
-| `ci::rabbitmq_windows_latest` | PASS | no |
-| `ci::s3_windows_latest` | PASS | no |
-| `ci::redis_windows_latest` | PASS | no |
+| `ci::postgres_macos_latest` | PASS | no |
+| `ci::mongodb_windows_latest` | PASS | yes |
+| `ci::drivers_macos_latest` | PASS | no |
 | `ci::rabbitmq_macos_latest` | PASS | no |
-| `ci::mongodb_ubuntu_latest` | PASS | yes |
+| `ci::nats_macos_latest` | PASS | no |
+| `ci::security_ubuntu_latest` | PASS | no |
+| `ci::postgres_ubuntu_latest` | PASS | no |
 | `ci::mongodb_macos_latest` | PASS | yes |
+| `ci::rabbitmq_windows_latest` | PASS | no |
+| `ci::mongodb_ubuntu_latest` | PASS | yes |
+| `ci::http_client_ubuntu_latest` | PASS | no |
+| `ci::ssh_macos_latest` | PASS | no |
+| `ci::postgres_windows_latest` | PASS | no |
+| `ci::meilisearch_macos_latest` | PASS | no |
+| `ci::nats_ubuntu_latest` | PASS | no |
 | `ci::redis_ubuntu_latest` | PASS | no |
+| `ci::http_client_macos_latest` | PASS | no |
+| `ci::meilisearch_ubuntu_latest` | PASS | no |
+| `ci::s3_ubuntu_latest` | PASS | no |
+| `ci::mssql_live_ubuntu_latest` | PASS | no |
+| `ci::security_macos_latest` | PASS | no |
+| `ci::meilisearch_windows_latest` | PASS | no |
 | `ci::redis_macos_latest` | PASS | no |
+| `ci::drivers_ubuntu_latest` | PASS | no |
+| `ci::ssh_windows_latest` | PASS | no |
+| `ci::kafka_macos_latest` | PASS | no |
+| `ci::drivers_windows_latest` | PASS | no |
+| `ci::ssh_ubuntu_latest` | PASS | no |
+| `ci::security_windows_latest` | PASS | no |
+| `ci::redis_windows_latest` | PASS | no |
+| `ci::oracle_live_ubuntu_latest` | PASS | no |
+| `ci::nats_windows_latest` | PASS | no |
+| `ci::kafka_ubuntu_latest` | PASS | no |
+| `ci::s3_macos_latest` | PASS | no |
+| `ci::kafka_windows_latest` | PASS | no |
+| `ci::mariadb_ubuntu_latest` | PASS | no |
+| `ci::s3_windows_latest` | PASS | no |
+| `ci::http_client_windows_latest` | PASS | no |
 
