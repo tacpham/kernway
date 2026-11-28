@@ -115,7 +115,17 @@ fn the_broker_drops_duplicate_batches() {
         let (id, epoch) = c.producer_ids().await.unwrap();
         let rec = |v: &str| vec![Record { timestamp: 1, value: Some(v.as_bytes().to_vec()), ..Record::default() }];
         let ids = |seq| ProducerIds { id, epoch, base_sequence: seq };
-        assert_eq!(c.produce_raw(&t, 0, &rec("a"), ids(0)).await.unwrap(), (0, 0));
+        // A new partition's leader can lag its metadata for a moment: NOT_LEADER (6)
+        // means nothing was written, so ask again.
+        let mut first = c.produce_raw(&t, 0, &rec("a"), ids(0)).await.unwrap();
+        for _ in 0..50 {
+            if first.0 != 6 {
+                break;
+            }
+            rt_core::sleep(std::time::Duration::from_millis(100)).await;
+            first = c.produce_raw(&t, 0, &rec("a"), ids(0)).await.unwrap();
+        }
+        assert_eq!(first, (0, 0));
         // The same batch again (a retry whose first answer was lost): no second copy.
         let (code, off) = c.produce_raw(&t, 0, &rec("a"), ids(0)).await.unwrap();
         assert!(code == 0 || code == 46, "duplicate answered with {code}");

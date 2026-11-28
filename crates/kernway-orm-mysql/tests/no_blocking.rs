@@ -29,7 +29,8 @@ fn no_blocking_call_runs_on_the_reactor() {
         if path.extension().is_none_or(|e| e != "rs") {
             continue;
         }
-        let text = std::fs::read_to_string(&path).unwrap();
+        // A Windows checkout has CRLF line ends.
+        let text = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
         // Unit tests may block: they are not driver code.
         let code = text.split("#[cfg(test)]\nmod tests").next().unwrap_or(&text);
         let lines: Vec<&str> = code.lines().collect();
