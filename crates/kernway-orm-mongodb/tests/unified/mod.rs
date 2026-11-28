@@ -763,11 +763,19 @@ async fn run_test(file: &Document, test: &Document, dep: &Deployment) -> TestRes
     if let Some(s) = test.get_str("skipReason") {
         return TestResult::NotRunnable(format!("skipped by the spec: {s}"));
     }
-    let admin = internal(dep).await;
     if dep.topology != "single" {
-        // Terminate transactions a previous test left open.
-        let _ = admin.run_command("admin", Document::new().with("killAllSessions", Bson::Array(vec![]))).await;
+        // Terminate transactions a previous test left open: killAllSessions on
+        // each host (each mongos), from a throwaway client — the server may
+        // close the connections of the sessions it kills, the caller's too.
+        let hosts: Vec<String> = dep.uri.trim_start_matches("mongodb://").split(['/', '?']).next().unwrap_or("").split(',').map(String::from).collect();
+        for h in hosts {
+            if let Ok(c) = Client::connect(&format!("mongodb://{h}/?directConnection=true")).await {
+                let _ = c.run_command("admin", Document::new().with("killAllSessions", Bson::Array(vec![]))).await;
+                c.shutdown().await;
+            }
+        }
     }
+    let admin = internal(dep).await;
     if let Some(data) = file.get_array("initialData") {
         if let Err(why) = majority_drop_and_insert(&admin, data).await {
             admin.shutdown().await;
