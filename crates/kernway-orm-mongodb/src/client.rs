@@ -7,7 +7,7 @@ use crate::bson::{Binary, Bson, Document, Timestamp};
 use crate::conn::{ConnectSpec, Connection};
 use crate::error::{Error, ErrorKind, Result};
 use crate::options::{Address, ClientOptions, ReadConcern, ReadMode, ReadPreference, WriteConcern};
-use crate::topology::{Selection, ServerDescription, ServerType, Topology, TopologyType};
+use crate::topology::{ApplicationError, Selection, ServerDescription, ServerType, Topology, TopologyType};
 use crate::wire::Sequence;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -87,6 +87,23 @@ pub(crate) struct ClientInner {
     check_now: Cell<u64>,
     /// When the SRV records were last read (mongodb+srv:// polling).
     srv_checked: Cell<Option<Instant>>,
+    /// Operations in flight per server (`operationCount`: selection prefers
+    /// the less busy of two servers in the latency window).
+    in_flight: RefCell<HashMap<Address, u64>>,
+}
+
+/// One operation counted against its server until dropped.
+pub(crate) struct InFlight {
+    inner: Rc<ClientInner>,
+    address: Address,
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        if let Some(n) = self.inner.in_flight.borrow_mut().get_mut(&self.address) {
+            *n = n.saturating_sub(1);
+        }
+    }
 }
 
 /// A MongoDB client: cheap to clone, `!Send` — one per shard, like the
@@ -205,6 +222,7 @@ impl Client {
             cluster_time: RefCell::new(None),
             check_now: Cell::new(0),
             srv_checked: Cell::new(Some(Instant::now())),
+            in_flight: RefCell::new(HashMap::new()),
         });
         let client = Client { inner };
         if client.inner.options.load_balanced {
@@ -261,22 +279,44 @@ impl Client {
 
     /// A server for `sel`, waiting up to `serverSelectionTimeoutMS`.
     pub(crate) async fn select(&self, sel: &Selection) -> Result<Address> {
+        self.select_avoiding(sel, &[]).await
+    }
+
+    /// Count an operation against `address` until the guard is dropped.
+    pub(crate) fn in_flight(&self, address: &Address) -> InFlight {
+        *self.inner.in_flight.borrow_mut().entry(address.clone()).or_insert(0) += 1;
+        InFlight { inner: self.inner.clone(), address: address.clone() }
+    }
+
+    /// The server selection spec's algorithm: fail at once on an
+    /// incompatible topology or an unusable read preference; prefer servers
+    /// not in `deprioritized` (an earlier attempt's); of two random servers
+    /// in the latency window take the one with fewer operations in flight;
+    /// otherwise wait for the topology to change.
+    pub(crate) async fn select_avoiding(&self, sel: &Selection, deprioritized: &[Address]) -> Result<Address> {
         let o = &self.inner.options;
         let deadline = Instant::now() + o.server_selection_timeout;
         let mut first = true;
         loop {
             {
                 let t = self.inner.topology.borrow();
-                let found = t.select(sel, o.local_threshold, o.heartbeat_frequency);
-                if !found.is_empty() {
-                    let pick = if found.len() == 1 {
-                        0
-                    } else {
-                        let mut b = [0u8; 4];
-                        let _ = kernway_tls::fill_random(&mut b);
-                        u32::from_le_bytes(b) as usize % found.len()
-                    };
-                    return Ok(found[pick].clone());
+                if let Some(e) = &t.compatibility_error {
+                    return Err(Error::new(ErrorKind::ServerSelection, e.clone()));
+                }
+                if let Selection::Read(rp) = sel {
+                    if let Some(e) = t.read_preference_error(rp, o.heartbeat_frequency) {
+                        return Err(Error::config(e));
+                    }
+                }
+                let found = t.select_avoiding(sel, o.local_threshold, o.heartbeat_frequency, deprioritized);
+                let counts = self.inner.in_flight.borrow();
+                let random = |n: usize| {
+                    let mut b = [0u8; 8];
+                    let _ = kernway_tls::fill_random(&mut b);
+                    (u64::from_le_bytes(b) % n as u64) as usize
+                };
+                if let Some(a) = crate::topology::choose_in_window(&found, |a| counts.get(a).copied().unwrap_or(0), random) {
+                    return Ok(a.clone());
                 }
                 if Instant::now() >= deadline {
                     return Err(Error::new(
@@ -328,29 +368,30 @@ impl Client {
         match pool.acquire().await {
             Ok(c) => Ok(c),
             Err(e) => {
-                if e.is_network() || e.kind == ErrorKind::Protocol {
-                    self.server_failed(address, &e);
-                }
+                // Opening the connection (hello, authentication) failed.
+                self.server_failed(address, &e, None, false);
                 Err(e)
             }
         }
     }
 
-    /// A server failed an operation: mark it unknown and clear its pool
-    /// (network errors, "not primary", "node is recovering").
-    pub(crate) fn server_failed(&self, address: &Address, e: &Error) {
-        if self.inner.options.load_balanced {
-            return;
+    /// An operation failed on `address`: SDAM error handling decides
+    /// (`Topology::handle_application_error`) whether the server becomes
+    /// Unknown and its pool is cleared — on a connection of pool
+    /// `generation` (`None`: while opening one), with or without a
+    /// completed handshake.
+    pub(crate) fn server_failed(&self, address: &Address, e: &Error, generation: Option<u64>, completed_handshake: bool) {
+        let Some(kind) = e.sdam_kind() else { return };
+        let err = ApplicationError { address: address.clone(), generation, completed_handshake, kind };
+        let out = self.inner.topology.borrow_mut().handle_application_error(&err);
+        if out.cleared_pool {
+            if let Some(p) = self.inner.pools.borrow().get(address) {
+                p.clear();
+            }
         }
-        let t = self.inner.topology.borrow().kind;
-        if t == TopologyType::LoadBalanced {
-            return;
+        if out.request_check {
+            self.request_check();
         }
-        self.inner.topology.borrow_mut().mark_unknown(address, e.to_string());
-        if let Some(p) = self.inner.pools.borrow().get(address) {
-            p.clear();
-        }
-        self.request_check();
     }
 
     fn checkout_session(&self) -> ServerSession {
@@ -462,9 +503,17 @@ impl Client {
         }
         let mut attempt = 0;
         let mut txn_number = None;
+        // A retry avoids the server the first attempt failed on, if it can.
+        let mut deprioritized: Vec<Address> = Vec::new();
+        let mut last: Option<Address> = None;
         loop {
             attempt += 1;
-            let address = self.select(&selection).await?;
+            if let Some(prev) = last.take() {
+                deprioritized.push(prev);
+            }
+            let address = self.select_avoiding(&selection, &deprioritized).await?;
+            let _in_flight = self.in_flight(&address);
+            last = Some(address.clone());
             let (kind, wire) = {
                 let t = self.inner.topology.borrow();
                 let s = t.servers.get(&address);
@@ -572,6 +621,7 @@ impl Client {
             // dropped mid-flight (a timeout), the connection — with a reply
             // still on its way — is discarded, never handed out again.
             conn.poison();
+            let generation = conn.generation;
             let result = conn.command_seq(op.db, cmd, op.seqs).await;
             if !conn.is_broken() {
                 conn.mark_healthy();
@@ -609,9 +659,7 @@ impl Client {
                             }
                         }
                     }
-                    if e.is_network() || e.is_state_change() {
-                        self.server_failed(&address, &e);
-                    }
+                    self.server_failed(&address, &e, Some(generation), true);
                     // Inside a transaction, network errors and server
                     // selection failures are transient; commit outcomes
                     // after a network error are unknown.
@@ -710,11 +758,11 @@ async fn monitor(weak: Weak<ClientInner>, address: Address) {
             let changes = match outcome {
                 Ok((hello, rtt)) => client.inner.topology.borrow_mut().apply(ServerDescription::from_hello(address.clone(), &hello, rtt)),
                 Err(e) => {
+                    // A failed check: Unknown, and the pool cleared (server monitoring spec).
                     if let Some(p) = client.inner.pools.borrow().get(&address) {
                         p.clear();
                     }
-                    let mut t = client.inner.topology.borrow_mut();
-                    t.apply(ServerDescription::unknown(address.clone(), Some(e.to_string())))
+                    client.inner.topology.borrow_mut().check_failed(&address, e.to_string())
                 }
             };
             for a in changes.added {

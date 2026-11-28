@@ -49,6 +49,11 @@ pub struct Error {
     /// Server / driver error labels (`RetryableWriteError`,
     /// `TransientTransactionError`, `UnknownTransactionCommitResult`, …).
     pub labels: Vec<String>,
+    /// A network error that was a timeout (SDAM never acts on those).
+    pub(crate) timeout: bool,
+    /// The failed reply's `topologyVersion` (SDAM ignores stale errors);
+    /// boxed to keep `Error` small.
+    pub(crate) topology_version: Option<Box<crate::topology::TopologyVersion>>,
 }
 
 /// `Result` with this crate's [`Error`].
@@ -56,7 +61,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
     pub(crate) fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
-        Error { kind, message: message.into(), labels: Vec::new() }
+        Error { kind, message: message.into(), labels: Vec::new(), timeout: false, topology_version: None }
     }
     pub(crate) fn config(m: impl Into<String>) -> Self {
         Self::new(ErrorKind::Config, m)
@@ -86,7 +91,38 @@ impl Error {
             reply.get_str("errmsg").unwrap_or("command failed").to_string(),
         );
         e.labels = labels;
+        e.topology_version = crate::topology::TopologyVersion::from_reply(reply).map(Box::new);
         e
+    }
+
+    /// A network timeout (`connectTimeoutMS`, `socketTimeoutMS`).
+    pub(crate) fn network_timeout(m: impl Into<String>) -> Self {
+        let mut e = Self::new(ErrorKind::Network, m);
+        e.timeout = true;
+        e
+    }
+
+    /// The error as SDAM error handling sees it (`None`: not a server
+    /// failure — a bad option, a BSON error, a selection timeout…).
+    /// writeErrors are never looked at, only the reply's own error or its
+    /// write-concern error.
+    pub(crate) fn sdam_kind(&self) -> Option<crate::topology::ApplicationErrorKind> {
+        use crate::topology::ApplicationErrorKind as K;
+        let command = |code: Option<i32>, message: &str| K::Command {
+            code,
+            message: message.to_string(),
+            topology_version: self.topology_version.as_deref().copied(),
+            labels: self.labels.clone(),
+        };
+        Some(match &self.kind {
+            ErrorKind::Network if self.timeout => K::Timeout,
+            ErrorKind::Network | ErrorKind::Protocol => K::Network,
+            ErrorKind::Command { code, .. } => command(Some(*code), &self.message),
+            ErrorKind::Write { write_concern: Some((code, message)), .. } => command(Some(*code), message),
+            ErrorKind::Write { .. } => command(None, ""),
+            ErrorKind::Auth => command(None, &self.message),
+            _ => return None,
+        })
     }
 
     /// The server error code (command, or the first write error).
@@ -221,6 +257,7 @@ pub(crate) fn check_reply(reply: Document) -> Result<Document> {
         let message = write_errors.first().map(|w| w.2.clone()).or(wce.as_ref().map(|w| w.1.clone())).unwrap_or_default();
         let mut e = Error::new(ErrorKind::Write { write_errors, write_concern: wce }, message);
         e.labels = labels;
+        e.topology_version = crate::topology::TopologyVersion::from_reply(&reply).map(Box::new);
         return Err(e);
     }
     Ok(reply)

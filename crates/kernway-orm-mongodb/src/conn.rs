@@ -166,7 +166,7 @@ impl Connection {
         }
         match rt_core::timeout(spec.connect_timeout, open).await {
             Ok(r) => r,
-            Err(_) => Err(Error::network(format!("connect {address}: timed out after {:?}", spec.connect_timeout))),
+            Err(_) => Err(Error::network_timeout(format!("connect {address}: timed out after {:?}", spec.connect_timeout))),
         }
     }
 
@@ -348,7 +348,7 @@ impl Connection {
                 Ok(r) => r,
                 Err(_) => {
                     self.broken = true;
-                    Err(Error::network(format!("{}: no reply within socketTimeoutMS ({t:?})", self.address)))
+                    Err(Error::network_timeout(format!("{}: no reply within socketTimeoutMS ({t:?})", self.address)))
                 }
             },
             None => self.round_trip(id).await,

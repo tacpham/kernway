@@ -17,7 +17,7 @@ hướng dẫn cuối trang.*
 | Refused with a clear error | Asking for it fails at once with an error that names it; nothing hangs or misbehaves. |
 | Built, not verified | The code exists, but the test setup has no server or platform to prove it against. |
 
-**76 gaps** across 13 drivers.
+**77 gaps** across 13 drivers.
 
 | Driver | Features | Gaps |
 |---|---:|---:|
@@ -25,7 +25,7 @@ hướng dẫn cuối trang.*
 | [Kafka](#kafka) | 33 | 7 |
 | [MariaDB](#mariadb) | 45 | 1 |
 | [Meilisearch](#meilisearch) | 14 | 3 |
-| [MongoDB](#mongodb) | 54 | 11 |
+| [MongoDB](#mongodb) | 58 | 12 |
 | [SQL Server](#mssql) | 29 | 8 |
 | [MySQL](#mysql) | 44 | — |
 | [NATS / JetStream](#nats) | 43 | 7 |
@@ -96,6 +96,7 @@ Report: [`docs/acceptance/mongodb.md`](acceptance/mongodb.md) · catalog: `accep
 
 | Area | Feature | Status | Why / what happens instead |
 |---|---|---|---|
+| Specifications | SDAM monitoring events, CMAP pool events, command monitoring, unified-format SDAM tests | Not built | no event API yet |
 | Specifications | URI options without an implementation: proxyHost / proxyPort / proxyUsername / proxyPassword (SOCKS5) | Not built | warned about and ignored — no SOCKS5 connector yet |
 | Specifications | URI options without an implementation: minPoolSize, maxIdleTimeMS, maxConnecting, waitQueueTimeoutMS | Not built | warned about and ignored — the pool has only maxPoolSize |
 | Specifications | URI options without an implementation: maxAdaptiveRetries, enableOverloadRetargeting (client backpressure), serverMonitoringMode, srvAllowedHostsSuffix, authMechanismProperties | Not built | warned about and ignored |

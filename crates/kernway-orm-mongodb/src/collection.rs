@@ -393,12 +393,12 @@ impl<T> Collection<T> {
             let r = self.write(cmd, &[Sequence { identifier: "documents", documents: &docs[start..end] }], true).await;
             match r {
                 Ok(_) => {}
-                Err(Error { kind: ErrorKind::Write { write_errors, write_concern }, message, labels }) => {
+                Err(Error { kind: ErrorKind::Write { write_errors, write_concern }, message, labels, timeout, topology_version }) => {
                     let shifted: Vec<(usize, i32, String)> = write_errors.into_iter().map(|(i, c, m)| (i + start, c, m)).collect();
                     if ordered || write_concern.is_some() {
                         let mut all = failures;
                         all.extend(shifted);
-                        return Err(Error { kind: ErrorKind::Write { write_errors: all, write_concern }, message, labels });
+                        return Err(Error { kind: ErrorKind::Write { write_errors: all, write_concern }, message, labels, timeout, topology_version });
                     }
                     failures.extend(shifted);
                 }
