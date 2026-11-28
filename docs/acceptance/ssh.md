@@ -5,20 +5,20 @@
 
 | | |
 |---|---|
-| generated | 2026-11-28 03:17 UTC |
+| generated | 2026-11-28 04:18 UTC |
 | server | OpenSSH_10.3p1, OpenSSL 3.5.9 29 Sep 2026 (Docker, lscr.io/linuxserver/openssh-server:latest) |
 | image | lscr.io/linuxserver/openssh-server |
 | container | servers in Docker: kernway-sshd |
-| driver commit | 3ce2d95 on HEAD |
+| driver commit | 05c2b72 on HEAD |
 | rustc | rustc 1.100.0 (0ef1bc386 2026-11-09) |
-| command | `cargo test -p kernway-ssh  --lib --tests -- --test-threads=1 --nocapture  ; CI run 46101447754 (Linux / macOS / Windows)` |
+| command | `cargo test -p kernway-ssh  --lib --tests -- --test-threads=1 --nocapture  ; CI run 46106053054 (Linux / macOS / Windows)` |
 
-## Verdict: implemented features **PASSED** · completeness **28/37** — NOT complete
+## Verdict: implemented features **PASSED** · completeness **41/51** — NOT complete
 
 - *Implemented features* passes only if every test ran and passed (no skips) in this run.
 - *Completeness* counts 🚧 gaps (listed below) against the full feature catalog.
-- Features verified: **28 / 37** (9 not implemented yet, 0 failing; 0 not applicable to SSH and SFTP client).
-- Tests run: 71 — 71 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
+- Features verified: **41 / 51** (10 not implemented yet, 0 failing; 0 not applicable to SSH and SFTP client).
+- Tests run: 89 — 89 passed, 0 failed, 0 skipped (a skip is a failure here: the environment was incomplete), 0 ignored.
 - A feature is ✅ only when every test listed as its evidence ran and passed in this run.
 
 ## Transport
@@ -54,15 +54,38 @@
 | Public key: Ed25519, ECDSA P-256 / P-384, RSA (rsa-sha2-512 / -256 per server-sig-algs) keys in OpenSSH format; RSA in PKCS#8 and PKCS#1 PEM | ✅ PASS | `logs_in_with_every_key_type_and_format`<br>`keys::tests::big_mod_and_minus_one`<br>`keys::tests::a_generated_ed25519_key_signs_verifiably` |
 | Password (UTF-8), and keyboard-interactive answered with it; methods tried in order, a refused one passing to the next | ✅ PASS | `password_logins_with_password_and_keyboard_interactive` |
 | Refusals say why: an unknown key, an unknown user and no method all report the methods the server still allows | ✅ PASS | `refused_logins_say_why` |
-| Passphrase-protected private keys | 🚧 GAP | refused with a clear error (bcrypt-pbkdf + aes256-ctr not implemented); remove the passphrase with ssh-keygen -p, or use password login |
-| ssh-agent, FIDO (sk-) keys, user certificates, GSSAPI / Kerberos | 🚧 GAP | not implemented |
+| Passphrase-protected OpenSSH keys as ssh-keygen writes them (bcrypt_pbkdf with aes256-ctr, and aes256-gcm@openssh.com) — Ed25519, ECDSA, RSA, UTF-8 passphrases; a wrong or missing passphrase reported as such | ✅ PASS | `passphrase_protected_keys_log_in`<br>`kdf::tests::aes_matches_fips_197`<br>`kdf::tests::ctr_matches_sp_800_38a`<br>`kdf::tests::bcrypt_pbkdf_is_deterministic_and_spreads_bytes` |
+| Several keys tried in turn: one the server refuses passes to the next | ✅ PASS | `keys_from_an_agent_and_several_keys_in_turn_log_in` |
+| ssh-agent (SSH_AUTH_SOCK): its keys listed and used, the agent signing — the private key never in this process | ✅ PASS | `keys_from_an_agent_and_several_keys_in_turn_log_in` |
+| The Windows OpenSSH agent (named pipe \\.\pipe\openssh-ssh-agent) | 🚧 GAP | built (the pipe client compiles and runs on the Windows CI), not verified against a running agent |
+| Encrypted PKCS#8 and legacy encrypted PEM keys | 🚧 GAP | refused with a clear error — convert with ssh-keygen -p (OpenSSH format) |
+| FIDO (sk-) keys, user certificates, GSSAPI / Kerberos, agent forwarding | 🚧 GAP | not implemented |
 
 ## Channels
 
 | Feature | Status | Evidence / note |
 |---|---|---|
 | exec: stdout, stderr, exit status, exit signal; stdin; output and input far larger than the channel window (flow control both ways); many commands on one connection | ✅ PASS | `commands_return_output_status_and_signals` |
-| Interactive shells with a pty, port forwarding (local, remote, dynamic), X11 / agent forwarding | 🚧 GAP | not implemented (forwarding requests from the server are refused) |
+| Interactive console: a login shell on a pseudo-terminal (TERM, size), full duplex — keystrokes in while output streams out; window resize; Ctrl-C; UTF-8; the exit status at the end | ✅ PASS | `a_console_is_a_real_terminal_that_resizes_and_takes_ctrl_c` |
+| A command as a console: output as it is written, stdin streamed in (3 MB byte-exact), stdout / stderr apart without a terminal, signals (TERM) | ✅ PASS | `a_command_console_streams_output_takes_input_and_signals` |
+| One login shared by many channels at once (SshSession): several consoles, SFTP sessions and commands side by side, from separate tasks; one closed leaves the others; disconnect ends them all | ✅ PASS | `consoles_sftp_and_commands_share_one_login` |
+
+## Forwarding
+
+| Feature | Status | Evidence / note |
+|---|---|---|
+| Local forward (ssh -L): connections carried to a host:port the server reaches — SSH inside SSH, two at once, byte-exact; an unreachable destination closes the connection | ✅ PASS | `a_local_forward_carries_an_ssh_connection` |
+| Dynamic forward (ssh -D): a SOCKS5 proxy (CONNECT, names resolved on the server side, IPv4 / IPv6 / domain), an unreachable destination reported | ✅ PASS | `a_dynamic_forward_is_a_socks5_proxy` |
+| Remote forward (ssh -R): the server listens (its chosen port reported) and connections come back here; half-closes passed on both ways; a port it cannot listen on refused with a reason | ✅ PASS | `a_remote_forward_brings_server_connections_here` |
+| SOCKS4 / SOCKS5 with authentication, X11 forwarding, agent forwarding | 🚧 GAP | not implemented (the server's X11 / agent channel opens are refused) |
+
+## SCP
+
+| Feature | Status | Evidence / note |
+|---|---|---|
+| Upload and download (scp -t / -f): bytes exact from 0 to 1.5 MB, mode and modification / access times kept, names with spaces and quotes, into an existing directory | ✅ PASS | `scp_copies_files_with_their_mode_and_times` |
+| Directory trees both ways (-r): nested and empty directories, UTF-8 names, modes and times | ✅ PASS | `scp_copies_directory_trees_both_ways` |
+| Errors carry the remote scp's message (no such file, not a regular file, permission denied); a hostile server's ../ or / names refused | ✅ PASS | `scp_copies_files_with_their_mode_and_times`<br>`scp::tests::records_parse_and_hostile_names_are_refused` |
 
 ## SFTP
 
@@ -76,7 +99,8 @@
 | Open handles: random-access reads and writes, holes, read past the end, fstat, fsync, create_new on an existing file refused | ✅ PASS | `sftp_handles_give_random_access` |
 | Typed errors (not found, permission denied, failure) that leave the session usable; SFTP and exec on one connection | ✅ PASS | `sftp_errors_are_typed`<br>`sftp_directories_links_and_attributes` |
 | 4 MB over SFTP across server-started rekeys | ✅ PASS | `rekeying_started_by_either_side` |
-| SFTP versions 4–6, the copy-data / limits / users-groups extensions, transfers streamed to local files | 🚧 GAP | not implemented (whole-file transfers are buffered; open handles stream in pieces) |
+| A remote file manager: streamed upload / download of local files (20 MB, memory bounded, progress reported, byte-exact), directory trees both ways, walk, recursive delete — with a second SFTP session browsing during the transfer | ✅ PASS | `sftp_as_a_remote_file_manager` |
+| SFTP versions 4–6; the copy-data / limits / users-groups extensions; resuming a broken transfer | 🚧 GAP | not implemented |
 
 ## Reliability
 
@@ -97,14 +121,24 @@
 | `hostkey::tests::keys_parse_print_and_fingerprint_like_openssh` | PASS | yes |
 | `hostkey::tests::known_hosts_lines_match_like_openssh` | PASS | yes |
 | `hostkey::tests::signatures_are_checked` | PASS | yes |
+| `kdf::tests::aes_matches_fips_197` | PASS | yes |
+| `kdf::tests::bcrypt_pbkdf_is_deterministic_and_spreads_bytes` | PASS | yes |
+| `kdf::tests::ctr_matches_sp_800_38a` | PASS | yes |
 | `keys::tests::a_generated_ed25519_key_signs_verifiably` | PASS | yes |
 | `keys::tests::big_mod_and_minus_one` | PASS | yes |
 | `keys::tests::passphrases_and_junk_are_refused_with_a_reason` | PASS | no |
+| `scp::tests::records_parse_and_hostile_names_are_refused` | PASS | yes |
 | `transport::tests::a_wrong_guess_is_detected` | PASS | yes |
 | `transport::tests::keys_are_derived_and_extended` | PASS | yes |
 | `transport::tests::the_first_client_algorithm_the_server_knows_wins` | PASS | yes |
 | `wire::tests::mpints_follow_rfc_4251_examples` | PASS | no |
 | `wire::tests::strings_name_lists_and_short_input` | PASS | no |
+| `a_command_console_streams_output_takes_input_and_signals` | PASS | yes |
+| `a_console_is_a_real_terminal_that_resizes_and_takes_ctrl_c` | PASS | yes |
+| `keys_from_an_agent_and_several_keys_in_turn_log_in` | PASS | yes |
+| `passphrase_protected_keys_log_in` | PASS | yes |
+| `scp_copies_directory_trees_both_ways` | PASS | yes |
+| `scp_copies_files_with_their_mode_and_times` | PASS | yes |
 | `commands_return_output_status_and_signals` | PASS | yes |
 | `connections_that_go_wrong_fail_cleanly` | PASS | yes |
 | `every_key_exchange_and_cipher_works` | PASS | yes |
@@ -118,6 +152,11 @@
 | `sftp_files_round_trip_byte_exact` | PASS | yes |
 | `sftp_handles_give_random_access` | PASS | yes |
 | `no_blocking_call_runs_on_the_reactor` | PASS | yes |
+| `a_dynamic_forward_is_a_socks5_proxy` | PASS | yes |
+| `a_local_forward_carries_an_ssh_connection` | PASS | yes |
+| `a_remote_forward_brings_server_connections_here` | PASS | yes |
+| `consoles_sftp_and_commands_share_one_login` | PASS | yes |
+| `sftp_as_a_remote_file_manager` | PASS | yes |
 | `a_host_key_signature_that_does_not_cover_the_exchange_is_refused` | PASS | yes |
 | `a_server_hanging_up_mid_handshake_is_an_error_not_a_hang` | PASS | yes |
 | `a_server_that_is_not_ssh_is_refused` | PASS | yes |
@@ -126,41 +165,44 @@
 | `each_kind_of_algorithm_must_be_agreed` | PASS | yes |
 | `ssh_1_is_refused_by_name` | PASS | yes |
 | `strict_kex_refuses_a_message_slipped_in_before_kexinit` | PASS | yes |
-| `ci::valkey_ubuntu_latest` | PASS | no |
-| `ci::redis_windows_latest` | PASS | no |
-| `ci::mongodb_macos_latest` | PASS | no |
-| `ci::redis_ubuntu_latest` | PASS | no |
-| `ci::http_client_windows_latest` | PASS | no |
-| `ci::postgres_macos_latest` | PASS | no |
+| `ci::mssql_live_ubuntu_latest` | PASS | no |
 | `ci::mariadb_ubuntu_latest` | PASS | no |
-| `ci::mongodb_ubuntu_latest` | PASS | no |
-| `ci::redis_macos_latest` | PASS | no |
-| `ci::postgres_windows_latest` | PASS | no |
-| `ci::rabbitmq_macos_latest` | PASS | no |
-| `ci::rabbitmq_ubuntu_latest` | PASS | no |
-| `ci::postgres_ubuntu_latest` | PASS | no |
 | `ci::rabbitmq_windows_latest` | PASS | no |
+| `ci::ssh_ubuntu_latest` | PASS | yes |
+| `ci::s3_ubuntu_latest` | PASS | no |
+| `ci::security_windows_latest` | PASS | no |
+| `ci::security_ubuntu_latest` | PASS | no |
+| `ci::mongodb_ubuntu_latest` | PASS | no |
+| `ci::s3_macos_latest` | PASS | no |
+| `ci::rabbitmq_ubuntu_latest` | PASS | no |
+| `ci::rabbitmq_macos_latest` | PASS | no |
+| `ci::mongodb_macos_latest` | PASS | no |
 | `ci::mongodb_windows_latest` | PASS | no |
 | `ci::oracle_live_ubuntu_latest` | PASS | no |
-| `ci::kafka_macos_latest` | PASS | no |
-| `ci::drivers_macos_latest` | PASS | no |
-| `ci::nats_ubuntu_latest` | PASS | no |
-| `ci::nats_windows_latest` | PASS | no |
-| `ci::drivers_ubuntu_latest` | PASS | no |
-| `ci::ssh_ubuntu_latest` | PASS | yes |
-| `ci::meilisearch_macos_latest` | PASS | no |
-| `ci::kafka_ubuntu_latest` | PASS | no |
-| `ci::s3_macos_latest` | PASS | no |
-| `ci::ssh_macos_latest` | PASS | yes |
-| `ci::http_client_macos_latest` | PASS | no |
-| `ci::drivers_windows_latest` | PASS | no |
-| `ci::meilisearch_ubuntu_latest` | PASS | no |
 | `ci::s3_windows_latest` | PASS | no |
-| `ci::kafka_windows_latest` | PASS | no |
-| `ci::nats_macos_latest` | PASS | no |
-| `ci::ssh_windows_latest` | PASS | yes |
-| `ci::mssql_live_ubuntu_latest` | PASS | no |
-| `ci::http_client_ubuntu_latest` | PASS | no |
-| `ci::s3_ubuntu_latest` | PASS | no |
+| `ci::security_macos_latest` | PASS | no |
+| `ci::redis_ubuntu_latest` | PASS | no |
+| `ci::valkey_ubuntu_latest` | PASS | no |
 | `ci::meilisearch_windows_latest` | PASS | no |
+| `ci::drivers_windows_latest` | PASS | no |
+| `ci::redis_macos_latest` | PASS | no |
+| `ci::kafka_macos_latest` | PASS | no |
+| `ci::drivers_ubuntu_latest` | PASS | no |
+| `ci::http_client_macos_latest` | PASS | no |
+| `ci::kafka_windows_latest` | PASS | no |
+| `ci::nats_ubuntu_latest` | PASS | no |
+| `ci::http_client_ubuntu_latest` | PASS | no |
+| `ci::nats_windows_latest` | PASS | no |
+| `ci::meilisearch_macos_latest` | PASS | no |
+| `ci::ssh_windows_latest` | PASS | yes |
+| `ci::postgres_ubuntu_latest` | PASS | no |
+| `ci::kafka_ubuntu_latest` | PASS | no |
+| `ci::meilisearch_ubuntu_latest` | PASS | no |
+| `ci::nats_macos_latest` | PASS | no |
+| `ci::postgres_windows_latest` | PASS | no |
+| `ci::http_client_windows_latest` | PASS | no |
+| `ci::postgres_macos_latest` | PASS | no |
+| `ci::drivers_macos_latest` | PASS | no |
+| `ci::redis_windows_latest` | PASS | no |
+| `ci::ssh_macos_latest` | PASS | yes |
 
