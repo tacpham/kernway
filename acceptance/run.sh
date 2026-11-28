@@ -254,7 +254,12 @@ SELECT banner_full FROM v\$version;' | sqlplus -s system/oracle_pw@//localhost:1
     "$ROOT/crates/kernway-http-client/tests/support/httpbin-setup.sh" "$ROOT/target/httpbin" > "$WORK/httpbin.env"
     sed -i.bak 's/^\(KERNWAY_HTTPBIN_[A-Z_]*=\)\(.*\)$/\1"\2"/' "$WORK/httpbin.env"
     set -a; . "$WORK/httpbin.env"; set +a
-    VERSION="$KERNWAY_HTTPBIN_SERVER"; IMAGE="official release binaries (or their Docker images)"; C="none (go-httpbin and Caddy processes)"
+    VERSION="$KERNWAY_HTTPBIN_SERVER"
+    if [ -n "${HTTPBIN_DOCKER:-}" ]; then
+      IMAGE="ghcr.io/mccutchen/go-httpbin, caddy"; C="servers in Docker: kernway-httpbin, kernway-httpbin-tls, kernway-caddy"
+    else
+      IMAGE="official release binaries (native)"; C="none (native go-httpbin and Caddy processes)"
+    fi
     CRATE=kernway-http-client; FEATURES=(); TITLE="HTTP client"; SKIP=()
     ;;
   *) echo "unknown database: $DB (mysql | oracle | sqlite | redis | postgres | mongodb | mssql | nats | rabbitmq | meilisearch | kafka | mariadb | valkey | s3 | http-client)" >&2; exit 2 ;;

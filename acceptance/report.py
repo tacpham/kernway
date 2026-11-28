@@ -88,6 +88,8 @@ w("")
 container = meta.get("container", "")
 if container.startswith("none (native"):
     where = "real servers running natively"
+elif container.startswith("servers in Docker"):
+    where = "real servers in Docker"
 elif container.startswith("none"):
     where = "real database files (embedded engine)"
 else:
