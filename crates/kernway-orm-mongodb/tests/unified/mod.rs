@@ -128,6 +128,11 @@ fn unmet(reqs: Option<&Vec<Bson>>, dep: &Deployment) -> Option<String> {
     Some(format!("requires {}", whys.join(" or ")))
 }
 
+/// Every host of the deployment's URI (each mongos of a sharded cluster).
+fn hosts(dep: &Deployment) -> Vec<String> {
+    dep.uri.trim_start_matches("mongodb://").split(['/', '?']).next().unwrap_or("").split(',').map(String::from).collect()
+}
+
 /// The runner's own client to the deployment (setup, outcome, fail points).
 async fn internal(dep: &Deployment) -> Client {
     Client::connect(&dep.uri).await.expect("connect the internal client")
@@ -487,7 +492,7 @@ fn check_error(expect: &Document, err: &Error, e: &Entities) -> Result<(), Strin
             "errorLabelsContain" => {
                 for l in v.as_array().into_iter().flatten().filter_map(Bson::as_str) {
                     if !err.has_label(l) {
-                        return Err(format!("labels {:?} lack {l}", err.labels));
+                        return Err(format!("labels {:?} lack {l} ({err})", err.labels));
                     }
                 }
             }
@@ -767,15 +772,20 @@ async fn run_test(file: &Document, test: &Document, dep: &Deployment) -> TestRes
         // Terminate transactions a previous test left open: killAllSessions on
         // each host (each mongos), from a throwaway client — the server may
         // close the connections of the sessions it kills, the caller's too.
-        let hosts: Vec<String> = dep.uri.trim_start_matches("mongodb://").split(['/', '?']).next().unwrap_or("").split(',').map(String::from).collect();
-        for h in hosts {
+        for h in hosts(dep) {
             if let Ok(c) = Client::connect(&format!("mongodb://{h}/?directConnection=true")).await {
                 let _ = c.run_command("admin", Document::new().with("killAllSessions", Bson::Array(vec![]))).await;
                 c.shutdown().await;
             }
         }
     }
-    let admin = internal(dep).await;
+    // initialData through a single mongos (the spec's SHOULD): the one a
+    // `useMultipleMongoses: false` client uses, so its reads — snapshot reads
+    // pick their time from that router's cluster time — see the data.
+    let admin = match &dep.single_mongos_uri {
+        Some(one) => Client::connect(one).await.expect("connect the setup client"),
+        None => internal(dep).await,
+    };
     if let Some(data) = file.get_array("initialData") {
         if let Err(why) = majority_drop_and_insert(&admin, data).await {
             admin.shutdown().await;
@@ -801,12 +811,20 @@ async fn run_test(file: &Document, test: &Document, dep: &Deployment) -> TestRes
         Ok::<(), TestResult>(())
     }
     .await;
-    for (addr, name) in fps {
-        let off = Document::new().with("configureFailPoint", name).with("mode", "off");
-        let _ = match addr {
-            Some(a) => admin.run_command_at(&a, "admin", off).await,
-            None => admin.run_command("admin", off).await,
-        };
+    // Turn every fail point off on every host (each mongos): a fail point
+    // set through a client of several routers is on whichever one served it.
+    let mut names: Vec<String> = fps.into_iter().map(|(_, n)| n).collect();
+    names.sort();
+    names.dedup();
+    if !names.is_empty() {
+        for h in hosts(dep) {
+            if let Ok(d) = Client::connect(&format!("mongodb://{h}/?directConnection=true")).await {
+                for n in &names {
+                    let _ = d.run_command("admin", Document::new().with("configureFailPoint", n.as_str()).with("mode", "off")).await;
+                }
+                d.shutdown().await;
+            }
+        }
     }
     for c in e.clients() {
         c.client.shutdown().await;
