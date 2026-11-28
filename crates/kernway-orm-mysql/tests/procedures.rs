@@ -49,9 +49,10 @@ async fn setup(conn: &mut Conn) {
     }
 }
 
-fn rows(r: &QueryResult) -> &Vec<Vec<Option<String>>> {
+/// The rows as text (the values these tests read are numbers and strings).
+fn rows(r: &QueryResult) -> Vec<Vec<Option<String>>> {
     match r {
-        QueryResult::Rows { rows, .. } => rows,
+        QueryResult::Rows { rows, .. } => rows.iter().map(|row| row.iter().map(|v| v.to_text()).collect()).collect(),
         QueryResult::Ok { .. } => panic!("expected rows, got {r:?}"),
     }
 }
@@ -74,8 +75,8 @@ fn call_returns_every_result_set_then_the_call_status() {
         // Two SELECTs → two result sets, then the OK.
         let r = c.call_results("kwp_two", &[BindValue::Int(21)]).await.unwrap();
         assert_eq!(r.len(), 3, "{r:?}");
-        assert_eq!(rows(&r[0]), &vec![vec![Some("21".to_string())]]);
-        assert_eq!(rows(&r[1]), &vec![vec![Some("42".to_string()), Some("x".to_string())]]);
+        assert_eq!(rows(&r[0]), vec![vec![Some("21".to_string())]]);
+        assert_eq!(rows(&r[1]), vec![vec![Some("42".to_string()), Some("x".to_string())]]);
         assert!(matches!(r[2], QueryResult::Ok { .. }));
         alive(&mut c).await;
 

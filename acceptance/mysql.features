@@ -30,6 +30,8 @@ Types | LONGTEXT / LONGBLOB 0 B – 20 MiB byte-exact, over TLS and plaintext | 
 
 ORM (shared layer) | A transaction abandoned half-way (timeout) commits nothing and never hands an open transaction to the next caller (without the fix MySQL silently committed it) | mysql_conforms
 ORM (shared layer) | Shared conformance suite (CRUD, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL, joins/aggregates, execute_many failure semantics, server cursors, cancelled transactions) | mysql_conforms
+ORM (shared layer) | Raw results keep binary columns as their exact bytes (never a lossy UTF-8 copy), report each column's type and binary flag (Outcome::column_info), show bytes as 0x… text, and take the bytes read back as a parameter | mysql_conforms
+ORM (shared layer) | Text-level API (Conn::query / exec_prepared): typed values with BLOB / BINARY / BIT bytes intact, column types, write-back, over the text and binary protocols | query_results_keep_binary_bytes
 ORM (shared layer) | CRUD repository; DDL from entities; row -> entity decoding | crud_roundtrip, mysql_conforms, value::tests::create_table_is_mysql_flavoured, value::tests::row_roundtrips_into_entity
 ORM (shared layer) | Batch insert with generated keys | batch_insert_select_delete
 ORM (shared layer) | Transactions: commit, rollback on error | transaction_commit_with_row_lock, transaction_rolls_back_on_error

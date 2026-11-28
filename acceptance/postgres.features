@@ -41,6 +41,7 @@ Values | Large binary and text values | postgres_conforms
 Values | Composite types, ranges, geometric and other built-ins | N/A: returned as PostgreSQL's text form (Value::Text), which is exact
 
 ORM (shared layer) | Shared conformance suite (CRUD with identity keys via INSERT … RETURNING, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL, joins / aggregates, execute_many failure semantics, server cursors, cancelled transactions) | postgres_conforms
+ORM (shared layer) | Raw results keep binary columns as their exact bytes (never a lossy UTF-8 copy), report each column's type and binary flag (Outcome::column_info), show bytes as 0x… text, and take the bytes read back as a parameter | postgres_conforms
 ORM (shared layer) | Transactions, row locks (FOR UPDATE) without lost updates, a cancelled transaction never reaches the pool | postgres_conforms
 ORM (shared layer) | Manual transactions on a plain connection; a failed transaction refuses statements and cannot commit (Transaction error, rolled back) | notices_errors_scripts_and_transactions
 

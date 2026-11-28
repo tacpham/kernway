@@ -720,8 +720,9 @@ impl SqlConn for Conn {
             })
             .await?;
         let columns: Vec<String> = r.columns.iter().map(|c| c.name.clone()).collect();
+        let column_info = r.columns.iter().map(column_info).collect();
         let affected_rows = if columns.is_empty() { r.row_count } else { 0 };
-        Ok(Outcome { columns, affected_rows, last_insert_id: None })
+        Ok(Outcome { columns, column_info, affected_rows, last_insert_id: None })
     }
 
     /// The query is executed; its first rows arrive with the execute and are
@@ -831,6 +832,37 @@ impl SqlConn for Conn {
         self.in_tx = false;
         Conn::rollback(self).await
     }
+}
+
+/// A result column's type name, and whether it holds bytes (RAW, LONG RAW, BLOB, BFILE).
+fn column_info(c: &crate::exec::Column) -> kernway_orm_sql::ColumnInfo {
+    let (type_name, binary) = match c.ora_type {
+        1 if c.csfrm == 2 => ("NVARCHAR2", false),
+        1 => ("VARCHAR2", false),
+        2 => ("NUMBER", false),
+        8 => ("LONG", false),
+        12 => ("DATE", false),
+        23 => ("RAW", true),
+        24 => ("LONG RAW", true),
+        96 if c.csfrm == 2 => ("NCHAR", false),
+        96 => ("CHAR", false),
+        100 => ("BINARY_FLOAT", false),
+        101 => ("BINARY_DOUBLE", false),
+        104 => ("ROWID", false),
+        112 if c.csfrm == 2 => ("NCLOB", false),
+        112 => ("CLOB", false),
+        113 => ("BLOB", true),
+        114 => ("BFILE", true),
+        119 => ("JSON", false),
+        180 => ("TIMESTAMP", false),
+        181 => ("TIMESTAMP WITH TIME ZONE", false),
+        182 => ("INTERVAL YEAR TO MONTH", false),
+        183 => ("INTERVAL DAY TO SECOND", false),
+        231 => ("TIMESTAMP WITH LOCAL TIME ZONE", false),
+        252 => ("BOOLEAN", false),
+        _ => ("", false),
+    };
+    kernway_orm_sql::ColumnInfo { name: c.name.clone(), type_name: type_name.to_string(), binary }
 }
 
 #[cfg(test)]

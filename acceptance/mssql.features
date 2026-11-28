@@ -33,6 +33,7 @@ Values | Parameters of every kind: bigint, float, bit, text with quotes, binary,
 Values | varchar in non-Western code pages (932, 936, 949, 950, 1250–1258 …) | GAP: Windows-1252 and UTF-8 collations are decoded; use nvarchar for other scripts
 
 ORM (shared layer) | Shared conformance suite (CRUD with IDENTITY keys via SCOPE_IDENTITY, values, batch, query builder with OFFSET / FETCH, binary and long text, unique violation, transactions, row locks via WITH (UPDLOCK, ROWLOCK) without lost updates, raw SQL, joins / aggregates, execute_many failure semantics, server cursors, cancelled transactions) | sqlserver_conforms
+ORM (shared layer) | Raw results keep binary columns as their exact bytes (never a lossy UTF-8 copy), report each column's type and binary flag (Outcome::column_info), show bytes as 0x… text, and take the bytes read back as a parameter | sqlserver_conforms
 ORM (shared layer) | T-SQL dialect: [quoted] identifiers, @Pn placeholders, IDENTITY, NVARCHAR(450) keys, guarded CREATE TABLE, windows without an ORDER BY | dialect::tests::ddl_and_windows
 
 SQL Server features | Procedures by name: IN / IN OUT / OUT parameters (typed), named arguments, result sets, RETURN status, PRINT output; scalar functions | procedures_scripts_messages_and_errors

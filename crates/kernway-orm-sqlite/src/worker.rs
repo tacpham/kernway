@@ -419,7 +419,7 @@ impl Ctx<'_> {
     }
 
     /// Prepare and bind a statement as a cursor; its id and column names.
-    pub(crate) fn open_cursor(&mut self, sql: &str, params: &[Param]) -> Result<(u64, Vec<String>), OrmError> {
+    pub(crate) fn open_cursor(&mut self, sql: &str, params: &[Param]) -> Result<CursorShape, OrmError> {
         let mut stmt = self.conn.prepare(sql, false).map_err(map_err)?;
         if stmt.column_count() == 0 {
             return Err(OrmError::Query("cursor_open: the statement returns no rows".into()));
@@ -428,8 +428,8 @@ impl Ctx<'_> {
         let (names, decl) = shape(&stmt);
         let id = self.next_cursor;
         self.next_cursor += 1;
-        self.cursors.insert(id, Cursor { stmt, decl });
-        Ok((id, names))
+        self.cursors.insert(id, Cursor { stmt, decl: decl.clone() });
+        Ok((id, names, decl))
     }
 
     /// Step a cursor up to `max` rows; `true` once it is exhausted (it is
@@ -463,6 +463,9 @@ impl Ctx<'_> {
         }
     }
 }
+
+/// An opened cursor: its id, column names and declared column types.
+pub(crate) type CursorShape = (u64, Vec<String>, Vec<Option<String>>);
 
 fn shape(stmt: &Stmt) -> (Vec<String>, Vec<Option<String>>) {
     (0..stmt.column_count()).map(|i| (stmt.column_name(i), stmt.column_decltype(i))).unzip()

@@ -190,6 +190,7 @@ impl SqlConn for Conn {
             Some(Value::Int(i)) => Ok(Param::Int(i)),
             Some(Value::UInt(u)) => Ok(Param::UInt(u)),
             Some(Value::Null) | None => Err(OrmError::Query("INSERT … RETURNING gave no key".into())),
+            Some(Value::Bytes(b)) => Ok(Param::Bytes(b)),
             Some(other) => Ok(Param::Str(other.to_text().unwrap_or_default())),
         }
     }
@@ -202,8 +203,9 @@ impl SqlConn for Conn {
             .run(sql, params, |cols, cells| each(cols.iter().zip(cells).map(|(c, cell)| cell_value(c, cell)).collect()))
             .await?;
         let columns: Vec<String> = stmt.columns.iter().map(|c| c.name.clone()).collect();
+        let column_info = stmt.columns.iter().map(|c| crate::types::column_info(&c.name, c.type_oid)).collect();
         let affected_rows = if columns.is_empty() { done.affected } else { 0 };
-        Ok(Outcome { columns, affected_rows, last_insert_id: None })
+        Ok(Outcome { columns, column_info, affected_rows, last_insert_id: None })
     }
 
     async fn execute_many(&mut self, sql: &str, rows: &[Vec<Param>]) -> Result<u64, OrmError> {

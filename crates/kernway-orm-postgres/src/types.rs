@@ -338,6 +338,40 @@ fn parse_level(c: &[char], pos: &mut usize, elem: u32) -> Option<Value> {
     }
 }
 
+/// A result column's type name and whether it holds bytes (`bytea`).
+pub(crate) fn column_info(name: &str, type_oid: u32) -> kernway_orm_sql::ColumnInfo {
+    let type_name = match type_oid {
+        oid::BOOL => "boolean",
+        oid::BYTEA => "bytea",
+        oid::CHAR => "char",
+        oid::NAME => "name",
+        oid::INT8 => "bigint",
+        oid::INT2 => "smallint",
+        oid::INT4 => "integer",
+        oid::TEXT => "text",
+        oid::OID => "oid",
+        oid::JSON => "json",
+        oid::FLOAT4 => "real",
+        oid::FLOAT8 => "double precision",
+        oid::MONEY => "money",
+        oid::BPCHAR => "character",
+        oid::VARCHAR => "character varying",
+        oid::DATE => "date",
+        oid::TIME => "time without time zone",
+        oid::TIMESTAMP => "timestamp without time zone",
+        oid::TIMESTAMPTZ => "timestamp with time zone",
+        oid::INTERVAL => "interval",
+        oid::TIMETZ => "time with time zone",
+        oid::NUMERIC => "numeric",
+        oid::UUID => "uuid",
+        oid::JSONB => "jsonb",
+        oid::UNKNOWN => "unknown",
+        _ => "",
+    };
+    let type_name = if type_name.is_empty() { format!("oid {type_oid}") } else { type_name.to_string() };
+    kernway_orm_sql::ColumnInfo { name: name.to_string(), type_name, binary: type_oid == oid::BYTEA }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

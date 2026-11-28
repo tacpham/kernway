@@ -213,7 +213,8 @@ impl ValueDe<'_> {
             Value::UInt(u) => Cow::Owned(u.to_string()),
             Value::Float(f) => Cow::Owned(f.to_string()),
             Value::Bool(b) => Cow::Owned(b.to_string()),
-            Value::Bytes(b) => String::from_utf8_lossy(b),
+            // Binary data reads as a string only if it is UTF-8: never a lossy copy.
+            Value::Bytes(b) => Cow::Borrowed(std::str::from_utf8(b).ok()?),
             Value::Null | Value::Rows(_) | Value::Object(_) | Value::Array(_) => return None,
         })
     }

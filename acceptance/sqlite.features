@@ -35,6 +35,7 @@ Types | Parameters: count checked, u64 beyond i64 refused (no silent rounding), 
 Types | Errors: UNIQUE / PRIMARY KEY violations name the column (incl. multi-column keys); foreign key violations; NOT NULL / CHECK as query errors | unique_violations_name_the_column, a_file_database_persists_uses_wal_and_enforces_foreign_keys
 
 ORM (shared layer) | Shared conformance suite (CRUD, values, batch, query builder, binary and long text, unique violation, transactions, row locks, raw SQL, joins/aggregates, execute_many failure semantics, cursors, cancelled transactions) | sqlite_conforms
+ORM (shared layer) | Raw results keep binary columns as their exact bytes (never a lossy UTF-8 copy), report each column's type and binary flag (Outcome::column_info), show bytes as 0x… text, and take the bytes read back as a parameter | sqlite_conforms
 ORM (shared layer) | A transaction abandoned half-way (timeout) commits nothing and never hands an open transaction to the next caller | sqlite_conforms
 ORM (shared layer) | Batch insert with generated keys (one multi-row INSERT) | sqlite_conforms
 ORM (shared layer) | Select builder: INNER / LEFT JOIN, GROUP BY, aggregates, HAVING, ORDER BY, LIMIT / OFFSET (incl. OFFSET without LIMIT) | sqlite_conforms

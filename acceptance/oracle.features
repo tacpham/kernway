@@ -34,6 +34,7 @@ Types | TIMESTAMP WITH TIME ZONE in a named region: local time, offset at that i
 
 ORM (shared layer) | A transaction abandoned half-way (timeout) commits nothing and never hands an open transaction to the next caller | oracle_conforms
 ORM (shared layer) | Shared conformance suite (CRUD, values, batch, query builder, binary, unique violation, transactions, row locks, raw SQL, joins/aggregates, execute_many failure semantics, server cursors, cancelled transactions) | oracle_conforms
+ORM (shared layer) | Raw results keep binary columns as their exact bytes (never a lossy UTF-8 copy), report each column's type and binary flag (Outcome::column_info), show bytes as 0x… text, and take the bytes read back as a parameter | oracle_conforms
 ORM (shared layer) | Select builder: INNER / LEFT JOIN, WHERE on any joined entity, GROUP BY, COUNT/COUNT DISTINCT/SUM/AVG/MIN/MAX, HAVING, ORDER BY, OFFSET/FETCH, counting groups, entity pairs from a join | oracle_conforms
 ORM (shared layer) | Results into any struct / tuple by column name (no entity needed), per-field conversion | oracle_conforms
 

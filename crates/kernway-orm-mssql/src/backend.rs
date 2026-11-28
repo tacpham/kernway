@@ -303,8 +303,9 @@ impl SqlConn for Conn {
         };
         let cols = first.or_else(|| resp.results.first().cloned()).unwrap_or_default();
         let columns: Vec<String> = cols.iter().map(|c| c.name.clone()).collect();
+        let column_info = cols.iter().map(|c| types::column_info(&c.name, &c.ti)).collect();
         let affected_rows = if columns.is_empty() { resp.affected() } else { 0 };
-        Ok(Outcome { columns, affected_rows, last_insert_id: None })
+        Ok(Outcome { columns, column_info, affected_rows, last_insert_id: None })
     }
 
     async fn execute_many(&mut self, sql: &str, rows: &[Vec<Param>]) -> Result<u64, OrmError> {

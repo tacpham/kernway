@@ -302,12 +302,10 @@ impl SqlConn for Conn {
         let mut row = |metas: &[ColMeta], cells: &[Cell<'_>]| each(row_values(metas, cells)?);
         let results = self.run_meta(sql, &binds(params), &mut row, false).await?;
         Ok(match results.into_iter().next() {
-            Some(Fetched::Rows { columns, .. }) => Outcome { columns, ..Outcome::default() },
-            Some(Fetched::Ok { affected_rows, last_insert_id }) => Outcome {
-                columns: Vec::new(),
-                affected_rows,
-                last_insert_id: (last_insert_id != 0).then_some(last_insert_id),
-            },
+            Some(Fetched::Rows { columns, column_info, .. }) => Outcome { columns, column_info, ..Outcome::default() },
+            Some(Fetched::Ok { affected_rows, last_insert_id }) => {
+                Outcome { affected_rows, last_insert_id: (last_insert_id != 0).then_some(last_insert_id), ..Outcome::default() }
+            }
             None => Outcome::default(),
         })
     }

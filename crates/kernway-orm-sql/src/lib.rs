@@ -35,7 +35,7 @@ mod value_de;
 
 pub use db::SqlDb;
 pub use db::DbCursor;
-pub use raw::{CallArg, CallResult, OutKind, Outcome, Rows, ServerCursor, Value};
+pub use raw::{CallArg, CallResult, ColumnInfo, OutKind, Outcome, Rows, ServerCursor, Value};
 
 pub use param::{column_for_field, filter_param, id_to_params, is_auto_pk, is_new_auto_entity, json_to_param, pk_cols, Param};
 pub use query::SqlQueryBuilder;

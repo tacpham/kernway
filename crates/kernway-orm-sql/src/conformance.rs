@@ -131,6 +131,7 @@ pub fn run_all<H: Harness>(h: H) {
         ("batch", batch::<H>),
         ("query_builder", query_builder::<H>),
         ("binary_and_long_text", binary_and_long_text::<H>),
+        ("raw_binary_values", raw_binary_values::<H>),
         ("unique_violation", unique_violation::<H>),
         ("transactions", transactions::<H>),
         ("row_lock_no_lost_update", row_lock_no_lost_update::<H>),
@@ -288,6 +289,48 @@ fn binary_and_long_text<H: Harness>(h: H) {
             assert_eq!(got.thumb, f.thumb);
         }
         assert_eq!(repo.find_all().await.unwrap().len(), 3);
+    });
+}
+
+/// A raw query (the path tools like a database studio take) keeps binary
+/// columns as exact bytes — never a lossy UTF-8 copy — reports which
+/// columns are binary, renders bytes as `0x…` text, and takes the bytes it
+/// read back as a parameter.
+fn raw_binary_values<H: Harness>(h: H) {
+    block(async move {
+        let db = h.connect().await;
+        fresh_table::<File, H>(&h, &db).await;
+        let d = h.dialect();
+        let photo = vec![0x00, 0xFF, 0x10, 0x80, 0x7F];
+        let code = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let saved = db.repository::<File>().save(File { id: 0, body: "text ✓".into(), data: photo.clone(), thumb: Some(code.clone()) }).await.unwrap();
+        let (t, id_, body, data, thumb) = (d.quote_identifier("conf_files"), d.quote_identifier("id"), d.quote_identifier("body"), d.quote_identifier("data"), d.quote_identifier("thumb"));
+        let select = format!("SELECT {id_}, {body}, {data}, {thumb} FROM {t}");
+        let mut rows: Vec<Vec<Value>> = Vec::new();
+        let out = db
+            .query_each(&select, &[], |r| {
+                rows.push(r);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][2], Value::Bytes(photo.clone()), "a binary column is its exact bytes");
+        assert_eq!(rows[0][3], Value::Bytes(code.clone()));
+        assert!(rows[0][2].is_binary() && !rows[0][1].is_binary());
+        assert_eq!(rows[0][1].as_str(), Some("text ✓"));
+        assert_eq!(rows[0][2].to_text().as_deref(), Some("0x00FF10807F"), "binary as text: exact hex, never lossy");
+        // The column types say which columns are bytes.
+        assert_eq!(out.column_info.len(), 4, "{:?}", out.column_info);
+        let binary: Vec<bool> = out.column_info.iter().map(|c| c.binary).collect();
+        assert_eq!(binary, [false, false, true, true], "{:?}", out.column_info);
+        assert!(out.column_info.iter().all(|c| !c.type_name.is_empty()), "{:?}", out.column_info);
+        // The bytes read go back unchanged as a parameter.
+        let read = rows[0][2].as_bytes().unwrap().to_vec();
+        let update = format!("UPDATE {t} SET {thumb} = {} WHERE {id_} = {}", d.placeholder(1), d.placeholder(2));
+        db.execute_with(&update, &[Param::Bytes(read), Param::Int(saved.id)]).await.unwrap();
+        let got = db.repository::<File>().find_by_id(&saved.id).await.unwrap().unwrap();
+        assert_eq!(got.thumb, Some(photo), "bytes read, written back, read again: unchanged");
     });
 }
 

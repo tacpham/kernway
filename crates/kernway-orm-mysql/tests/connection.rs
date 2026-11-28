@@ -99,7 +99,7 @@ impl Relay {
 fn session_status(r: QueryResult) -> String {
     match r {
         // No row: the server has no such status variable (MariaDB lacks some of MySQL's).
-        QueryResult::Rows { rows, .. } => rows.first().and_then(|r| r[1].clone()).unwrap_or_default(),
+        QueryResult::Rows { rows, .. } => rows.first().and_then(|r| r[1].to_text()).unwrap_or_default(),
         QueryResult::Ok { .. } => String::new(),
     }
 }
@@ -352,7 +352,7 @@ fn local_socket_connects_over_the_servers_local_channel() {
 
 fn session_status_first(r: QueryResult) -> String {
     match r {
-        QueryResult::Rows { rows, .. } => rows.first().and_then(|r| r[0].clone()).unwrap_or_default(),
+        QueryResult::Rows { rows, .. } => rows.first().and_then(|r| r[0].to_text()).unwrap_or_default(),
         QueryResult::Ok { .. } => String::new(),
     }
 }
@@ -421,5 +421,46 @@ fn host_names_resolve_without_blocking_and_ip_literals_skip_dns() {
             rt_core::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert_eq!(ticks.get(), 5);
+    });
+}
+
+/// The text-level API keeps binary columns as their exact bytes (a lossy
+/// UTF-8 copy turned 0x00FF10807F into U+FFFD, and a BINARY(4) value read
+/// back was "too long" to write), says which columns are binary, and takes
+/// the bytes back as a parameter — over both the text and binary protocols.
+#[test]
+fn query_results_keep_binary_bytes() {
+    let Some(url) = url() else { return eprintln!("skip: KERNWAY_MYSQL_URL not set") };
+    run(async move {
+        use kernway_orm_mysql::{BindValue, Value};
+        let mut c = Conn::connect(&MysqlConfig::from_url(&url).unwrap()).await.unwrap();
+        c.query("DROP TABLE IF EXISTS kw_binary_cells").await.unwrap();
+        c.query("CREATE TABLE kw_binary_cells (id INT PRIMARY KEY, photo BLOB, code BINARY(4), name VARCHAR(20), bits BIT(8))").await.unwrap();
+        c.query("INSERT INTO kw_binary_cells VALUES (1, 0x00FF10807F, 0xDEADBEEF, 'tên ✓', b'10000001')").await.unwrap();
+        for prepared in [false, true] {
+            let r = if prepared {
+                c.exec_prepared("SELECT id, photo, code, name, bits FROM kw_binary_cells WHERE id = ?", &[BindValue::Int(1)]).await.unwrap()
+            } else {
+                c.query("SELECT id, photo, code, name, bits FROM kw_binary_cells").await.unwrap()
+            };
+            let QueryResult::Rows { columns, column_info, rows } = r else { panic!("expected rows") };
+            assert_eq!(columns, ["id", "photo", "code", "name", "bits"]);
+            let binary: Vec<bool> = column_info.iter().map(|c| c.binary).collect();
+            assert_eq!(binary, [false, true, true, false, true], "{column_info:?}");
+            let types: Vec<&str> = column_info.iter().map(|c| c.type_name.as_str()).collect();
+            assert_eq!(types, ["INT", "BLOB", "BINARY", "VARCHAR", "BIT"], "prepared={prepared}");
+            assert_eq!(rows[0][1], Value::Bytes(vec![0x00, 0xFF, 0x10, 0x80, 0x7F]), "prepared={prepared}");
+            assert_eq!(rows[0][2], Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+            assert_eq!(rows[0][3], Value::Text("tên ✓".into()));
+            assert_eq!(rows[0][4], Value::Bytes(vec![0x81]));
+        }
+        // Read, write back, read again: unchanged (a BINARY(4) value fits again).
+        let QueryResult::Rows { rows, .. } = c.query("SELECT photo, code FROM kw_binary_cells").await.unwrap() else { panic!() };
+        let (photo, code) = (rows[0][0].as_bytes().unwrap().to_vec(), rows[0][1].as_bytes().unwrap().to_vec());
+        c.exec_prepared("INSERT INTO kw_binary_cells (id, photo, code) VALUES (2, ?, ?)", &[BindValue::Bytes(photo.clone()), BindValue::Bytes(code.clone())]).await.unwrap();
+        let QueryResult::Rows { rows, .. } = c.query("SELECT photo, code FROM kw_binary_cells WHERE id = 2").await.unwrap() else { panic!() };
+        assert_eq!(rows[0][0], Value::Bytes(photo));
+        assert_eq!(rows[0][1], Value::Bytes(code));
+        c.query("DROP TABLE kw_binary_cells").await.unwrap();
     });
 }

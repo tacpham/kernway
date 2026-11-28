@@ -108,11 +108,11 @@ fn writes_small_medium_and_large_values_byte_exact() {
                 let (len, md5) = (rows[0][0].clone(), rows[0][1].clone());
                 if n == 0 {
                     // An empty binary value reads back as NULL or "".
-                    assert!(len.as_deref().is_none_or(|l| l == "0"), "{mode}: 0 bytes -> {len:?}");
+                    assert!(len.to_text().as_deref().is_none_or(|l| l == "0"), "{mode}: 0 bytes -> {len:?}");
                     continue;
                 }
-                assert_eq!(len.as_deref(), Some(n.to_string().as_str()), "{mode}: length of {n}");
-                assert_eq!(md5.as_deref(), Some(want_md5.as_str()), "{mode}: content of {n}");
+                assert_eq!(len.to_text().as_deref(), Some(n.to_string().as_str()), "{mode}: length of {n}");
+                assert_eq!(md5.to_text().as_deref(), Some(want_md5.as_str()), "{mode}: content of {n}");
             }
             // The connection is still in step after the largest writes.
             let r = c.query("SELECT 1").await.unwrap();

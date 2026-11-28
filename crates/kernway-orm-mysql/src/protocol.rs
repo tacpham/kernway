@@ -32,6 +32,7 @@
 use kernway_orm_core::error::OrmError;
 pub use kernway_orm_core::decode::Cell;
 use kernway_orm_core::decode::recycle;
+use kernway_orm_sql::{ColumnInfo, Value};
 use kernway_tls::CertCheck;
 use kernway_wire::{BufStream, StmtCache, READ_RETAIN};
 
@@ -270,13 +271,57 @@ pub enum QueryResult {
         /// Auto-increment value generated, or 0.
         last_insert_id: u64,
     },
-    /// A result set: column names and text-encoded rows (`None` = SQL NULL).
+    /// A result set: its columns and typed rows. Binary columns (BINARY,
+    /// VARBINARY, BLOB, BIT, GEOMETRY) come back as [`Value::Bytes`] with
+    /// their exact bytes, text as [`Value::Text`], numbers and dates typed.
     Rows {
         /// Column names in `SELECT` order.
         columns: Vec<String>,
-        /// Each row's values, one `Option<String>` per column.
-        rows: Vec<Vec<Option<String>>>,
+        /// Each column's type, in the same order.
+        column_info: Vec<ColumnInfo>,
+        /// Each row's values, one [`Value`] per column ([`Value::Null`] = SQL NULL).
+        rows: Vec<Vec<Value>>,
     },
+}
+
+/// The type of a MySQL result column.
+pub(crate) fn column_info(m: &ColMeta) -> ColumnInfo {
+    {
+        let binary = m.binary || matches!(m.col_type, 0x10 | 0xff | 0xf2);
+        let type_name = match (m.col_type, binary) {
+            (0x01, _) => "TINYINT",
+            (0x02, _) => "SMALLINT",
+            (0x03, _) => "INT",
+            (0x08, _) => "BIGINT",
+            (0x09, _) => "MEDIUMINT",
+            (0x0d, _) => "YEAR",
+            (0x04, _) => "FLOAT",
+            (0x05, _) => "DOUBLE",
+            (0x00 | 0xf6, _) => "DECIMAL",
+            (0x0a | 0x0e, _) => "DATE",
+            (0x07 | 0x11, _) => "TIMESTAMP",
+            (0x0c | 0x12, _) => "DATETIME",
+            (0x0b | 0x13, _) => "TIME",
+            (0xf5, _) => "JSON",
+            (0x10, _) => "BIT",
+            (0xff, _) => "GEOMETRY",
+            (0xf2, _) => "VECTOR",
+            (0xf7, _) => "ENUM",
+            (0xf8, _) => "SET",
+            (0xf9..=0xfc, true) => "BLOB",
+            (0xf9..=0xfc, false) => "TEXT",
+            (0x0f | 0xfd, true) => "VARBINARY",
+            (0x0f | 0xfd, false) => "VARCHAR",
+            (0xfe, true) => "BINARY",
+            (0xfe, false) => "CHAR",
+            (0x06, _) => "NULL",
+            _ => "UNKNOWN",
+        };
+        // UNSIGNED describes numbers only (MySQL flags BIT columns unsigned too).
+        let numeric = matches!(m.col_type, 0x01 | 0x02 | 0x03 | 0x08 | 0x09 | 0x04 | 0x05 | 0x00 | 0xf6);
+        let type_name = if m.unsigned && numeric { format!("{type_name} UNSIGNED") } else { type_name.to_string() };
+        ColumnInfo { name: m.name.clone(), type_name, binary }
+    }
 }
 
 /// Outcome of a statement whose rows were decoded by a caller-supplied
@@ -294,6 +339,8 @@ pub enum Fetched<R> {
     Rows {
         /// Column names in `SELECT` order.
         columns: Vec<String>,
+        /// Each column's type, in the same order.
+        column_info: Vec<ColumnInfo>,
         /// What the row function returned for each row.
         rows: Vec<R>,
         /// Whether this result set carries a procedure's `OUT` parameter
@@ -312,20 +359,26 @@ impl<R> Fetched<R> {
     }
 }
 
-impl From<Fetched<Vec<Option<String>>>> for QueryResult {
-    fn from(f: Fetched<Vec<Option<String>>>) -> Self {
+impl From<Fetched<Vec<Value>>> for QueryResult {
+    fn from(f: Fetched<Vec<Value>>) -> Self {
         match f {
             Fetched::Ok { affected_rows, last_insert_id } => {
                 QueryResult::Ok { affected_rows, last_insert_id }
             }
-            Fetched::Rows { columns, rows, .. } => QueryResult::Rows { columns, rows },
+            Fetched::Rows { columns, column_info, rows, .. } => QueryResult::Rows { columns, column_info, rows },
         }
     }
 }
 
-/// A row as text cells — the [`QueryResult`] shape.
+/// A row as text cells (the text-row parser of the tests).
+#[cfg(test)]
 fn cells_to_text(cells: &[Cell<'_>]) -> Result<Vec<Option<String>>, OrmError> {
     Ok(cells.iter().map(Cell::to_text).collect())
+}
+
+/// A row as typed values — the [`QueryResult`] shape (binary stays bytes).
+fn cells_to_values(metas: &[ColMeta], cells: &[Cell<'_>]) -> Result<Vec<Value>, OrmError> {
+    Ok(metas.iter().zip(cells).map(|(m, c)| crate::backend::to_value(m, c)).collect())
 }
 
 /// Prepared statements kept per connection. Past this the oldest is closed on
@@ -844,7 +897,9 @@ impl Conn {
 
     /// Run one textual statement (`COM_QUERY`) and collect its result as text.
     pub async fn query(&mut self, sql: &str) -> Result<QueryResult, OrmError> {
-        self.query_with(sql, cells_to_text).await.map(QueryResult::from)
+        let mut row = cells_to_values;
+        let results = self.run_meta(sql, &[], &mut row, false).await?;
+        Ok(QueryResult::from(first_result(results)))
     }
 
     /// Run one textual statement (`COM_QUERY`), handing each result row to `row`
@@ -876,7 +931,7 @@ impl Conn {
         payload.extend_from_slice(sql.as_bytes());
         self.write_packet(&payload).await?;
         let first = self.read_packet().await?;
-        let mut row = |_: &[ColMeta], cells: &[Cell<'_>]| cells_to_text(cells);
+        let mut row = cells_to_values;
         let results = self.read_results(first, false, &mut row, true).await?;
         Ok(results.into_iter().map(QueryResult::from).collect())
     }
@@ -889,7 +944,7 @@ impl Conn {
     /// the typed `SqlConn::call` for them split out).
     pub async fn call_results(&mut self, name: &str, args: &[BindValue]) -> Result<Vec<QueryResult>, OrmError> {
         let sql = call_sql(name, args.len())?;
-        let mut row = |_: &[ColMeta], cells: &[Cell<'_>]| cells_to_text(cells);
+        let mut row = cells_to_values;
         let results = self.exec_prepared_inner(&sql, args, &mut row, true).await?;
         Ok(results.into_iter().map(QueryResult::from).collect())
     }
@@ -1119,7 +1174,7 @@ impl Conn {
         self.release_drained();
         let result = match failed {
             Some(e) => Err(e),
-            None => Ok(Fetched::Rows { columns, rows, out_params }),
+            None => Ok(Fetched::Rows { columns, column_info: metas.iter().map(column_info).collect(), rows, out_params }),
         };
         Ok((result, more))
     }
@@ -1140,9 +1195,9 @@ impl Conn {
         sql: &str,
         params: &[BindValue],
     ) -> Result<QueryResult, OrmError> {
-        self.exec_prepared_with(sql, params, cells_to_text)
-            .await
-            .map(QueryResult::from)
+        let mut row = cells_to_values;
+        let results = self.exec_prepared_inner(sql, params, &mut row, false).await?;
+        Ok(QueryResult::from(first_result(results)))
     }
 
     /// [`exec_prepared`](Self::exec_prepared), handing each result row to `row`
@@ -2480,7 +2535,7 @@ mod tests {
 
     fn one_value(r: QueryResult) -> Option<String> {
         match r {
-            QueryResult::Rows { mut rows, .. } => rows.remove(0).remove(0),
+            QueryResult::Rows { mut rows, .. } => rows.remove(0).remove(0).to_text(),
             QueryResult::Ok { .. } => panic!("expected a row"),
         }
     }
@@ -2536,7 +2591,7 @@ mod tests {
                 QueryResult::Rows { rows, .. } => rows[0][1].clone(),
                 QueryResult::Ok { .. } => panic!("expected a status row"),
             };
-            assert_eq!(closed.as_deref(), Some(extra.to_string().as_str()));
+            assert_eq!(closed.to_text().as_deref(), Some(extra.to_string().as_str()));
             // And an evicted statement still works (it is simply prepared again).
             let r = conn.exec_prepared("SELECT ? + 0", &[BindValue::Int(5)]).await.unwrap();
             assert_eq!(one_value(r).as_deref(), Some("5"));
@@ -2608,7 +2663,7 @@ mod tests {
             match r {
                 QueryResult::Rows { rows, .. } => {
                     assert_eq!(rows.len(), 5000);
-                    assert_eq!(rows[4999][0].as_deref(), Some("5000"));
+                    assert_eq!(rows[4999][0].to_text().as_deref(), Some("5000"));
                 }
                 QueryResult::Ok { .. } => panic!("expected rows"),
             }
@@ -2636,7 +2691,7 @@ mod tests {
     /// `Ssl_cipher` of the session as the server sees it ("" = plaintext).
     async fn server_cipher(conn: &mut Conn) -> String {
         match conn.query("SHOW SESSION STATUS LIKE 'Ssl_cipher'").await.unwrap() {
-            QueryResult::Rows { rows, .. } => rows[0][1].clone().unwrap_or_default(),
+            QueryResult::Rows { rows, .. } => rows[0][1].to_text().unwrap_or_default(),
             QueryResult::Ok { .. } => panic!("expected a status row"),
         }
     }

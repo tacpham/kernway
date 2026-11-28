@@ -190,9 +190,9 @@ impl SqlConn for SqliteConn {
                 ctx.open_cursor(&sql, &params).map(Ok)
             })
             .await?;
-        let (id, columns) = match shape {
+        let (id, columns, decl) = match shape {
             Err((affected_rows, id)) => {
-                return Ok(Outcome { columns: Vec::new(), affected_rows, last_insert_id: (affected_rows > 0).then_some(id as u64) })
+                return Ok(Outcome { affected_rows, last_insert_id: (affected_rows > 0).then_some(id as u64), ..Outcome::default() })
             }
             Ok(c) => c,
         };
@@ -211,7 +211,8 @@ impl SqlConn for SqliteConn {
                 }
             }
             if done {
-                return Ok(Outcome { columns, ..Outcome::default() });
+                let column_info = columns.iter().zip(&decl).map(|(n, d)| column_info(n, d.as_deref())).collect();
+                return Ok(Outcome { columns, column_info, ..Outcome::default() });
             }
         }
     }
@@ -247,7 +248,7 @@ impl SqlConn for SqliteConn {
 
     async fn cursor_open(&mut self, sql: &str, params: &[Param]) -> Result<ServerCursor, OrmError> {
         let (sql, params) = (sql.to_string(), params.to_vec());
-        let (id, columns) = self.run(move |ctx| ctx.open_cursor(&sql, &params)).await?;
+        let (id, columns, _) = self.run(move |ctx| ctx.open_cursor(&sql, &params)).await?;
         Ok(ServerCursor::new(id, columns))
     }
 
@@ -335,4 +336,13 @@ impl SqlConn for SqliteConn {
     fn capabilities() -> DriverCapabilities {
         DriverCapabilities { transactions: true, raw_query: true, full_text_search: true, json_columns: true, migrations: false }
     }
+}
+
+/// A result column's declared type, and whether it holds bytes: a declared
+/// type containing BLOB, per SQLite's affinity rules (an expression has no
+/// declared type; its values say what they are, a blob as `Value::Bytes`).
+fn column_info(name: &str, decl: Option<&str>) -> kernway_orm_sql::ColumnInfo {
+    let type_name = decl.unwrap_or("").to_string();
+    let binary = type_name.to_ascii_uppercase().contains("BLOB");
+    kernway_orm_sql::ColumnInfo { name: name.to_string(), type_name, binary }
 }

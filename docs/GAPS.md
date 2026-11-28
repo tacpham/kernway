@@ -23,19 +23,19 @@ hướng dẫn cuối trang.*
 |---|---:|---:|
 | [HTTP client](#http-client) | 34 | 7 |
 | [Kafka](#kafka) | 33 | 7 |
-| [MariaDB](#mariadb) | 45 | 1 |
+| [MariaDB](#mariadb) | 47 | 1 |
 | [Meilisearch](#meilisearch) | 14 | 3 |
 | [MongoDB](#mongodb) | 66 | 15 |
-| [SQL Server](#mssql) | 29 | 8 |
-| [MySQL](#mysql) | 44 | — |
+| [SQL Server](#mssql) | 30 | 8 |
+| [MySQL](#mysql) | 46 | — |
 | [NATS / JetStream](#nats) | 43 | 7 |
-| [Oracle](#oracle) | 49 | — |
-| [PostgreSQL](#postgres) | 37 | 5 |
+| [Oracle](#oracle) | 50 | — |
+| [PostgreSQL](#postgres) | 38 | 5 |
 | [RabbitMQ](#rabbitmq) | 38 | 8 |
 | [Redis](#redis) | 37 | — |
 | [S3-compatible object storage](#s3) | 20 | 5 |
 | [Web security](#security) | 32 | 3 |
-| [SQLite](#sqlite) | 47 | — |
+| [SQLite](#sqlite) | 48 | — |
 | [SSH and SFTP client](#ssh) | 51 | 10 |
 | [Valkey](#valkey) | 37 | 1 |
 

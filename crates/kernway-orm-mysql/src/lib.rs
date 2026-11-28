@@ -59,7 +59,7 @@ pub use protocol::{BindValue, Cell, Conn, Fetched, MysqlConfig, QueryResult};
 /// The shared SQL types used with this driver: parameters, typed values, results.
 #[cfg(feature = "mysql")]
 pub use kernway_orm_sql::{
-    col, params, Agg, CallArg, CallResult, Cmp, Col, DbCursor, OutKind, Outcome, Param, Rows, Select, ServerCursor, SqlDb, Value,
+    col, params, Agg, CallArg, CallResult, Cmp, Col, ColumnInfo, DbCursor, OutKind, Outcome, Param, Rows, Select, ServerCursor, SqlDb, Value,
 };
 /// The MySQL query builder (the shared SQL query builder over MySQL connections).
 #[cfg(feature = "mysql")]

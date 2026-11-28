@@ -450,6 +450,52 @@ pub fn out_null(k: kernway_orm_sql::OutKind, collation: [u8; 5]) -> Encoded {
     }
 }
 
+/// A result column's type name and whether it holds bytes
+/// (binary / varbinary / image / a CLR UDT).
+pub(crate) fn column_info(name: &str, ti: &TypeInfo) -> kernway_orm_sql::ColumnInfo {
+    use ty::*;
+    let (type_name, binary) = match ti.ty {
+        BIGVARBIN if ti.max_len == 0xFFFF => ("varbinary(max)", true),
+        BIGVARBIN => ("varbinary", true),
+        BIGBINARY => ("binary", true),
+        IMAGE => ("image", true),
+        UDT => ("udt", true),
+        BIGVARCHR if ti.max_len == 0xFFFF => ("varchar(max)", false),
+        BIGVARCHR => ("varchar", false),
+        BIGCHAR => ("char", false),
+        NVARCHAR if ti.max_len == 0xFFFF => ("nvarchar(max)", false),
+        NVARCHAR => ("nvarchar", false),
+        NCHAR => ("nchar", false),
+        TEXT => ("text", false),
+        NTEXT => ("ntext", false),
+        XML => ("xml", false),
+        INT1 => ("tinyint", false),
+        INT2 => ("smallint", false),
+        INT4 => ("int", false),
+        INT8 => ("bigint", false),
+        INTN => (match ti.max_len { 1 => "tinyint", 2 => "smallint", 8 => "bigint", _ => "int" }, false),
+        BIT | BITN => ("bit", false),
+        FLT4 => ("real", false),
+        FLT8 => ("float", false),
+        FLTN => (if ti.max_len == 4 { "real" } else { "float" }, false),
+        MONEY | MONEYN => ("money", false),
+        MONEY4 => ("smallmoney", false),
+        DECIMALN => ("decimal", false),
+        NUMERICN => ("numeric", false),
+        DATETIME | DATETIMN => ("datetime", false),
+        DATETIM4 => ("smalldatetime", false),
+        DATEN => ("date", false),
+        TIMEN => ("time", false),
+        DATETIME2N => ("datetime2", false),
+        DATETIMEOFFSETN => ("datetimeoffset", false),
+        GUID => ("uniqueidentifier", false),
+        SSVARIANT => ("sql_variant", false),
+        NULL => ("null", false),
+        _ => ("", false),
+    };
+    kernway_orm_sql::ColumnInfo { name: name.to_string(), type_name: type_name.to_string(), binary }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
